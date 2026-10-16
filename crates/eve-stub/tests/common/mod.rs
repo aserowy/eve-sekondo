@@ -17,6 +17,17 @@ pub async fn start() -> Fixture {
 }
 
 pub async fn start_with(config: StubConfig) -> Fixture {
+    esi_contract::gate::require_verified_stub();
+    start_unverified_with(config).await
+}
+
+/// Starts the stub without asking whether it was verified: for `tests/contract.rs`, which the
+/// verification itself needs to run on a stub that is not verified yet.
+pub async fn start_unverified() -> Fixture {
+    start_unverified_with(StubConfig::new(CLIENT_ID, CLIENT_SECRET, CONTROL_TOKEN)).await
+}
+
+async fn start_unverified_with(config: StubConfig) -> Fixture {
     let pki = TestPki::generate();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let stub = Stub::start(

@@ -10,6 +10,8 @@ use url::Url;
 const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8443";
 const DEFAULT_SSO_BASE_URL: &str = "https://login.eveonline.com";
 const DEFAULT_ESI_BASE_URL: &str = "https://esi.evetech.net";
+const DEFAULT_POLL_INTERVAL_MINUTES: &str = "20";
+const POLL_INTERVAL_RANGE: std::ops::RangeInclusive<i64> = 1..=1440;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -40,6 +42,10 @@ pub struct Config {
     pub esi_base_url: Url,
     pub token_encryption_key: SecretKey,
     pub static_dir: PathBuf,
+    /// How often each character's orders are polled (1 to 1440 minutes).
+    pub order_poll_interval: time::Duration,
+    /// Appended to the ESI `User-Agent` so CCP can reach the operator.
+    pub esi_contact: Option<String>,
 }
 
 /// 32-byte AES-256 key. Never printed.
@@ -95,6 +101,11 @@ impl Config {
             &or_default("ESI_BASE_URL", DEFAULT_ESI_BASE_URL),
         )?;
 
+        let order_poll_interval = parse_poll_interval(&or_default(
+            "ORDER_POLL_INTERVAL_MINUTES",
+            DEFAULT_POLL_INTERVAL_MINUTES,
+        ))?;
+
         Ok(Self {
             database_url: SecretString::from(database_url),
             bind_addr,
@@ -110,6 +121,10 @@ impl Config {
             static_dir: get("STATIC_DIR")
                 .filter(|v| !v.is_empty())
                 .map_or_else(default_static_dir, PathBuf::from),
+            order_poll_interval,
+            esi_contact: get("ESI_CONTACT")
+                .map(|v| v.trim().to_owned())
+                .filter(|v| !v.is_empty()),
         })
     }
 }
@@ -117,6 +132,18 @@ impl Config {
 /// The vendored assets live next to the crate sources; deployments override with `STATIC_DIR`.
 fn default_static_dir() -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/static"))
+}
+
+fn parse_poll_interval(value: &str) -> Result<time::Duration, ConfigError> {
+    const VAR: &str = "ORDER_POLL_INTERVAL_MINUTES";
+    let minutes: i64 = value
+        .trim()
+        .parse()
+        .map_err(|_| invalid(VAR, "must be a whole number of minutes"))?;
+    if !POLL_INTERVAL_RANGE.contains(&minutes) {
+        return Err(invalid(VAR, "must be between 1 and 1440 minutes"));
+    }
+    Ok(time::Duration::minutes(minutes))
 }
 
 fn https_url(var: &'static str, value: &str) -> Result<Url, ConfigError> {
@@ -281,6 +308,37 @@ mod tests {
     }
 
     #[test]
+    fn poll_interval_defaults_to_twenty_minutes() {
+        let config = Fixture::valid().load().unwrap();
+        assert_eq!(config.order_poll_interval, time::Duration::minutes(20));
+        assert_eq!(config.esi_contact, None);
+    }
+
+    #[test]
+    fn poll_interval_and_contact_are_read() {
+        let config = Fixture::valid()
+            .set("ORDER_POLL_INTERVAL_MINUTES", "1440")
+            .set("ESI_CONTACT", "trader@example.com")
+            .load()
+            .unwrap();
+        assert_eq!(config.order_poll_interval, time::Duration::minutes(1440));
+        assert_eq!(config.esi_contact.as_deref(), Some("trader@example.com"));
+    }
+
+    #[test]
+    fn invalid_poll_interval_names_the_variable() {
+        for value in ["0", "1441", "abc", "-5", "2.5"] {
+            let err = Fixture::valid()
+                .set("ORDER_POLL_INTERVAL_MINUTES", value)
+                .error();
+            assert!(
+                err.contains("ORDER_POLL_INTERVAL_MINUTES"),
+                "{value}: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn missing_certificate_is_rejected() {
         let err = Fixture::valid()
             .set("TLS_CERT_PATH", "/nonexistent/dev.pem")
@@ -332,6 +390,8 @@ mod env_example_tests {
             "ESI_BASE_URL",
             "TOKEN_ENCRYPTION_KEY",
             "STATIC_DIR",
+            "ORDER_POLL_INTERVAL_MINUTES",
+            "ESI_CONTACT",
         ] {
             assert!(vars.contains_key(name), "{name} missing from .env.example");
         }

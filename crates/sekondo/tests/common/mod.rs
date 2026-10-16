@@ -29,6 +29,7 @@ pub struct TestApp {
     pub pki: TestPki,
     pub ca_path: PathBuf,
     pub stub: Option<Stub>,
+    pub state: AppState,
     handle: Handle<SocketAddr>,
     _dir: TempDir,
 }
@@ -83,6 +84,8 @@ pub fn test_config(pki: &TestPki, dir: &TempDir, port: u16, sso_base_url: &str) 
         esi_base_url: Url::parse(sso_base_url).unwrap(),
         token_encryption_key: SecretKey(ENCRYPTION_KEY),
         static_dir: PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/static")),
+        order_poll_interval: time::Duration::minutes(20),
+        esi_contact: Some("tests@example.com".to_owned()),
     }
 }
 
@@ -92,6 +95,7 @@ pub struct AppBuilder {
     clock: Arc<dyn Clock>,
     routes: Router<AppState>,
     with_stub: bool,
+    sse_tick: Option<std::time::Duration>,
 }
 
 impl AppBuilder {
@@ -101,6 +105,7 @@ impl AppBuilder {
             clock: Arc::new(SystemClock),
             routes: Router::new(),
             with_stub: false,
+            sse_tick: None,
         }
     }
 
@@ -111,6 +116,12 @@ impl AppBuilder {
 
     pub fn routes(mut self, routes: Router<AppState>) -> Self {
         self.routes = routes;
+        self
+    }
+
+    /// Shortens the event stream's keep-alive and session re-check interval.
+    pub fn sse_tick(mut self, tick: std::time::Duration) -> Self {
+        self.sse_tick = Some(tick);
         self
     }
 
@@ -125,6 +136,7 @@ impl AppBuilder {
         let dir = TempDir::new().unwrap();
 
         let stub = if self.with_stub {
+            esi_contract::gate::require_verified_stub();
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let config = StubConfig::new(CLIENT_ID, CLIENT_SECRET, CONTROL_TOKEN);
             Some(
@@ -148,9 +160,14 @@ impl AppBuilder {
         let addr = listener.local_addr().unwrap();
         let config = test_config(&pki, &dir, addr.port(), &sso);
         let ca_path = config.tls_extra_ca_path.clone().unwrap();
-        let app = App::new_with(config, self.pool, self.clock, self.routes)
+        let mut options = app::Options::default();
+        if let Some(tick) = self.sse_tick {
+            options.sse_tick = tick;
+        }
+        let app = App::new_with_options(config, self.pool, self.clock, self.routes, options)
             .await
             .unwrap();
+        let state = app.state.clone();
         let handle = Handle::new();
         tokio::spawn(app::serve(app, listener, handle.clone()));
         handle.listening().await;
@@ -162,6 +179,7 @@ impl AppBuilder {
             pki,
             ca_path,
             stub,
+            state,
             handle,
             _dir: dir,
         }
@@ -191,7 +209,11 @@ pub struct ManualClock(std::sync::Mutex<time::OffsetDateTime>);
 
 impl ManualClock {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self(std::sync::Mutex::new(time::OffsetDateTime::now_utc())))
+        // Whole seconds: Postgres keeps microseconds, and tests compare stored times with the clock.
+        let now = time::OffsetDateTime::now_utc();
+        Arc::new(Self(std::sync::Mutex::new(
+            now.replace_nanosecond(0).unwrap(),
+        )))
     }
 
     pub fn advance(&self, by: time::Duration) {
@@ -309,5 +331,213 @@ impl Browser {
         let mut callback = Url::parse(&Self::location(&picked)).unwrap();
         tamper(&mut callback);
         self.get(callback.as_str()).await
+    }
+}
+
+/// An `EsiClient` wired to a running stub, without the rest of the app.
+pub struct EsiHarness {
+    pub stub: eve_stub::Stub,
+    pub client: Arc<sekondo::esi::EsiClient>,
+    pub clock: Arc<ManualClock>,
+    pub config: Config,
+    http: reqwest::Client,
+    _dir: TempDir,
+}
+
+pub async fn esi_harness_with(contact: Option<&str>) -> EsiHarness {
+    let pki = TestPki::generate();
+    let dir = TempDir::new().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let stub = eve_stub::Stub::start(
+        StubConfig::new(CLIENT_ID, CLIENT_SECRET, CONTROL_TOKEN),
+        listener,
+        pki.cert_pem.clone().into_bytes(),
+        pki.key_pem.clone().into_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut config = test_config(&pki, &dir, 8443, &stub.base_url);
+    config.esi_contact = contact.map(str::to_owned);
+    let http = sekondo::tls::http_client(config.tls_extra_ca_path.as_deref()).unwrap();
+    let clock = ManualClock::new();
+    let client = Arc::new(sekondo::esi::EsiClient::new(
+        http.clone(),
+        &config,
+        clock.clone(),
+    ));
+    EsiHarness {
+        stub,
+        client,
+        clock,
+        config,
+        http,
+        _dir: dir,
+    }
+}
+
+pub async fn esi_harness() -> EsiHarness {
+    esi_harness_with(Some("tests@example.com")).await
+}
+
+impl EsiHarness {
+    pub fn token(&self, character_id: i64) -> SecretString {
+        SecretString::from(self.stub.issue_access_token(character_id).unwrap())
+    }
+
+    pub async fn control(&self, path: &str, body: serde_json::Value) -> reqwest::Response {
+        self.http
+            .post(format!("{}/_stub/{path}", self.stub.base_url))
+            .bearer_auth(CONTROL_TOKEN)
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+    }
+}
+
+/// The app's services over a stub and a database, without the HTTP server: for tests of the
+/// background poller.
+pub struct PollEnv {
+    pub stub: eve_stub::Stub,
+    pub pool: PgPool,
+    pub repo: sekondo::repo::Repo,
+    pub clock: Arc<ManualClock>,
+    pub tokens: Arc<sekondo::tokens::TokenService>,
+    pub esi: Arc<sekondo::esi::EsiClient>,
+    pub poller: Arc<sekondo::poller::Poller>,
+    pub events: Arc<sekondo::events::InProcessBus>,
+    sso: Arc<sekondo::sso::SsoClient>,
+    pki: TestPki,
+    http: reqwest::Client,
+    pub interval: time::Duration,
+    _dir: TempDir,
+}
+
+impl PollEnv {
+    pub async fn new(pool: PgPool) -> Self {
+        Self::with_interval(pool, time::Duration::minutes(20)).await
+    }
+
+    pub async fn with_interval(pool: PgPool, interval: time::Duration) -> Self {
+        sekondo::tls::install_crypto_provider();
+        let pki = TestPki::generate();
+        let dir = TempDir::new().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stub = eve_stub::Stub::start(
+            StubConfig::new(CLIENT_ID, CLIENT_SECRET, CONTROL_TOKEN),
+            listener,
+            pki.cert_pem.clone().into_bytes(),
+            pki.key_pem.clone().into_bytes(),
+        )
+        .await
+        .unwrap();
+        let config = test_config(&pki, &dir, 8443, &stub.base_url);
+        let http = sekondo::tls::http_client(config.tls_extra_ca_path.as_deref()).unwrap();
+        let repo = sekondo::repo::Repo::new(
+            pool.clone(),
+            sekondo::crypto::TokenCipher::new(&SecretKey(ENCRYPTION_KEY)),
+        );
+        let clock = ManualClock::new();
+        let sso = Arc::new(sekondo::sso::SsoClient::new(
+            http.clone(),
+            Url::parse(&stub.base_url).unwrap(),
+            CLIENT_ID.to_owned(),
+            SecretString::from(CLIENT_SECRET),
+            std::time::Duration::ZERO,
+        ));
+        let tokens = Arc::new(sekondo::tokens::TokenService::new(
+            repo.clone(),
+            sso.clone(),
+            clock.clone(),
+        ));
+        let esi = Arc::new(sekondo::esi::EsiClient::new(
+            http.clone(),
+            &config,
+            clock.clone(),
+        ));
+        let events = Arc::new(sekondo::events::InProcessBus::new());
+        let poller = Arc::new(sekondo::poller::Poller::new(
+            pool.clone(),
+            tokens.clone(),
+            esi.clone(),
+            events.clone(),
+            clock.clone(),
+            interval,
+        ));
+        Self {
+            stub,
+            pool,
+            repo,
+            clock,
+            tokens,
+            esi,
+            poller,
+            events,
+            sso,
+            pki,
+            http,
+            interval,
+            _dir: dir,
+        }
+    }
+
+    pub async fn control(&self, path: &str, body: serde_json::Value) -> reqwest::Response {
+        self.http
+            .post(format!("{}/_stub/{path}", self.stub.base_url))
+            .bearer_auth(CONTROL_TOKEN)
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+    }
+
+    /// Links a character through the stub's real authorization code flow.
+    pub async fn link(&self, account: uuid::Uuid, character_id: i64) {
+        use secrecy::ExposeSecret;
+        let flow = sekondo::oauth::PendingFlow::new(sekondo::oauth::Intent::Login);
+        let redirect = "https://localhost:9/auth/callback";
+        let sso_url = Url::parse(&self.stub.base_url).unwrap();
+        let mut select = flow.authorize_url(&sso_url, CLIENT_ID, redirect);
+        select.set_path("/v2/oauth/authorize/select");
+        select
+            .query_pairs_mut()
+            .append_pair("character_id", &character_id.to_string());
+        let res = self.pki.client().get(select).send().await.unwrap();
+        let location = Url::parse(res.headers()["location"].to_str().unwrap()).unwrap();
+        let code = location
+            .query_pairs()
+            .find(|(k, _)| k == "code")
+            .unwrap()
+            .1
+            .into_owned();
+        let tokens = self
+            .sso
+            .exchange_code(&code, &flow.code_verifier, redirect)
+            .await
+            .unwrap();
+        let verified = self
+            .sso
+            .validate(tokens.access_token.expose_secret())
+            .await
+            .unwrap();
+        self.repo
+            .upsert_character(
+                account,
+                &sekondo::repo::CharacterUpsert {
+                    character_id,
+                    name: verified.name,
+                    owner_hash: verified.owner_hash,
+                    scopes: verified.scopes,
+                    refresh_token: tokens.refresh_token.unwrap(),
+                    access_token: tokens.access_token,
+                    access_expires_at: verified.expires_at,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    pub async fn new_account(&self) -> uuid::Uuid {
+        self.repo.create_account().await.unwrap()
     }
 }

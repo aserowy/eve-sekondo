@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -12,6 +12,7 @@ use aws_lc_rs::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Serialize;
+use serde_json::{Value, json};
 
 use crate::StubError;
 
@@ -88,6 +89,61 @@ pub struct RefreshRecord {
     pub scopes: Vec<String>,
 }
 
+/// What the stub remembers about an access token it issued, so ESI routes can authorise it.
+pub struct IssuedToken {
+    pub character_id: i64,
+    pub scopes: Vec<String>,
+    pub expires_at: i64,
+}
+
+pub const ESI_EXPIRES_SECONDS: u64 = 1200;
+
+/// The next ESI calls answer with this instead of their normal response.
+#[derive(Clone, Debug)]
+pub struct EsiFailure {
+    /// Only calls to this route fail (`orders`, `names`, `structures`); `None`: any route.
+    pub route: Option<String>,
+    pub remaining: u32,
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+}
+
+/// What an ESI request told the stub about the client.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EsiRequestRecord {
+    pub route: &'static str,
+    pub user_agent: Option<String>,
+    pub compatibility_date: Option<String>,
+}
+
+pub const NAMES: [(i64, &str, &str); 8] = [
+    (34, "inventory_type", "Tritanium"),
+    (35, "inventory_type", "Pyerite"),
+    (36, "inventory_type", "Mexallon"),
+    (10000002, "region", "The Forge"),
+    (10000043, "region", "Domain"),
+    (
+        60003760,
+        "station",
+        "Jita IV - Moon 4 - Caldari Navy Assembly Plant",
+    ),
+    (
+        60008494,
+        "station",
+        "Amarr VIII (Oris) - Emperor Family Academy",
+    ),
+    (
+        60011866,
+        "station",
+        "Dodixie IX - Moon 20 - Federation Navy Assembly Plant",
+    ),
+];
+
+pub const STRUCTURES: [(i64, &str); 2] = [
+    (1000000000001, "Alpha Keepstar"),
+    (1000000000002, "Bravo Fortizar"),
+];
+
 pub struct Inner {
     pub config: StubConfig,
     pub issuer: String,
@@ -97,6 +153,20 @@ pub struct Inner {
     pub fail_next_token: u32,
     pub token_calls: u64,
     pub jwks_calls: u64,
+    pub issued_tokens: HashMap<String, IssuedToken>,
+    /// Fixture orders per character, as ESI's JSON.
+    pub orders: HashMap<i64, Vec<Value>>,
+    /// Seconds ahead that ESI's `Expires` header points.
+    pub esi_expires_secs: u64,
+    /// Calls per ESI route (`orders`), counting every request, failed or not.
+    pub esi_calls: HashMap<&'static str, u64>,
+    /// The IDs of every `/universe/names` request, in order.
+    pub names_requests: Vec<Vec<i64>>,
+    pub esi_requests: Vec<EsiRequestRecord>,
+    pub structures_denied: HashSet<i64>,
+    pub esi_failure: Option<EsiFailure>,
+    /// How long the orders route waits before answering.
+    pub esi_delay_ms: u64,
     /// Applied to every access token the token endpoint issues (tests make them odd on purpose).
     pub token_options: TokenOptions,
     key_generation: u32,
@@ -174,6 +244,15 @@ impl Inner {
             fail_next_token: 0,
             token_calls: 0,
             jwks_calls: 0,
+            issued_tokens: HashMap::new(),
+            orders: default_orders(),
+            esi_expires_secs: ESI_EXPIRES_SECONDS,
+            esi_calls: HashMap::new(),
+            names_requests: Vec::new(),
+            esi_requests: Vec::new(),
+            structures_denied: HashSet::new(),
+            esi_failure: None,
+            esi_delay_ms: 0,
             token_options: TokenOptions::default(),
             key_generation: 0,
             kid: KEY_ID.to_owned(),
@@ -210,7 +289,7 @@ impl Inner {
     /// `scopes` overrides the granted scopes (the ones recorded on the refresh token); otherwise
     /// the character's current ones are used.
     pub fn issue_access_token(
-        &self,
+        &mut self,
         character_id: i64,
         scopes: Option<&[String]>,
     ) -> Option<String> {
@@ -221,7 +300,7 @@ impl Inner {
         self.issue_token(character_id, &options)
     }
 
-    pub fn issue_token(&self, character_id: i64, options: &TokenOptions) -> Option<String> {
+    pub fn issue_token(&mut self, character_id: i64, options: &TokenOptions) -> Option<String> {
         let character = self.character(character_id)?;
         let scopes = options.scopes.as_ref().unwrap_or(&character.scopes);
         // EVE sends a single scope as a string and several as an array.
@@ -232,6 +311,11 @@ impl Inner {
             many => Some(serde_json::json!(many)),
         };
         let now = now_secs() as i64;
+        let expires_at = now
+            + options
+                .expires_in_secs
+                .unwrap_or(ACCESS_TOKEN_SECONDS as i64);
+        let granted = scopes.clone();
         let claims = Claims {
             iss: options.issuer.as_deref().unwrap_or(&self.issuer),
             sub: format!("CHARACTER:EVE:{character_id}"),
@@ -243,10 +327,7 @@ impl Inner {
             name: &character.name,
             owner: &character.owner_hash,
             scp,
-            exp: now
-                + options
-                    .expires_in_secs
-                    .unwrap_or(ACCESS_TOKEN_SECONDS as i64),
+            exp: expires_at,
             iat: now,
             jti: random_token(),
             tenant: "tranquility",
@@ -268,7 +349,16 @@ impl Inner {
                 &mut signature,
             )
             .ok()?;
-        Some(format!("{signing_input}.{}", b64(&signature)))
+        let token = format!("{signing_input}.{}", b64(&signature));
+        self.issued_tokens.insert(
+            token.clone(),
+            IssuedToken {
+                character_id,
+                scopes: granted,
+                expires_at,
+            },
+        );
+        Some(token)
     }
 }
 
@@ -281,5 +371,94 @@ impl Inner {
         self.refresh_tokens.clear();
         self.fail_next_token = 0;
         self.token_options = TokenOptions::default();
+        self.orders = default_orders();
+        self.esi_expires_secs = ESI_EXPIRES_SECONDS;
+        self.esi_calls.clear();
+        self.names_requests.clear();
+        self.esi_requests.clear();
+        self.structures_denied.clear();
+        self.esi_failure = None;
+        self.esi_delay_ms = 0;
     }
+
+    pub fn count_esi_call(&mut self, route: &'static str, headers: &axum::http::HeaderMap) {
+        *self.esi_calls.entry(route).or_default() += 1;
+        let text = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        };
+        self.esi_requests.push(EsiRequestRecord {
+            route,
+            user_agent: text("user-agent"),
+            compatibility_date: text("x-compatibility-date"),
+        });
+    }
+}
+
+fn rfc3339(epoch_secs: i64) -> String {
+    time::OffsetDateTime::from_unix_timestamp(epoch_secs)
+        .expect("timestamp in range")
+        .format(&time::format_description::well_known::Rfc3339)
+        .expect("format")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn order(
+    id: i64,
+    type_id: i64,
+    location_id: i64,
+    buy: bool,
+    price: f64,
+    remain: i64,
+    total: i64,
+    escrow: Option<f64>,
+) -> Value {
+    let mut order = json!({
+        "order_id": id, "type_id": type_id, "region_id": 10000002, "location_id": location_id,
+        "is_corporation": false, "price": price,
+        "volume_remain": remain, "volume_total": total, "range": "station",
+        "issued": rfc3339(now_secs() as i64 - 5 * 86_400), "duration": 90,
+    });
+    // Like ESI: the flag, escrow and min_volume only come with buy orders.
+    if buy {
+        order["is_buy_order"] = json!(true);
+    }
+    if let Some(escrow) = escrow {
+        order["escrow"] = json!(escrow);
+    }
+    if buy {
+        order["min_volume"] = json!(1);
+    }
+    order
+}
+
+/// Alice: two sell orders and a buy order in a structure. Bob: a sell order for the same item in
+/// the same station as one of Alice's. Carol has none.
+fn default_orders() -> HashMap<i64, Vec<Value>> {
+    HashMap::from([
+        (
+            90000001,
+            vec![
+                order(5001, 34, 60003760, false, 1500000.0, 10, 20, None),
+                order(5002, 35, 60003760, false, 950.5, 100, 100, None),
+                order(
+                    5003,
+                    36,
+                    1000000000001,
+                    true,
+                    250000.0,
+                    15,
+                    20,
+                    Some(2500000.0),
+                ),
+            ],
+        ),
+        (
+            90000002,
+            vec![order(6001, 34, 60003760, false, 1600000.0, 5, 5, None)],
+        ),
+        (90000003, vec![]),
+    ])
 }

@@ -1,0 +1,18 @@
+{
+  "fingerprint": "f1ce2da5751649bb41ee3a82e6d3e44f823504b0775263f08b9953fa4ac5948d",
+  "verified_at": "2026-10-16T12:44:41.697260927Z",
+  "variants": [
+    "authorization/callback",
+    "authorization/request",
+    "jwks/rsa-keys",
+    "names/found",
+    "names/unknown-id",
+    "orders/buy-orders",
+    "orders/sell-orders",
+    "structures/forbidden",
+    "structures/found",
+    "token/access-token-claims",
+    "token/authorization-code",
+    "token/refresh"
+  ]
+}

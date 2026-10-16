@@ -8,9 +8,13 @@
   <link rel="stylesheet" href="/static/pico.min.css">
   <link rel="stylesheet" href="/static/app.css">
   <script src="/static/htmx.min.js"></script>
+  <script src="/static/htmx-ext-sse.min.js"></script>
   <script src="/static/app.js"></script>
 </head>
 <body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
+  {% if let Some(nav) = nav %}
+  {% include "nav.html" %}
+  {% endif %}
   <main class="container">
     {% block content %}{% endblock %}
   </main>

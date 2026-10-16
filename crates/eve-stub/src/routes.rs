@@ -1,8 +1,11 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{Duration, SystemTime},
+};
 
 use axum::{
     Form, Json, Router,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -17,7 +20,42 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use url::Url;
 
-use crate::state::{ACCESS_TOKEN_SECONDS, PendingCode, RefreshRecord, Shared, random_token};
+use crate::state::{
+    ACCESS_TOKEN_SECONDS, EsiFailure, Inner, NAMES, PendingCode, RefreshRecord, STRUCTURES, Shared,
+    now_secs, random_token,
+};
+
+macro_rules! method_router {
+    ("GET", $handler:expr) => {
+        get($handler)
+    };
+    ("POST", $handler:expr) => {
+        post($handler)
+    };
+}
+
+/// Declares the routes that stand in for EVE (not the `/_stub/` controls) once, as the router and
+/// as the `ROUTES` list the contract coverage test reads, so the two cannot differ.
+macro_rules! eve_routes {
+    ($(($method:tt, $path:literal, $handler:expr)),* $(,)?) => {
+        /// Every EVE route the stub serves: method and path pattern.
+        pub const ROUTES: &[(&str, &str)] = &[$(($method, $path)),*];
+
+        fn eve_router() -> Router<Shared> {
+            Router::new()$(.route($path, method_router!($method, $handler)))*
+        }
+    };
+}
+
+eve_routes! {
+    ("GET", "/oauth/jwks", jwks),
+    ("GET", "/v2/oauth/authorize", authorize),
+    ("GET", "/v2/oauth/authorize/select", select),
+    ("POST", "/v2/oauth/token", token),
+    ("GET", "/characters/{id}/orders", character_orders),
+    ("POST", "/universe/names", universe_names),
+    ("GET", "/universe/structures/{id}", universe_structure),
+}
 
 pub fn router(shared: Shared) -> Router {
     let controls = Router::new()
@@ -25,6 +63,11 @@ pub fn router(shared: Shared) -> Router {
         .route("/owner-hash", post(owner_hash))
         .route("/scopes", post(scopes))
         .route("/fail-next-token", post(fail_next_token))
+        .route("/orders", post(set_orders))
+        .route("/esi-expires", post(set_esi_expires))
+        .route("/structure-access", post(set_structure_access))
+        .route("/esi-fail-next", post(esi_fail_next))
+        .route("/esi-delay", post(set_esi_delay))
         .route("/stats", get(stats))
         .route("/rotate-key", post(rotate_key))
         .route("/reset", post(reset))
@@ -33,13 +76,7 @@ pub fn router(shared: Shared) -> Router {
             require_control_token,
         ));
 
-    Router::new()
-        .route("/oauth/jwks", get(jwks))
-        .route("/v2/oauth/authorize", get(authorize))
-        .route("/v2/oauth/authorize/select", get(select))
-        .route("/v2/oauth/token", post(token))
-        .nest("/_stub", controls)
-        .with_state(shared)
+    eve_router().nest("/_stub", controls).with_state(shared)
 }
 
 async fn jwks(State(shared): State<Shared>) -> Json<Value> {
@@ -376,7 +413,14 @@ async fn fail_next_token(State(shared): State<Shared>, body: Option<Json<FailBod
 
 async fn stats(State(shared): State<Shared>) -> Json<Value> {
     let inner = shared.lock().unwrap();
-    Json(json!({"token_calls": inner.token_calls, "jwks_calls": inner.jwks_calls}))
+    let calls = |route: &str| inner.esi_calls.get(route).copied().unwrap_or(0);
+    Json(json!({
+        "token_calls": inner.token_calls,
+        "jwks_calls": inner.jwks_calls,
+        "orders_calls": calls("orders"),
+        "names_calls": calls("names"),
+        "structures_calls": calls("structures"),
+    }))
 }
 
 async fn rotate_key(State(shared): State<Shared>) -> StatusCode {
@@ -388,5 +432,250 @@ async fn rotate_key(State(shared): State<Shared>) -> StatusCode {
 
 async fn reset(State(shared): State<Shared>) -> StatusCode {
     shared.lock().unwrap().reset();
+    StatusCode::NO_CONTENT
+}
+
+const ORDERS_SCOPE: &str = "esi-markets.read_character_orders.v1";
+const STRUCTURES_SCOPE: &str = "esi-universe.read_structures.v1";
+
+/// Counts the call and, while a failure is armed, answers it instead of the route.
+fn begin_esi_call(
+    inner: &mut Inner,
+    route: &'static str,
+    request_headers: &HeaderMap,
+) -> Option<Response> {
+    inner.count_esi_call(route, request_headers);
+    let failure = inner.esi_failure.as_mut()?;
+    if failure.route.as_deref().is_some_and(|r| r != route) {
+        return None;
+    }
+    failure.remaining -= 1;
+    let failure = failure.clone();
+    if failure.remaining == 0 {
+        inner.esi_failure = None;
+    }
+    let mut headers = HeaderMap::new();
+    for (name, value) in &failure.headers {
+        if let (Ok(name), Ok(value)) = (
+            header::HeaderName::try_from(name.as_str()),
+            value.parse::<header::HeaderValue>(),
+        ) {
+            headers.insert(name, value);
+        }
+    }
+    let status = StatusCode::from_u16(failure.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    Some((status, headers, "stub: injected ESI failure").into_response())
+}
+
+/// The headers every ESI answer carries: cache expiry and the error and rate limit state.
+fn esi_headers(inner: &Inner) -> HeaderMap {
+    let now = SystemTime::now();
+    let mut headers = HeaderMap::new();
+    let mut put = |name: &'static str, value: String| {
+        headers.insert(name, value.parse().expect("header value"));
+    };
+    put("date", httpdate::fmt_http_date(now));
+    put(
+        "expires",
+        httpdate::fmt_http_date(now + Duration::from_secs(inner.esi_expires_secs)),
+    );
+    put("x-esi-error-limit-remain", "100".to_owned());
+    put("x-esi-error-limit-reset", "60".to_owned());
+    headers
+}
+
+/// An ESI error answer: the date and error-limit headers, and ESI's `{"error": ...}` body.
+fn esi_error(inner: &Inner, status: StatusCode, message: &str) -> Response {
+    let mut headers = esi_headers(inner);
+    headers.remove("expires");
+    (status, headers, Json(json!({"error": message}))).into_response()
+}
+
+/// The stub-issued, unexpired token behind a bearer header.
+#[allow(clippy::result_large_err)] // a test double: the error is a ready-made HTTP response
+fn authorize_bearer(inner: &Inner, headers: &HeaderMap) -> Result<(i64, Vec<String>), Response> {
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or_else(|| StatusCode::UNAUTHORIZED.into_response())?;
+    let issued = inner
+        .issued_tokens
+        .get(token)
+        .filter(|t| t.expires_at > now_secs() as i64)
+        .ok_or_else(|| StatusCode::UNAUTHORIZED.into_response())?;
+    Ok((issued.character_id, issued.scopes.clone()))
+}
+
+async fn character_orders(
+    State(shared): State<Shared>,
+    Path(character_id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    // The lock is released before any waiting.
+    let answer = {
+        let mut inner = shared.lock().unwrap();
+        answer_orders(&mut inner, character_id, &headers)
+    };
+    match answer {
+        Err(response) => response,
+        Ok((response_headers, orders, delay_ms)) => {
+            if delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+            (response_headers, Json(orders)).into_response()
+        }
+    }
+}
+
+#[allow(clippy::result_large_err)] // a test double: the error is a ready-made HTTP response
+fn answer_orders(
+    inner: &mut Inner,
+    character_id: i64,
+    headers: &HeaderMap,
+) -> Result<(HeaderMap, Vec<Value>, u64), Response> {
+    if let Some(response) = begin_esi_call(inner, "orders", headers) {
+        return Err(response);
+    }
+    let (token_character, scopes) = authorize_bearer(inner, headers)?;
+    if token_character != character_id || !scopes.iter().any(|s| s == ORDERS_SCOPE) {
+        return Err(StatusCode::FORBIDDEN.into_response());
+    }
+    let orders = inner.orders.get(&character_id).cloned().unwrap_or_default();
+    Ok((esi_headers(inner), orders, inner.esi_delay_ms))
+}
+
+#[derive(Deserialize)]
+struct OrdersBody {
+    character_id: i64,
+    orders: Vec<Value>,
+}
+
+/// Replaces what ESI returns as a character's orders.
+async fn set_orders(State(shared): State<Shared>, Json(body): Json<OrdersBody>) -> StatusCode {
+    shared
+        .lock()
+        .unwrap()
+        .orders
+        .insert(body.character_id, body.orders);
+    StatusCode::NO_CONTENT
+}
+
+#[derive(Deserialize)]
+struct ExpiresBody {
+    seconds: u64,
+}
+
+async fn set_esi_expires(
+    State(shared): State<Shared>,
+    Json(body): Json<ExpiresBody>,
+) -> StatusCode {
+    shared.lock().unwrap().esi_expires_secs = body.seconds;
+    StatusCode::NO_CONTENT
+}
+
+const MAX_NAMES_PER_REQUEST: usize = 1000;
+
+async fn universe_names(
+    State(shared): State<Shared>,
+    headers: HeaderMap,
+    Json(ids): Json<Vec<i64>>,
+) -> Response {
+    let mut inner = shared.lock().unwrap();
+    if let Some(response) = begin_esi_call(&mut inner, "names", &headers) {
+        return response;
+    }
+    inner.names_requests.push(ids.clone());
+    if ids.is_empty() || ids.len() > MAX_NAMES_PER_REQUEST {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let mut found = Vec::new();
+    for id in &ids {
+        let Some((_, category, name)) = NAMES.iter().find(|(known, _, _)| known == id) else {
+            return (
+                StatusCode::NOT_FOUND,
+                esi_headers(&inner),
+                Json(json!({"error": "Invalid IDs in the request"})),
+            )
+                .into_response();
+        };
+        found.push(json!({"category": category, "id": id, "name": name}));
+    }
+    (esi_headers(&inner), Json(found)).into_response()
+}
+
+async fn universe_structure(
+    State(shared): State<Shared>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let mut inner = shared.lock().unwrap();
+    if let Some(response) = begin_esi_call(&mut inner, "structures", &headers) {
+        return response;
+    }
+    let (_, scopes) = match authorize_bearer(&inner, &headers) {
+        Ok(granted) => granted,
+        Err(response) => return response,
+    };
+    if !scopes.iter().any(|s| s == STRUCTURES_SCOPE) || inner.structures_denied.contains(&id) {
+        return esi_error(&inner, StatusCode::FORBIDDEN, "Forbidden");
+    }
+    let Some((_, name)) = STRUCTURES.iter().find(|(known, _)| *known == id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    (
+        esi_headers(&inner),
+        Json(json!({"name": name, "owner_id": 98000001, "solar_system_id": 30000142, "type_id": 35834})),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct StructureAccessBody {
+    structure_id: i64,
+    allowed: bool,
+}
+
+async fn set_structure_access(
+    State(shared): State<Shared>,
+    Json(body): Json<StructureAccessBody>,
+) -> StatusCode {
+    let mut inner = shared.lock().unwrap();
+    if body.allowed {
+        inner.structures_denied.remove(&body.structure_id);
+    } else {
+        inner.structures_denied.insert(body.structure_id);
+    }
+    StatusCode::NO_CONTENT
+}
+
+#[derive(Deserialize)]
+struct EsiFailBody {
+    route: Option<String>,
+    count: Option<u32>,
+    status: u16,
+    #[serde(default)]
+    headers: HashMap<String, String>,
+}
+
+/// The next `count` ESI calls (any route) answer with `status` and the given headers.
+async fn esi_fail_next(State(shared): State<Shared>, Json(body): Json<EsiFailBody>) -> StatusCode {
+    shared.lock().unwrap().esi_failure = Some(EsiFailure {
+        route: body.route,
+        remaining: body.count.unwrap_or(1).max(1),
+        status: body.status,
+        headers: body.headers.into_iter().collect(),
+    });
+    StatusCode::NO_CONTENT
+}
+
+#[derive(Deserialize)]
+struct DelayBody {
+    millis: u64,
+}
+
+/// Makes the orders route answer slowly, so tests can act while a poll is in flight.
+async fn set_esi_delay(State(shared): State<Shared>, Json(body): Json<DelayBody>) -> StatusCode {
+    shared.lock().unwrap().esi_delay_ms = body.millis;
     StatusCode::NO_CONTENT
 }

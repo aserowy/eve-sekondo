@@ -1,0 +1,11 @@
+<ul class="freshness">
+  {% for f in view.freshness %}
+  <li>
+    <strong>{{ f.name }}</strong>
+    {% if f.stale %}<mark class="badge stale">Stale</mark>{% endif %}
+    {% if f.needs_relogin %}<a href="/auth/add">Log in again</a>{% endif %}
+    {% if f.waiting_for_first_update %}<mark class="badge">Waiting for first update</mark>{% endif %}
+    <small>Last update: {{ f.last_update }} EVE time · Next update: {{ f.next_update }}</small>
+  </li>
+  {% endfor %}
+</ul>

@@ -1,4 +1,4 @@
-import { expect, loginWith, query, test } from '../support/fixtures';
+import { expect, loginWith, openCharacters, query, test } from '../support/fixtures';
 
 async function addCharacter(page: import('@playwright/test').Page, name: string) {
   await page.getByRole('button', { name: 'Add character' }).click();
@@ -8,6 +8,7 @@ async function addCharacter(page: import('@playwright/test').Page, name: string)
 
 test('unlink one of two characters, then the last one', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
+  await openCharacters(page);
   await addCharacter(page, 'Bob Bravo');
   await expect(page.locator('.character')).toHaveCount(2);
 
@@ -36,6 +37,7 @@ test('unlink one of two characters, then the last one', async ({ page }) => {
 
 test('declining the confirmation keeps the character', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
+  await openCharacters(page);
   page.on('dialog', (dialog) => dialog.dismiss());
 
   await page.locator('#character-90000001').getByRole('button', { name: 'Unlink' }).click();

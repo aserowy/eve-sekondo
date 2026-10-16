@@ -114,13 +114,13 @@ async fn a_character_that_needs_relogin_shows_a_badge_and_a_log_in_again_action(
 }
 
 #[sqlx::test]
-async fn the_landing_page_redirects_signed_in_users_to_their_characters(pool: PgPool) {
+async fn the_landing_page_redirects_signed_in_users_to_the_dashboard(pool: PgPool) {
     let e = env(pool).await;
     let browser = e.app.browser();
     e.login_as(&browser, ALICE).await;
     let res = browser.get(&e.app.url("/")).await;
     assert!(res.status().is_redirection());
-    assert_eq!(Browser::location(&res), "/characters");
+    assert_eq!(Browser::location(&res), "/dashboard");
 }
 
 #[sqlx::test]

@@ -149,6 +149,30 @@ pub async fn start(
     Ok(())
 }
 
+/// Idle for too long, or older than the absolute lifetime (all Unix seconds).
+fn lifetime_exceeded(started_at: i64, last_seen: i64, now: i64) -> bool {
+    now - last_seen > IDLE_TIMEOUT.whole_seconds()
+        || now - started_at > ABSOLUTE_LIFETIME.whole_seconds()
+}
+
+/// Whether the stored session still exists, is signed in and is within its lifetime. A read-only
+/// check for long-lived connections: unlike [`enforce_lifetime`] it records no activity.
+pub async fn is_active(store: &PgSessionStore, id: &Id, now: OffsetDateTime) -> bool {
+    let Ok(Some(record)) = store.load(id).await else {
+        return false;
+    };
+    let seconds = |key: &str| record.data.get(key).and_then(serde_json::Value::as_i64);
+    if !record.data.contains_key(crate::account::ACCOUNT_ID) {
+        return false;
+    }
+    match (seconds(STARTED_AT), seconds(LAST_SEEN)) {
+        (Some(started_at), Some(last_seen)) => {
+            !lifetime_exceeded(started_at, last_seen, now.unix_timestamp())
+        }
+        _ => false,
+    }
+}
+
 /// Checked on every request: ends sessions idle for 7 days or older than 30 days, otherwise
 /// records the activity.
 pub async fn enforce_lifetime(
@@ -161,9 +185,7 @@ pub async fn enforce_lifetime(
     let started_at = session.get::<i64>(STARTED_AT).await.ok().flatten();
     let last_seen = session.get::<i64>(LAST_SEEN).await.ok().flatten();
     if let (Some(started_at), Some(last_seen)) = (started_at, last_seen) {
-        if now - last_seen > IDLE_TIMEOUT.whole_seconds()
-            || now - started_at > ABSOLUTE_LIFETIME.whole_seconds()
-        {
+        if lifetime_exceeded(started_at, last_seen, now) {
             let _ = session.flush().await;
         } else {
             let _ = session.insert(LAST_SEEN, now).await;

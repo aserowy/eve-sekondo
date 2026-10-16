@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{% block title %}Orders · Sekondo{% endblock %}
+
+{% block content %}
+<header>
+  <h1>Market orders</h1>
+</header>
+
+<div hx-ext="sse" sse-connect="/events">
+<div id="orders-view">
+  {% include "orders_filter.html" %}
+  <section id="freshness" hx-get="{{ view.freshness_url }}" hx-trigger="sse:orders-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
+    {% include "orders_freshness.html" %}
+  </section>
+  <div id="order-tables" hx-get="{{ view.tables_url }}" hx-trigger="sse:orders-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
+    {% include "orders_tables.html" %}
+  </div>
+</div>
+</div>
+{% endblock %}

@@ -1,0 +1,11 @@
+<nav class="container main-nav" id="main-nav">
+  <ul>
+    <li><strong>Sekondo</strong></li>
+  </ul>
+  <ul>
+    <li><a href="{{ nav.dashboard_href() }}"{% if nav.dashboard_current() %} aria-current="page"{% endif %}>Dashboard</a></li>
+    <li><a href="{{ nav.orders_href() }}"{% if nav.orders_current() %} aria-current="page"{% endif %}>Orders</a></li>
+    <li><a href="{{ nav.characters_href() }}"{% if nav.characters_current() %} aria-current="page"{% endif %}>Characters</a></li>
+    <li><button class="secondary outline" hx-post="/auth/logout">Sign out</button></li>
+  </ul>
+</nav>

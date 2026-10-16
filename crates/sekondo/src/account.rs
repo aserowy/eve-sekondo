@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::session as lifetime;
 
-const ACCOUNT_ID: &str = "account_id";
+pub(crate) const ACCOUNT_ID: &str = "account_id";
 
 /// Signs the session in as `account_id`. Callers rotate the session ID first (`cycle_id`) when a
 /// user signs in.

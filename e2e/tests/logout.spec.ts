@@ -1,7 +1,8 @@
-import { expect, loginWith, query, test } from '../support/fixtures';
+import { expect, loginWith, openCharacters, query, test } from '../support/fixtures';
 
 test('sign out, then log in again with either linked character', async ({ page, browser }) => {
   await loginWith(page, 'Alice Alpha');
+  await openCharacters(page);
   await page.getByRole('button', { name: 'Add character' }).click();
   await page.getByRole('link', { name: 'Bob Bravo' }).click();
   await expect(page.locator('.character')).toHaveCount(2);
@@ -27,6 +28,7 @@ test('sign out, then log in again with either linked character', async ({ page, 
 
   // Log in again with the *other* character: same account, both characters.
   await loginWith(page, 'Bob Bravo');
+  await openCharacters(page);
   await expect(page.locator('.character')).toHaveCount(2);
   await expect(page.locator('#character-90000001')).toContainText('Alice Alpha');
   expect(await query('SELECT id FROM accounts')).toHaveLength(1);

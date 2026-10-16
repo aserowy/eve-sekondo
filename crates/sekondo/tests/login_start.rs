@@ -105,11 +105,11 @@ async fn add_when_signed_in_starts_an_sso_flow(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn login_when_already_signed_in_goes_to_the_characters_page(pool: PgPool) {
+async fn login_when_already_signed_in_goes_to_the_dashboard(pool: PgPool) {
     let app = app(pool).await;
     let browser = app.browser();
     browser.get(&app.url("/test/signin")).await;
     let res = browser.get(&app.url("/auth/login")).await;
     assert!(res.status().is_redirection());
-    assert_eq!(Browser::location(&res), "/characters");
+    assert_eq!(Browser::location(&res), "/dashboard");
 }

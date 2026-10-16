@@ -1,0 +1,143 @@
+mod common;
+
+use common::{AppBuilder, Browser, TestApp};
+use sqlx::PgPool;
+
+const ALICE: i64 = 90000001;
+
+async fn app(pool: PgPool) -> TestApp {
+    AppBuilder::new(pool).with_stub().spawn().await
+}
+
+async fn signed_in(app: &TestApp) -> Browser {
+    let browser = app.browser();
+    browser.sso_round_trip(app, "/auth/login", ALICE).await;
+    browser
+}
+
+async fn page(app: &TestApp, browser: &Browser, path: &str) -> String {
+    let res = browser.get(&app.url(path)).await;
+    assert_eq!(res.status(), 200, "{path}");
+    res.text().await.unwrap()
+}
+
+/// The nav links marked as the current page.
+fn current_links(html: &str) -> Vec<String> {
+    html.split("<a ")
+        .skip(1)
+        .filter_map(|tag| tag.split_once('>'))
+        .filter(|(attrs, _)| attrs.contains(r#"aria-current="page""#))
+        .map(|(_, rest)| rest.split('<').next().unwrap().trim().to_owned())
+        .collect()
+}
+
+#[sqlx::test]
+async fn a_signed_in_user_requesting_the_root_is_sent_to_the_dashboard(pool: PgPool) {
+    let app = app(pool).await;
+    let browser = signed_in(&app).await;
+
+    let res = browser.get(&app.url("/")).await;
+
+    assert!(res.status().is_redirection());
+    assert_eq!(Browser::location(&res), "/dashboard");
+}
+
+#[sqlx::test]
+async fn the_stub_dashboard_says_it_is_coming_and_links_to_the_orders(pool: PgPool) {
+    let app = app(pool).await;
+    let browser = signed_in(&app).await;
+
+    let html = page(&app, &browser, "/dashboard").await;
+
+    assert!(html.to_lowercase().contains("coming"), "{html}");
+    assert!(html.contains(r#"href="/orders""#));
+}
+
+#[sqlx::test]
+async fn an_unauthenticated_request_for_the_dashboard_goes_to_the_landing_page(pool: PgPool) {
+    let app = app(pool).await;
+
+    let res = app.browser().get(&app.url("/dashboard")).await;
+
+    assert!(res.status().is_redirection());
+    assert_eq!(Browser::location(&res), "/");
+}
+
+#[sqlx::test]
+async fn every_signed_in_page_has_the_navigation_with_its_own_entry_marked(pool: PgPool) {
+    let app = app(pool).await;
+    let browser = signed_in(&app).await;
+
+    for (path, current) in [("/dashboard", "Dashboard"), ("/characters", "Characters")] {
+        let html = page(&app, &browser, path).await;
+        for link in ["/dashboard", "/orders", "/characters"] {
+            assert!(
+                html.contains(&format!(r#"href="{link}""#)),
+                "{path} lacks {link}"
+            );
+        }
+        assert!(html.contains("Sign out"), "{path} lacks sign out");
+        assert_eq!(current_links(&html), vec![current.to_owned()], "{path}");
+    }
+}
+
+#[sqlx::test]
+async fn the_landing_page_has_no_signed_in_navigation(pool: PgPool) {
+    let app = app(pool).await;
+
+    let html = page(&app, &app.browser(), "/").await;
+
+    assert!(!html.contains("Sign out"));
+    assert!(!html.contains(r#"href="/orders""#));
+    assert!(!html.contains(r#"href="/dashboard""#));
+}
+
+const BOB: i64 = 90000002;
+const CAROL: i64 = 90000003;
+
+/// Alice's account with Bob added to it.
+async fn two_characters(app: &TestApp) -> Browser {
+    let browser = signed_in(app).await;
+    browser.sso_round_trip(app, "/auth/add", BOB).await;
+    browser
+}
+
+fn unescaped(html: &str) -> String {
+    html.replace("&#38;", "&").replace("&amp;", "&")
+}
+
+#[sqlx::test]
+async fn navigation_links_carry_a_narrowed_selection(pool: PgPool) {
+    let app = app(pool).await;
+    let browser = two_characters(&app).await;
+
+    for path in [
+        format!("/dashboard?chars={BOB}"),
+        format!("/characters?chars={BOB}"),
+        format!("/orders?chars={BOB}"),
+    ] {
+        let html = unescaped(&page(&app, &browser, &path).await);
+        for link in ["/dashboard", "/orders", "/characters"] {
+            assert!(
+                html.contains(&format!(r#"href="{link}?chars={BOB}""#)),
+                "{path}: {link} lacks the selection"
+            );
+        }
+    }
+}
+
+#[sqlx::test]
+async fn navigation_links_stay_plain_without_a_filter_or_with_every_character(pool: PgPool) {
+    let app = app(pool).await;
+    let browser = two_characters(&app).await;
+
+    for path in [
+        "/dashboard".to_owned(),
+        format!("/dashboard?chars={ALICE},{BOB}"),
+        format!("/dashboard?chars={CAROL}"),
+    ] {
+        let html = page(&app, &browser, &path).await;
+        assert!(html.contains(r#"href="/orders""#), "{path}");
+        assert!(!html.contains("chars="), "{path}");
+    }
+}

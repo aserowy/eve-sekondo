@@ -11,7 +11,8 @@ use std::{net::SocketAddr, net::TcpListener, sync::Arc};
 
 use axum_server::{Handle, tls_rustls::RustlsConfig};
 
-pub use state::{Character, StubConfig, TokenOptions, default_characters};
+pub use routes::ROUTES;
+pub use state::{Character, EsiRequestRecord, StubConfig, TokenOptions, default_characters};
 use state::{Inner, Shared};
 
 #[derive(Debug, thiserror::Error)]
@@ -116,6 +117,27 @@ impl Stub {
             .unwrap()
             .rotate_key()
             .expect("key generation");
+    }
+
+    /// How many requests an ESI route (`orders`, `names`, `structures`) received.
+    pub fn esi_calls(&self, route: &str) -> u64 {
+        self.shared
+            .lock()
+            .unwrap()
+            .esi_calls
+            .get(route)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// What every ESI request so far said about the client (`User-Agent`, compatibility date).
+    pub fn esi_requests(&self) -> Vec<EsiRequestRecord> {
+        self.shared.lock().unwrap().esi_requests.clone()
+    }
+
+    /// The IDs of every `/universe/names` request so far.
+    pub fn names_requests(&self) -> Vec<Vec<i64>> {
+        self.shared.lock().unwrap().names_requests.clone()
     }
 
     /// How many times `/v2/oauth/token` was called (including failed calls).

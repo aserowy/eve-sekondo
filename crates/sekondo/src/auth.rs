@@ -43,10 +43,10 @@ async fn start_flow(state: &AppState, session: &Session, intent: Intent) -> Resp
     Redirect::to(url.as_str()).into_response()
 }
 
-/// Starts the SSO flow for a login. Signed-in users go straight to their characters.
+/// Starts the SSO flow for a login. Signed-in users go straight to the dashboard.
 pub async fn login(State(state): State<AppState>, session: Session) -> Response {
     if account::current_account_id(&session).await.is_some() {
-        return Redirect::to("/characters").into_response();
+        return Redirect::to("/dashboard").into_response();
     }
     start_flow(&state, &session, Intent::Login).await
 }
@@ -285,6 +285,8 @@ async fn complete_login(
         session.cycle_id().await?;
         csrf::reset(session).await?;
         account::sign_in(session, account_id, state.clock.now()).await?;
+        // Signing in lands on the home page; adding a character returns to the characters page.
+        return Ok(Redirect::to("/dashboard").into_response());
     }
     Ok(Redirect::to("/characters").into_response())
 }

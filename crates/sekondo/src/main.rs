@@ -32,7 +32,11 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     let listener = std::net::TcpListener::bind(config.bind_addr)?;
     let app = App::connect(config).await?;
     tracing::info!("listening on https://{}", listener.local_addr()?);
-    app::serve(app, listener, Handle::new()).await?;
+    // Started here and not in `App::new`, so tests opt in to background polling.
+    let scheduler = app.state.poller.clone().spawn_scheduler();
+    let result = app::serve(app, listener, Handle::new()).await;
+    scheduler.abort();
+    result?;
     Ok(())
 }
 

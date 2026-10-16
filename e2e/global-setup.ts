@@ -54,7 +54,18 @@ export default async function globalSetup() {
   const password = process.env.POSTGRES_PASSWORD;
   if (!password) throw new Error('POSTGRES_PASSWORD is not set (see .env.example)');
 
-  // The test-hooks feature adds POST /_test/refresh/{id}; only this e2e build has it.
+  // The stub must be the one that was verified against real EVE; fails before anything is built or started.
+  try {
+    execFileSync('cargo', ['run', '--quiet', '-p', 'esi-contract', '--bin', 'stub-fingerprint', '--', '--check'], {
+      cwd: root,
+      stdio: ['ignore', 'inherit', 'pipe'],
+    });
+  } catch (e) {
+    const stderr = (e as { stderr?: Buffer }).stderr?.toString().trim();
+    throw new Error(stderr || 'the stub could not be checked against its verification record');
+  }
+
+  // The test-hooks feature adds POST /_test/refresh/{id} and /_test/poll/{id}; only this e2e build has it.
   execFileSync('cargo', ['build', '-p', 'sekondo', '-p', 'eve-stub', '--features', 'sekondo/test-hooks'], { cwd: root, stdio: 'inherit' });
   await recreateE2eDatabase(user, password);
 
@@ -96,6 +107,8 @@ export default async function globalSetup() {
     EVE_SSO_BASE_URL: STUB_URL,
     ESI_BASE_URL: STUB_URL,
     TOKEN_ENCRYPTION_KEY,
+    // The background scheduler stays out of the way; tests poll through the test hook.
+    ORDER_POLL_INTERVAL_MINUTES: '1440',
   });
 
   try {

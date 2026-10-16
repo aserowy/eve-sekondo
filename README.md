@@ -1,7 +1,9 @@
 # eve-sekondo
 
-Sekondo ("second", as in corner man) is a personal helper for EVE Online. This first version lets you
-sign in with EVE SSO, link several characters to one account, and keeps their ESI credentials valid.
+Sekondo ("second", as in corner man) is a personal helper for EVE Online. You sign in with EVE SSO, link
+several characters to one account, and Sekondo keeps their ESI credentials valid and their market orders
+current: one page lists every active sell and buy order of your characters (or a selection of them),
+refreshing on its own when new data arrives.
 
 Everything speaks **HTTPS only**, including on `localhost`, and the app connects to its database over
 TLS with full certificate and hostname verification. There is no switch to turn any of that off.
@@ -50,7 +52,35 @@ Then edit `.env`:
   The app refuses to start with anything weaker. Inside Compose the app uses `db:5432` instead; Compose
   sets that itself.
 
+- `ORDER_POLL_INTERVAL_MINUTES` (optional, default 20, whole minutes from 1 to 1440): how often each
+  character's orders are polled. Any other value refuses to start.
+- `ESI_CONTACT` (optional): an email address or EVE character name. It is appended to the `User-Agent`
+  of every ESI request (`Sekondo/<version> (+<PUBLIC_BASE_URL>; <contact>)`), so CCP can reach you if
+  your installation misbehaves.
+
 Startup errors name the setting that is missing or invalid.
+
+## What the poller does
+
+The app polls ESI in the background, with nobody signed in, for every linked character that does not
+need a re-login:
+
+- Each character is polled at most once per `ORDER_POLL_INTERVAL_MINUTES`, never before the cache expiry
+  (`Expires`) ESI reported for its previous answer, and polls are spread across the interval. A
+  character that was just linked gets its first poll at a stable offset inside the next interval.
+- A poll replaces the character's current orders with exactly what ESI returned and appends one row per
+  order to the TimescaleDB hypertable `order_snapshots`, so history accumulates from the first poll. It is
+  kept uncompressed and without a retention limit; views never read it. Unlinking a character deletes its
+  snapshots.
+- The poller follows ESI's rules: it backs off when the error limit runs low or ESI answers 420, and
+  pauses a rate-limited route group until `Retry-After` has passed. Failures are recorded, leave the
+  current orders alone and are retried with a growing delay, never longer than the interval.
+- Item, region, station and structure names are looked up through ESI once and cached in the database.
+  A structure ESI will not describe shows as "Unknown structure (id)" and is tried again after a day.
+
+The orders page (`/orders`) takes `?chars=<id>,<id>` to select characters and `sort`/`dir` (sell table)
+and `bsort`/`bdir` (buy table) for the sorting; the URL can be bookmarked. Open pages are told about new
+data over a server-sent event stream (`/events`) and re-fetch the affected tables themselves.
 
 ## 4. Run with Compose
 
@@ -93,9 +123,19 @@ They never touch the app's own database: `#[sqlx::test]` creates and drops a thr
 and the Playwright setup recreates a dedicated `sekondo_e2e` database.
 
 ```sh
-cargo test --workspace                        # unit and integration tests
-cd e2e && npm install && npx playwright test  # browser tests
+cargo test --workspace --features sekondo/test-hooks   # unit and integration tests
+cd e2e && npm install && npx playwright test           # browser tests
 ```
+
+The `test-hooks` feature adds `POST /_test/refresh/{id}` and `POST /_test/poll/{id}` (a signed-in
+account's own characters only; CSRF-protected like any other POST). The first forces a token refresh, the
+second runs one order poll right away, ignoring the schedule but not ESI's limits, so browser tests do not
+have to wait for the scheduler. Both are compiled out of everything else. The Playwright setup builds with
+the feature and sets `ORDER_POLL_INTERVAL_MINUTES=1440` so the background scheduler stays out of the way.
+Without the feature, `cargo test` skips the tests of the hooks.
+
+Playwright needs port 8443 for its own app instance, so stop the Compose `app` container first
+(`podman-compose stop app`); the database must keep running.
 
 Rust tests start the app and a stand-in EVE SSO (`crates/eve-stub`) in-process with per-run certificates.
 The Playwright suite builds and starts both with the mkcert certificates and pins Chromium to that one
@@ -103,6 +143,37 @@ certificate's SPKI hash; it never turns certificate checks off.
 
 `@playwright/test` in `e2e/package.json` is pinned to the same version as nixpkgs' `playwright-driver`
 (the browsers in `PLAYWRIGHT_BROWSERS_PATH`). Bump both together.
+
+### The stub must be verified against real EVE
+
+Every test that talks to "EVE" talks to `eve-stub`, so a green run only means something if the stub behaves
+like real SSO and ESI. `crates/esi-contract` holds one contract per call the app makes (status, the headers
+the app reads, the JSON fields and which may be missing). The stub's answers are checked against them in
+`cargo test -p eve-stub --test contract`, and `esi-verify` checks the real services' answers against the
+same contracts.
+
+A fingerprint of the stub's source and the contracts is committed in
+`crates/esi-contract/verified-stub.json`. **If the stub or a contract changes, every stub-backed test
+(Rust and Playwright) fails** with "the stub changed since it was last verified against real EVE" until you:
+
+```
+cargo run -p esi-verify      # logs in on real EVE in your browser, then checks every call
+git add crates/esi-contract/verified-stub.json
+```
+
+Preconditions of `esi-verify`:
+
+- A dedicated **verification character** with at least one sell order and one buy order. It needs a browser
+  and a person, so it cannot run headless.
+- `ESI_VERIFY_STRUCTURE_ID` (a structure the character can open; any public one from
+  `GET https://esi.evetech.net/universe/structures/?filter=market` works) and
+  `ESI_VERIFY_FORBIDDEN_STRUCTURE_ID` (one it cannot, an unknown ID answers 403 too) in `.env`, plus
+  `PUBLIC_BASE_URL`, `TLS_CERT_PATH` and `TLS_KEY_PATH` as in `.env.example`.
+- The Compose `app` container stopped (`podman-compose stop app`): the login callback uses port 8443.
+- `EVE_SSO_BASE_URL` and `ESI_BASE_URL` at their real defaults; it refuses to run against a stand-in.
+
+Tokens only live in memory during the run; nothing but the fingerprint, the time and the verified variant
+names is written. `cargo run -p eve-stub` for local development is not gated.
 
 ## Running against the stand-in instead of EVE
 
@@ -116,7 +187,27 @@ cargo run -p eve-stub -- --cert certs/dev.pem --key certs/dev-key.pem --listen 1
 cargo run -p sekondo
 ```
 
-The stub's login page lists fake characters, like EVE's character picker.
+Also set `ESI_BASE_URL=https://localhost:9443` to let the stub stand in for ESI as well. The stub's login
+page lists fake characters, like EVE's character picker. Alice, Bob and Carol come with fixture orders
+(Alice: two sell orders and a buy order in a structure; Bob: a sell order; Carol: none). The poller picks
+them up after the first interval.
+
+Control endpoints under `/_stub/` (POST with JSON and `Authorization: Bearer <control token>`; `reset`
+restores everything) change how the stub behaves:
+
+| Endpoint | Body | Effect |
+|---|---|---|
+| `orders` | `{"character_id", "orders": [...]}` | replaces the orders ESI returns for a character |
+| `esi-expires` | `{"seconds"}` | how far ahead the `Expires` header points (default 1200) |
+| `structure-access` | `{"structure_id", "allowed"}` | allows or refuses (403) a structure lookup |
+| `esi-fail-next` | `{"status", "count"?, "route"?, "headers"?}` | the next calls (of one route, or any) answer 5xx, 420 or 429 with the given headers |
+| `esi-delay` | `{"millis"}` | the orders route answers slowly |
+| `revoke`, `scopes`, `owner-hash`, `fail-next-token`, `rotate-key` | | SSO behaviour, see `crates/eve-stub` |
+| `stats` | (GET) | call counters per route |
+
+ESI routes served: `GET /characters/{id}/orders` (needs a stub-issued token of that character with the
+orders scope), `POST /universe/names` (a fixture table; one unknown ID fails the whole request with 404)
+and `GET /universe/structures/{id}` (needs the structures scope).
 
 ## Database queries
 
@@ -130,7 +221,9 @@ with `SQLX_OFFLINE=true`, so a stale or missing cache fails the image build. CI 
 | Path | What |
 |---|---|
 | `crates/sekondo` | the app: library with all logic, thin `main.rs`, migrations, templates, static files |
-| `crates/eve-stub` | a stand-in for EVE SSO (and later ESI) for tests and local development |
+| `crates/eve-stub` | a stand-in for EVE SSO and the ESI routes the app uses, for tests and local development |
+| `crates/esi-contract` | contracts for the calls to ESI and SSO, the stub fingerprint and the gate |
+| `crates/esi-verify` | `cargo run -p esi-verify`: verifies the contracts against real EVE |
 | `e2e/` | Playwright tests |
 | `docker/` | database and app container support files |
 | `openspec/` | specs, designs and tasks |

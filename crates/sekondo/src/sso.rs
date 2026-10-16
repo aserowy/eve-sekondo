@@ -291,8 +291,22 @@ struct TokenResponse {
     refresh_token: Option<String>,
 }
 
+/// Reads the body of a successful token answer.
+pub fn decode_token_body(body: &str) -> Result<TokenSet, ExchangeError> {
+    let body: TokenResponse =
+        serde_json::from_str(body).map_err(|e| ExchangeError::Unavailable(e.to_string()))?;
+    Ok(TokenSet {
+        access_token: SecretString::from(body.access_token),
+        refresh_token: body.refresh_token.map(SecretString::from),
+    })
+}
+
 impl SsoClient {
-    async fn token_request(&self, form: &[(&str, &str)]) -> Result<TokenSet, ExchangeError> {
+    /// Sends a token request and returns the answer as it came, before it is interpreted.
+    async fn send_token_request(
+        &self,
+        form: &[(&str, &str)],
+    ) -> Result<reqwest::Response, ExchangeError> {
         use secrecy::ExposeSecret;
         let url = self
             .base_url
@@ -301,8 +315,7 @@ impl SsoClient {
         let body = url::form_urlencoded::Serializer::new(String::new())
             .extend_pairs(form)
             .finish();
-        let res = self
-            .http
+        self.http
             .post(url)
             .basic_auth(&self.client_id, Some(self.client_secret.expose_secret()))
             .header(
@@ -312,7 +325,11 @@ impl SsoClient {
             .body(body)
             .send()
             .await
-            .map_err(|e| ExchangeError::Unavailable(e.to_string()))?;
+            .map_err(|e| ExchangeError::Unavailable(e.to_string()))
+    }
+
+    async fn token_request(&self, form: &[(&str, &str)]) -> Result<TokenSet, ExchangeError> {
+        let res = self.send_token_request(form).await?;
         let status = res.status();
         if matches!(status.as_u16(), 400 | 401) {
             return Err(ExchangeError::Rejected(status));
@@ -320,14 +337,32 @@ impl SsoClient {
         if !status.is_success() {
             return Err(ExchangeError::Unavailable(format!("HTTP {status}")));
         }
-        let body: TokenResponse = res
-            .json()
+        let body = res
+            .text()
             .await
             .map_err(|e| ExchangeError::Unavailable(e.to_string()))?;
-        Ok(TokenSet {
-            access_token: SecretString::from(body.access_token),
-            refresh_token: body.refresh_token.map(SecretString::from),
-        })
+        decode_token_body(&body)
+    }
+
+    /// The code exchange's answer as it came, for checking it against a contract.
+    pub async fn exchange_code_response(
+        &self,
+        code: &str,
+        code_verifier: &str,
+        redirect_uri: &str,
+    ) -> Result<reqwest::Response, ExchangeError> {
+        self.send_token_request(&code_exchange_form(code, code_verifier, redirect_uri))
+            .await
+    }
+
+    /// The refresh's answer as it came, for checking it against a contract.
+    pub async fn refresh_response(
+        &self,
+        refresh_token: &SecretString,
+    ) -> Result<reqwest::Response, ExchangeError> {
+        use secrecy::ExposeSecret;
+        self.send_token_request(&refresh_form(refresh_token.expose_secret()))
+            .await
     }
 
     pub async fn exchange_code(
@@ -336,21 +371,33 @@ impl SsoClient {
         code_verifier: &str,
         redirect_uri: &str,
     ) -> Result<TokenSet, ExchangeError> {
-        self.token_request(&[
-            ("grant_type", "authorization_code"),
-            ("code", code),
-            ("code_verifier", code_verifier),
-            ("redirect_uri", redirect_uri),
-        ])
-        .await
+        self.token_request(&code_exchange_form(code, code_verifier, redirect_uri))
+            .await
     }
 
     pub async fn refresh(&self, refresh_token: &SecretString) -> Result<TokenSet, ExchangeError> {
         use secrecy::ExposeSecret;
-        self.token_request(&[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token.expose_secret()),
-        ])
-        .await
+        self.token_request(&refresh_form(refresh_token.expose_secret()))
+            .await
     }
+}
+
+fn code_exchange_form<'a>(
+    code: &'a str,
+    code_verifier: &'a str,
+    redirect_uri: &'a str,
+) -> [(&'static str, &'a str); 4] {
+    [
+        ("grant_type", "authorization_code"),
+        ("code", code),
+        ("code_verifier", code_verifier),
+        ("redirect_uri", redirect_uri),
+    ]
+}
+
+fn refresh_form(refresh_token: &str) -> [(&'static str, &str); 2] {
+    [
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+    ]
 }

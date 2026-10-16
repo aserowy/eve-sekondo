@@ -666,6 +666,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "esi-contract"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "http",
+ "httpdate",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "time",
+]
+
+[[package]]
+name = "esi-verify"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "axum-server",
+ "dotenvy",
+ "esi-contract",
+ "eve-stub",
+ "http",
+ "reqwest",
+ "secrecy",
+ "sekondo",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "time",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "etcetera"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -683,6 +718,9 @@ dependencies = [
  "axum",
  "axum-server",
  "base64 0.23.1",
+ "esi-contract",
+ "http",
+ "httpdate",
  "jsonwebtoken",
  "rand 0.10.3",
  "rcgen",
@@ -693,6 +731,7 @@ dependencies = [
  "sha2 0.11.1",
  "tempfile",
  "thiserror",
+ "time",
  "tokio",
  "url",
 ]
@@ -2076,7 +2115,11 @@ dependencies = [
  "axum-server",
  "base64 0.22.1",
  "dotenvy",
+ "esi-contract",
  "eve-stub",
+ "futures-util",
+ "http",
+ "httpdate",
  "jsonwebtoken",
  "rand 0.10.3",
  "rcgen",

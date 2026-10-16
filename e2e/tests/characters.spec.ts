@@ -1,7 +1,8 @@
-import { expect, loginWith, test } from '../support/fixtures';
+import { expect, loginWith, openCharacters, test } from '../support/fixtures';
 
 test('log in through the stub picker, then add a second character', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
+  await openCharacters(page);
 
   await expect(page.getByRole('heading', { name: 'Your characters' })).toBeVisible();
   const alice = page.locator('#character-90000001');
@@ -21,10 +22,10 @@ test('log in through the stub picker, then add a second character', async ({ pag
   await expect(page.locator('#character-90000002')).toContainText('Bob Bravo');
 });
 
-test('the landing page sends signed-in users to their characters', async ({ page }) => {
+test('the landing page sends signed-in users to the dashboard', async ({ page }) => {
   await loginWith(page, 'Carol Charlie');
   await page.goto('/');
-  await expect(page).toHaveURL(/\/characters$/);
+  await expect(page).toHaveURL(/\/dashboard$/);
 });
 
 test('an anonymous visit to the characters page lands on the login page', async ({ page }) => {

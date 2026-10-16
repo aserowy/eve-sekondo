@@ -120,6 +120,11 @@ fn assert_redirects_to_characters(res: &reqwest::Response) {
     assert_eq!(Browser::location(res), "/characters");
 }
 
+fn assert_redirects_to_dashboard(res: &reqwest::Response) {
+    assert!(res.status().is_redirection(), "{}", res.status());
+    assert_eq!(Browser::location(res), "/dashboard");
+}
+
 // ---- Sign in with EVE SSO ----
 
 #[sqlx::test]
@@ -127,7 +132,7 @@ async fn brand_new_character_creates_an_account_and_signs_in(pool: PgPool) {
     let e = env(pool).await;
     let browser = e.app.browser();
     let res = e.login(&browser, ALICE).await;
-    assert_redirects_to_characters(&res);
+    assert_redirects_to_dashboard(&res);
 
     let account = e.whoami(&browser).await.expect("signed in");
     let characters = e.repo.list_characters(account).await.unwrap();
@@ -204,7 +209,7 @@ async fn state_is_single_use(pool: PgPool) {
     let picked = e.app.client.get(select).send().await.unwrap();
     let callback = Browser::location(&picked);
 
-    assert_redirects_to_characters(&browser.get(&callback).await);
+    assert_redirects_to_dashboard(&browser.get(&callback).await);
     let replay = browser.get(&callback).await;
     assert_eq!(
         replay.status(),
@@ -295,7 +300,7 @@ async fn an_sso_outage_during_login_links_nothing(pool: PgPool) {
     assert_eq!(res.status(), 502);
     assert_eq!(e.count("characters").await, 0);
     // Trying again works.
-    assert_redirects_to_characters(&e.login(&browser, ALICE).await);
+    assert_redirects_to_dashboard(&e.login(&browser, ALICE).await);
 }
 
 // ---- Login resumes an existing account ----
@@ -318,7 +323,7 @@ async fn returning_character_signs_in_to_its_account_with_all_characters(pool: P
         .unwrap();
 
     let browser = e.app.browser();
-    assert_redirects_to_characters(&e.login(&browser, BOB).await);
+    assert_redirects_to_dashboard(&e.login(&browser, BOB).await);
 
     assert_eq!(e.whoami(&browser).await, Some(account));
     assert_eq!(e.repo.list_characters(account).await.unwrap().len(), 3);
@@ -345,7 +350,7 @@ async fn logging_in_with_another_linked_character_returns_to_the_same_account(po
 
     // "Sign out" by starting from a fresh browser, then log in with the other character.
     let second = e.app.browser();
-    assert_redirects_to_characters(&e.login(&second, BOB).await);
+    assert_redirects_to_dashboard(&e.login(&second, BOB).await);
     assert_eq!(e.whoami(&second).await, Some(account));
     assert_eq!(e.count("accounts").await, 1);
 }
@@ -360,7 +365,7 @@ async fn a_transferred_character_leaves_the_old_account_and_starts_a_new_one(poo
     e.seed(old_account, BOB, "owner-hash-90000002").await;
 
     let browser = e.app.browser();
-    assert_redirects_to_characters(&e.login(&browser, ALICE).await);
+    assert_redirects_to_dashboard(&e.login(&browser, ALICE).await);
 
     let new_account = e.whoami(&browser).await.unwrap();
     assert_ne!(new_account, old_account);

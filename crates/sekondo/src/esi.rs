@@ -1,0 +1,533 @@
+//! The ESI client: the three routes the app uses, ESI's etiquette (a descriptive `User-Agent`, a
+//! pinned compatibility date) and the error-limit and rate-limit gate.
+
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration as StdDuration,
+};
+
+use reqwest::{StatusCode, header::HeaderMap};
+use secrecy::{ExposeSecret, SecretString};
+use serde::{Deserialize, Deserializer};
+use time::{Duration, OffsetDateTime};
+use url::Url;
+
+use crate::{clock::Clock, config::Config};
+
+/// Pins ESI's behaviour: route changes only reach the app when this is raised on purpose.
+pub const COMPATIBILITY_DATE: &str = "2025-09-30";
+
+/// Stop sending requests when ESI reports fewer remaining errors than this.
+const ERROR_LIMIT_MARGIN: i64 = 20;
+/// Used when ESI blocks us without telling for how long.
+const DEFAULT_BLOCK: Duration = Duration::seconds(60);
+const REQUEST_TIMEOUT: StdDuration = StdDuration::from_secs(30);
+
+pub const ROUTE_ORDERS: &str = "orders";
+pub const ROUTE_NAMES: &str = "names";
+pub const ROUTE_STRUCTURES: &str = "structures";
+
+#[derive(Debug, thiserror::Error)]
+pub enum EsiError {
+    /// Network trouble, a timeout or a server error: nothing changed, try again later.
+    #[error("temporary ESI failure: {0}")]
+    Temporary(String),
+    #[error("ESI refused access")]
+    Forbidden,
+    #[error("ESI does not know the requested resource")]
+    NotFound,
+    /// The gate is blocking requests (or ESI just asked for a pause) until the given time.
+    #[error("ESI requests are paused until {until}")]
+    Deferred { until: OffsetDateTime },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct EsiOrder {
+    pub order_id: i64,
+    pub type_id: i64,
+    pub region_id: i64,
+    pub location_id: i64,
+    /// ESI leaves the flag out of sell orders.
+    #[serde(default)]
+    pub is_buy_order: bool,
+    #[serde(default)]
+    pub is_corporation: bool,
+    /// ISK in cents: EVE prices have at most two decimals, so rounding is lossless.
+    #[serde(rename = "price", deserialize_with = "cents")]
+    pub price_cents: i64,
+    pub volume_remain: i64,
+    pub volume_total: i64,
+    /// ESI only sends it for buy orders; a sell order has no minimum.
+    #[serde(default = "no_minimum")]
+    pub min_volume: i64,
+    pub range: String,
+    #[serde(rename = "escrow", default, deserialize_with = "optional_cents")]
+    pub escrow_cents: Option<i64>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub issued: OffsetDateTime,
+    pub duration: i32,
+}
+
+fn no_minimum() -> i64 {
+    1
+}
+
+fn cents<'de, D: Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+    Ok((f64::deserialize(d)? * 100.0).round() as i64)
+}
+
+fn optional_cents<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
+    Ok(Option::<f64>::deserialize(d)?.map(|v| (v * 100.0).round() as i64))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct EsiName {
+    pub category: String,
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct EsiStructure {
+    pub name: String,
+}
+
+#[derive(Debug)]
+pub struct EsiResponse<T> {
+    pub body: T,
+    /// When ESI's cache for this answer runs out, on the local clock.
+    pub expires_at: Option<OffsetDateTime>,
+}
+
+pub struct EsiClient {
+    http: reqwest::Client,
+    base_url: Url,
+    user_agent: String,
+    clock: Arc<dyn Clock>,
+    gate: EsiGate,
+}
+
+impl EsiClient {
+    pub fn new(http: reqwest::Client, config: &Config, clock: Arc<dyn Clock>) -> Self {
+        Self {
+            http,
+            base_url: config.esi_base_url.clone(),
+            user_agent: user_agent(&config.public_base_url, config.esi_contact.as_deref()),
+            gate: EsiGate::new(clock.clone()),
+            clock,
+        }
+    }
+
+    pub fn gate(&self) -> &EsiGate {
+        &self.gate
+    }
+
+    pub async fn orders(
+        &self,
+        character_id: i64,
+        token: &SecretString,
+    ) -> Result<EsiResponse<Vec<EsiOrder>>, EsiError> {
+        let request = self
+            .http
+            .get(self.url(&format!("characters/{character_id}/orders")))
+            .bearer_auth(token.expose_secret());
+        self.fetch(ROUTE_ORDERS, request).await
+    }
+
+    /// Resolves up to 1000 IDs. One unknown ID fails the whole request with `NotFound`.
+    pub async fn names(&self, ids: &[i64]) -> Result<Vec<EsiName>, EsiError> {
+        let request = self.http.post(self.url("universe/names")).json(ids);
+        Ok(self.fetch(ROUTE_NAMES, request).await?.body)
+    }
+
+    pub async fn structure(
+        &self,
+        structure_id: i64,
+        token: &SecretString,
+    ) -> Result<EsiStructure, EsiError> {
+        let request = self
+            .http
+            .get(self.url(&format!("universe/structures/{structure_id}")))
+            .bearer_auth(token.expose_secret());
+        Ok(self.fetch(ROUTE_STRUCTURES, request).await?.body)
+    }
+
+    fn url(&self, path: &str) -> Url {
+        self.base_url.join(path).expect("a valid ESI path")
+    }
+
+    async fn fetch<T: serde::de::DeserializeOwned>(
+        &self,
+        route: &'static str,
+        request: reqwest::RequestBuilder,
+    ) -> Result<EsiResponse<T>, EsiError> {
+        self.gate
+            .check(route)
+            .map_err(|until| EsiError::Deferred { until })?;
+        let response = request
+            .header(reqwest::header::USER_AGENT, &self.user_agent)
+            .header("X-Compatibility-Date", COMPATIBILITY_DATE)
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| EsiError::Temporary(e.without_url().to_string()))?;
+        let status = response.status();
+        self.gate.record(route, status, response.headers());
+        match status {
+            s if s.is_success() => {
+                let expires_at = expires_at(response.headers(), self.clock.now());
+                // Read as text first: reqwest's own decode error does not say which field failed.
+                let text = response
+                    .text()
+                    .await
+                    .map_err(|e| EsiError::Temporary(format!("unreadable ESI answer: {e}")))?;
+                let body = serde_json::from_str(&text)
+                    .map_err(|e| EsiError::Temporary(format!("unreadable ESI answer: {e}")))?;
+                Ok(EsiResponse { body, expires_at })
+            }
+            StatusCode::FORBIDDEN => Err(EsiError::Forbidden),
+            StatusCode::NOT_FOUND => Err(EsiError::NotFound),
+            // 420 and 429 have just armed the gate, so there is a time to wait for.
+            StatusCode::TOO_MANY_REQUESTS => Err(EsiError::Deferred {
+                until: self
+                    .gate
+                    .blocked_until(route)
+                    .unwrap_or_else(|| self.clock.now() + DEFAULT_BLOCK),
+            }),
+            s if s.as_u16() == 420 => Err(EsiError::Deferred {
+                until: self
+                    .gate
+                    .blocked_until(route)
+                    .unwrap_or_else(|| self.clock.now() + DEFAULT_BLOCK),
+            }),
+            s => Err(EsiError::Temporary(format!("HTTP {s}"))),
+        }
+    }
+}
+
+/// `Sekondo/<version> (+<public url>[; <contact>])`
+pub fn user_agent(public_base_url: &Url, contact: Option<&str>) -> String {
+    let mut agent = format!(
+        "Sekondo/{} (+{}",
+        env!("CARGO_PKG_VERSION"),
+        public_base_url.as_str().trim_end_matches('/')
+    );
+    if let Some(contact) = contact {
+        // Header values are visible ASCII only.
+        let contact: String = contact
+            .chars()
+            .filter(|c| c.is_ascii_graphic() || *c == ' ')
+            .collect();
+        if !contact.trim().is_empty() {
+            agent.push_str("; ");
+            agent.push_str(contact.trim());
+        }
+    }
+    agent.push(')');
+    agent
+}
+
+/// ESI's `Expires` on the local clock: the server's `Expires` minus its own `Date`, added to now,
+/// so a skewed local clock does not matter.
+fn expires_at(headers: &HeaderMap, now: OffsetDateTime) -> Option<OffsetDateTime> {
+    let http_date = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| httpdate::parse_http_date(v).ok())
+    };
+    let expires = http_date("expires")?;
+    let unix = |t: std::time::SystemTime| {
+        t.duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64)
+    };
+    match http_date("date") {
+        Some(date) => Some(now + Duration::seconds((unix(expires) - unix(date)).max(0))),
+        None => OffsetDateTime::from_unix_timestamp(unix(expires)).ok(),
+    }
+}
+
+/// Remembers when ESI asked us to pause, globally (error limit) or per rate-limit group.
+pub struct EsiGate {
+    clock: Arc<dyn Clock>,
+    state: Mutex<GateState>,
+}
+
+#[derive(Default)]
+struct GateState {
+    global_until: Option<OffsetDateTime>,
+    /// Rate-limit group (or, until ESI names one, the route) to the end of its block.
+    groups: HashMap<String, OffsetDateTime>,
+    /// The group each route was last seen in.
+    route_groups: HashMap<&'static str, String>,
+}
+
+/// What a single response tells the gate.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Limits {
+    global_until: Option<OffsetDateTime>,
+    group: Option<(String, Option<OffsetDateTime>)>,
+}
+
+fn header_text<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|v| v.to_str().ok())
+}
+
+fn header_int(headers: &HeaderMap, name: &str) -> Option<i64> {
+    header_text(headers, name).and_then(|v| v.trim().parse().ok())
+}
+
+/// Header parsing, kept free of state so it can be tested on its own.
+fn read_limits(
+    route: &'static str,
+    status: StatusCode,
+    headers: &HeaderMap,
+    now: OffsetDateTime,
+) -> Limits {
+    let mut limits = Limits::default();
+
+    let reset = header_int(headers, "x-esi-error-limit-reset").map(Duration::seconds);
+    let remain = header_int(headers, "x-esi-error-limit-remain");
+    if status.as_u16() == 420 || remain.is_some_and(|r| r < ERROR_LIMIT_MARGIN) {
+        limits.global_until = Some(now + reset.unwrap_or(DEFAULT_BLOCK));
+    }
+
+    let group = header_text(headers, "x-ratelimit-group")
+        .map(str::to_owned)
+        .unwrap_or_else(|| route.to_owned());
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        let wait = header_int(headers, "retry-after")
+            .map(Duration::seconds)
+            .unwrap_or(DEFAULT_BLOCK);
+        limits.group = Some((group, Some(now + wait)));
+    } else if header_int(headers, "x-ratelimit-remaining") == Some(0) {
+        limits.group = Some((group, Some(now + Duration::seconds(1))));
+    } else if header_text(headers, "x-ratelimit-group").is_some() {
+        limits.group = Some((group, None));
+    }
+    limits
+}
+
+impl EsiGate {
+    pub fn new(clock: Arc<dyn Clock>) -> Self {
+        Self {
+            clock,
+            state: Mutex::new(GateState::default()),
+        }
+    }
+
+    /// `Err(until)` while requests to `route` must not be sent.
+    pub fn check(&self, route: &'static str) -> Result<(), OffsetDateTime> {
+        match self.blocked_until(route) {
+            Some(until) => Err(until),
+            None => Ok(()),
+        }
+    }
+
+    /// The end of the block that applies to `route` right now, if any.
+    pub fn blocked_until(&self, route: &'static str) -> Option<OffsetDateTime> {
+        let now = self.clock.now();
+        let state = self.state.lock().unwrap();
+        let group = state.route_groups.get(route).map_or(route, String::as_str);
+        [
+            state.global_until,
+            state.groups.get(group).copied(),
+            state.groups.get(route).copied(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|until| *until > now)
+        .max()
+    }
+
+    /// Learns from a response's status and headers.
+    pub fn record(&self, route: &'static str, status: StatusCode, headers: &HeaderMap) {
+        let limits = read_limits(route, status, headers, self.clock.now());
+        let mut state = self.state.lock().unwrap();
+        if let Some(until) = limits.global_until {
+            state.global_until = state.global_until.max(Some(until));
+        }
+        if let Some((group, until)) = limits.group {
+            state.route_groups.insert(route, group.clone());
+            if let Some(until) = until {
+                let entry = state.groups.entry(group).or_insert(until);
+                *entry = (*entry).max(until);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use reqwest::header::HeaderValue;
+    use time::macros::datetime;
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct FixedClock(Mutex<OffsetDateTime>);
+
+    impl Clock for FixedClock {
+        fn now(&self) -> OffsetDateTime {
+            *self.0.lock().unwrap()
+        }
+    }
+
+    const NOW: OffsetDateTime = datetime!(2026-10-16 12:00:00 UTC);
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(
+                reqwest::header::HeaderName::try_from(*name).unwrap(),
+                HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        map
+    }
+
+    fn limits(status: u16, pairs: &[(&str, &str)]) -> Limits {
+        read_limits(
+            ROUTE_ORDERS,
+            StatusCode::from_u16(status).unwrap(),
+            &headers(pairs),
+            NOW,
+        )
+    }
+
+    #[test]
+    fn an_error_limit_below_the_margin_blocks_everything_until_the_reset() {
+        let l = limits(
+            200,
+            &[
+                ("x-esi-error-limit-remain", "19"),
+                ("x-esi-error-limit-reset", "30"),
+            ],
+        );
+        assert_eq!(l.global_until, Some(NOW + Duration::seconds(30)));
+    }
+
+    #[test]
+    fn an_error_limit_at_the_margin_does_not_block() {
+        let l = limits(
+            200,
+            &[
+                ("x-esi-error-limit-remain", "20"),
+                ("x-esi-error-limit-reset", "30"),
+            ],
+        );
+        assert_eq!(l.global_until, None);
+    }
+
+    #[test]
+    fn status_420_blocks_globally_even_without_headers() {
+        assert_eq!(
+            limits(420, &[("x-esi-error-limit-reset", "45")]).global_until,
+            Some(NOW + Duration::seconds(45))
+        );
+        assert_eq!(limits(420, &[]).global_until, Some(NOW + DEFAULT_BLOCK));
+    }
+
+    #[test]
+    fn status_429_blocks_the_group_for_retry_after() {
+        let l = limits(
+            429,
+            &[("retry-after", "60"), ("x-ratelimit-group", "char-market")],
+        );
+        assert_eq!(l.global_until, None);
+        assert_eq!(
+            l.group,
+            Some(("char-market".to_owned(), Some(NOW + Duration::seconds(60))))
+        );
+    }
+
+    #[test]
+    fn status_429_without_a_group_blocks_the_route() {
+        let l = limits(429, &[("retry-after", "5")]);
+        assert_eq!(
+            l.group,
+            Some((ROUTE_ORDERS.to_owned(), Some(NOW + Duration::seconds(5))))
+        );
+    }
+
+    #[test]
+    fn no_remaining_requests_without_a_429_blocks_the_group_for_a_second() {
+        let l = limits(
+            200,
+            &[
+                ("x-ratelimit-group", "char-market"),
+                ("x-ratelimit-remaining", "0"),
+            ],
+        );
+        assert_eq!(
+            l.group,
+            Some(("char-market".to_owned(), Some(NOW + Duration::seconds(1))))
+        );
+    }
+
+    #[test]
+    fn a_healthy_response_only_teaches_the_group_name() {
+        let l = limits(
+            200,
+            &[
+                ("x-ratelimit-group", "char-market"),
+                ("x-ratelimit-remaining", "1199"),
+                ("x-esi-error-limit-remain", "100"),
+            ],
+        );
+        assert_eq!(l.global_until, None);
+        assert_eq!(l.group, Some(("char-market".to_owned(), None)));
+    }
+
+    #[test]
+    fn expires_is_measured_against_the_servers_date() {
+        let h = headers(&[
+            ("date", "Fri, 16 Oct 2026 10:00:00 GMT"),
+            ("expires", "Fri, 16 Oct 2026 10:20:00 GMT"),
+        ]);
+        // The local clock is an hour ahead of ESI's.
+        assert_eq!(expires_at(&h, NOW), Some(NOW + Duration::minutes(20)));
+        assert_eq!(expires_at(&headers(&[]), NOW), None);
+    }
+
+    fn gate() -> (EsiGate, Arc<FixedClock>) {
+        let clock = Arc::new(FixedClock(Mutex::new(NOW)));
+        (EsiGate::new(clock.clone()), clock)
+    }
+
+    #[test]
+    fn the_gate_defers_until_the_block_has_passed() {
+        let (gate, clock) = gate();
+        assert_eq!(gate.check(ROUTE_ORDERS), Ok(()));
+
+        gate.record(
+            ROUTE_ORDERS,
+            StatusCode::from_u16(420).unwrap(),
+            &headers(&[("x-esi-error-limit-reset", "30")]),
+        );
+
+        let until = NOW + Duration::seconds(30);
+        assert_eq!(gate.check(ROUTE_ORDERS), Err(until));
+        assert_eq!(
+            gate.check(ROUTE_NAMES),
+            Err(until),
+            "the error limit is global"
+        );
+
+        *clock.0.lock().unwrap() = until;
+        assert_eq!(gate.check(ROUTE_ORDERS), Ok(()));
+    }
+
+    #[test]
+    fn a_rate_limit_only_blocks_its_own_group() {
+        let (gate, _) = gate();
+        gate.record(
+            ROUTE_ORDERS,
+            StatusCode::TOO_MANY_REQUESTS,
+            &headers(&[("retry-after", "60"), ("x-ratelimit-group", "char-market")]),
+        );
+        assert_eq!(gate.check(ROUTE_ORDERS), Err(NOW + Duration::seconds(60)));
+        assert_eq!(gate.check(ROUTE_NAMES), Ok(()));
+    }
+}

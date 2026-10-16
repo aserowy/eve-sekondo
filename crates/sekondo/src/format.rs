@@ -1,0 +1,201 @@
+//! Presentation helpers: ISK amounts, time left and EVE time. Pure functions, so every rule is
+//! unit-tested here and the templates only call them.
+
+use time::{Duration, OffsetDateTime};
+
+/// (divisor in cents, suffix). Amounts below 1,000 ISK are shown in full.
+const UNITS: [(i128, &str); 4] = [
+    (100_000, "k"),
+    (100_000_000, "m"),
+    (100_000_000_000, "b"),
+    (100_000_000_000_000, "t"),
+];
+
+/// ISK shortened to at most four significant digits (`1.235b`, `15m`, `950.50`).
+pub fn isk_short(cents: i64) -> String {
+    let negative = cents < 0;
+    let value = i128::from(cents).abs();
+    let text = match UNITS.iter().rposition(|(divisor, _)| value >= *divisor) {
+        None => format!("{}.{:02}", value / 100, value % 100),
+        Some(start) => shorten(value, start),
+    };
+    if negative { format!("-{text}") } else { text }
+}
+
+fn shorten(value: i128, start: usize) -> String {
+    for (index, (divisor, suffix)) in UNITS.iter().enumerate().skip(start) {
+        let integer_digits = ((value / divisor).max(1)).to_string().len();
+        let decimals = 4usize.saturating_sub(integer_digits);
+        let scale = 10i128.pow(decimals as u32);
+        // Half up, in integers: no floating point near money.
+        let rounded = (value * scale * 2 + divisor) / (divisor * 2);
+        let overflows = rounded / scale >= 1000;
+        if overflows && index + 1 < UNITS.len() {
+            continue;
+        }
+        let whole = rounded / scale;
+        let fraction = rounded % scale;
+        let mut text = whole.to_string();
+        if decimals > 0 && fraction > 0 {
+            let digits = format!("{fraction:0decimals$}");
+            text.push('.');
+            text.push_str(digits.trim_end_matches('0'));
+        }
+        text.push_str(suffix);
+        return text;
+    }
+    unreachable!("the last unit always returns")
+}
+
+/// The exact amount with thousands separators and two decimals: `1,234,567,890.12 ISK`.
+pub fn isk_exact(cents: i64) -> String {
+    let negative = cents < 0;
+    let value = i128::from(cents).abs();
+    let whole = (value / 100).to_string();
+    let mut grouped = String::new();
+    for (i, digit) in whole.chars().enumerate() {
+        if i > 0 && (whole.len() - i) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    format!(
+        "{}{grouped}.{:02} ISK",
+        if negative { "-" } else { "" },
+        value % 100
+    )
+}
+
+/// Whole days and hours until `expires_at`, rounded down: `9 days 22 hours`.
+pub fn time_left(expires_at: OffsetDateTime, now: OffsetDateTime) -> String {
+    let left = expires_at - now;
+    if left <= Duration::ZERO {
+        return "expired".to_owned();
+    }
+    let days = left.whole_days();
+    let hours = (left - Duration::days(days)).whole_hours();
+    let unit = |n: i64, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    match (days, hours) {
+        (0, 0) => "less than 1 hour".to_owned(),
+        (0, h) => unit(h, "hour", "hours"),
+        (d, 0) => unit(d, "day", "days"),
+        (d, h) => format!("{} {}", unit(d, "day", "days"), unit(h, "hour", "hours")),
+    }
+}
+
+/// A moment in EVE time (UTC): `2026-10-01 12:00`.
+pub fn eve_time(moment: OffsetDateTime) -> String {
+    let moment = moment.to_offset(time::UtcOffset::UTC);
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        moment.year(),
+        u8::from(moment.month()),
+        moment.day(),
+        moment.hour(),
+        moment.minute()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use time::macros::datetime;
+
+    use super::*;
+
+    /// ISK to cents, for readable cases.
+    fn isk(whole: i64, cents: i64) -> i64 {
+        whole * 100 + cents
+    }
+
+    #[test]
+    fn amounts_below_a_thousand_are_shown_in_full() {
+        assert_eq!(isk_short(isk(950, 50)), "950.50");
+        assert_eq!(isk_short(0), "0.00");
+        assert_eq!(isk_short(isk(0, 5)), "0.05");
+        assert_eq!(isk_short(isk(999, 99)), "999.99");
+    }
+
+    #[test]
+    fn larger_amounts_keep_four_significant_digits() {
+        assert_eq!(isk_short(isk(1_234_567_890, 12)), "1.235b");
+        assert_eq!(isk_short(isk(1_234, 0)), "1.234k");
+        assert_eq!(isk_short(isk(12_345, 0)), "12.35k");
+        assert_eq!(isk_short(isk(123_456, 0)), "123.5k");
+        assert_eq!(isk_short(isk(2_500_000, 0)), "2.5m");
+        assert_eq!(isk_short(isk(98_765_432, 0)), "98.77m");
+    }
+
+    #[test]
+    fn trailing_zeros_are_dropped() {
+        assert_eq!(isk_short(isk(1_000, 0)), "1k");
+        assert_eq!(isk_short(isk(15_000_000, 0)), "15m");
+        assert_eq!(isk_short(isk(1_500_000, 0)), "1.5m");
+        assert_eq!(isk_short(isk(1_000_000_000_000, 0)), "1t");
+    }
+
+    #[test]
+    fn rounding_up_to_the_next_unit_carries() {
+        assert_eq!(isk_short(isk(999_999, 99)), "1m");
+        assert_eq!(isk_short(isk(999_950, 0)), "1m");
+        assert_eq!(isk_short(isk(999_949, 0)), "999.9k");
+        assert_eq!(isk_short(isk(999_999_999, 0)), "1b");
+    }
+
+    #[test]
+    fn the_thresholds_between_units() {
+        assert_eq!(isk_short(isk(1_000, 0)), "1k");
+        assert_eq!(isk_short(isk(1_000_000, 0)), "1m");
+        assert_eq!(isk_short(isk(1_000_000_000, 0)), "1b");
+    }
+
+    #[test]
+    fn trillions_are_the_largest_unit() {
+        assert_eq!(isk_short(isk(1_234_567_890_123, 0)), "1.235t");
+        assert_eq!(isk_short(isk(12_345_000_000_000, 0)), "12.35t");
+        assert_eq!(isk_short(isk(5_000_000_000_000_000, 0)), "5000t");
+    }
+
+    #[test]
+    fn exact_amounts_have_separators_and_two_decimals() {
+        assert_eq!(isk_exact(isk(1_234_567_890, 12)), "1,234,567,890.12 ISK");
+        assert_eq!(isk_exact(isk(950, 50)), "950.50 ISK");
+        assert_eq!(isk_exact(isk(1_000, 0)), "1,000.00 ISK");
+        assert_eq!(isk_exact(0), "0.00 ISK");
+        assert_eq!(isk_exact(isk(15_000_000, 0)), "15,000,000.00 ISK");
+        assert_eq!(isk_exact(5), "0.05 ISK");
+    }
+
+    #[test]
+    fn time_left_is_whole_days_and_hours_rounded_down() {
+        let now = datetime!(2026-10-16 12:00 UTC);
+        // Issued 80 days and 2 hours ago with a 90-day duration.
+        let issued = now - Duration::days(80) - Duration::hours(2);
+        let expires = issued + Duration::days(90);
+        assert_eq!(time_left(expires, now), "9 days 22 hours");
+
+        assert_eq!(
+            time_left(now + Duration::hours(1) + Duration::minutes(59), now),
+            "1 hour"
+        );
+        assert_eq!(time_left(now + Duration::days(1), now), "1 day");
+        assert_eq!(
+            time_left(now + Duration::days(2) + Duration::hours(1), now),
+            "2 days 1 hour"
+        );
+        assert_eq!(
+            time_left(now + Duration::minutes(59), now),
+            "less than 1 hour"
+        );
+        assert_eq!(time_left(now, now), "expired");
+        assert_eq!(time_left(now - Duration::hours(3), now), "expired");
+    }
+
+    #[test]
+    fn dates_are_shown_in_utc() {
+        assert_eq!(
+            eve_time(datetime!(2026-10-01 12:05:59 UTC)),
+            "2026-10-01 12:05"
+        );
+        assert_eq!(eve_time(datetime!(2026-10-01 01:30 +2)), "2026-09-30 23:30");
+    }
+}

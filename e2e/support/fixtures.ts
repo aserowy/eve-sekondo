@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import https from 'node:https';
 import path from 'node:path';
 import { Client } from 'pg';
-import { CLIENT_ID, CONTROL_TOKEN, E2E_DATABASE, STUB_URL, certs } from './env';
+import { APP_URL, CLIENT_ID, CONTROL_TOKEN, E2E_DATABASE, STUB_URL, certs } from './env';
 
 const rootCa = readFileSync(path.join(certs, 'rootCA.pem'));
 
@@ -64,11 +64,46 @@ export function stubControl(name: string, body: unknown = {}): Promise<void> {
   });
 }
 
+/** One ESI order as the stub serves it (a sell order unless `buy`). */
+export function stubOrder(id: number, opts: { type?: number; price?: number; remain?: number; buy?: boolean } = {}) {
+  return {
+    order_id: id,
+    type_id: opts.type ?? 34,
+    region_id: 10000002,
+    location_id: 60003760,
+    is_buy_order: opts.buy ?? false,
+    is_corporation: false,
+    price: opts.price ?? 10,
+    volume_remain: opts.remain ?? 5,
+    volume_total: 10,
+    min_volume: 1,
+    range: 'station',
+    issued: new Date(Date.now() - 5 * 86_400_000).toISOString().replace(/\.\d+Z$/, 'Z'),
+    duration: 90,
+    ...(opts.buy ? { escrow: 1000 } : {}),
+  };
+}
+
+/** Polls a character now through the test-only hook, from inside the page (so it is the user's own session). */
+export async function pollCharacter(page: Page, characterId: number): Promise<string> {
+  return page.evaluate(async (id) => {
+    const token = document.querySelector('meta[name="csrf-token"]')!.getAttribute('content')!;
+    const res = await fetch(`/_test/poll/${id}`, { method: 'POST', headers: { 'X-CSRF-Token': token } });
+    return `${res.status} ${await res.text()}`;
+  }, characterId);
+}
+
 /** Log in through the stub's character picker the way a player would. */
 export async function loginWith(page: Page, characterName: string): Promise<void> {
   await page.goto('/');
   await page.getByRole('button', { name: 'Log in with EVE Online' }).click();
   await page.getByRole('link', { name: characterName }).click();
+  await expect(page).toHaveURL(/\/dashboard$/);
+}
+
+/** Follow the navigation to the characters page. */
+export async function openCharacters(page: Page): Promise<void> {
+  await page.getByRole('navigation').getByRole('link', { name: 'Characters' }).click();
   await expect(page).toHaveURL(/\/characters$/);
 }
 
@@ -102,3 +137,28 @@ export const test = base.extend<{ cspGuard: void; cleanSlate: void }>({
 });
 
 export { expect, CLIENT_ID };
+
+/** Polls a character from outside the browser (so while the page is offline), with the session's cookie. */
+export function pollOutsideBrowser(characterId: number, cookies: { name: string; value: string }[], csrf: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      `${APP_URL}/_test/poll/${characterId}`,
+      {
+        method: 'POST',
+        ca: rootCa,
+        headers: {
+          cookie: cookies.map((c) => `${c.name}=${c.value}`).join('; '),
+          origin: APP_URL,
+          'x-csrf-token': csrf,
+        },
+      },
+      (res) => {
+        let body = '';
+        res.on('data', (chunk) => (body += chunk));
+        res.on('end', () => resolve(`${res.statusCode} ${body}`));
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}

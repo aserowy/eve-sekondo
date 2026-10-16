@@ -16,9 +16,13 @@ use crate::{
     clock::{Clock, SystemClock},
     config::Config,
     crypto::TokenCipher,
-    csrf, headers, pages,
+    csrf,
+    esi::EsiClient,
+    events::{EventBus, InProcessBus},
+    headers, orders, pages,
+    poller::Poller,
     repo::Repo,
-    session,
+    session, sse,
     sso::SsoClient,
     tls,
     tokens::TokenService,
@@ -33,6 +37,25 @@ pub struct AppState {
     pub repo: Repo,
     pub sso: Arc<SsoClient>,
     pub tokens: Arc<TokenService>,
+    pub esi: Arc<EsiClient>,
+    pub poller: Arc<Poller>,
+    pub events: Arc<dyn EventBus>,
+    pub sse_tick: std::time::Duration,
+}
+
+/// Knobs only tests turn.
+#[derive(Debug, Clone)]
+pub struct Options {
+    /// Keep-alive interval of the event stream, which is also how often it re-checks its session.
+    pub sse_tick: std::time::Duration,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            sse_tick: crate::sse::KEEP_ALIVE,
+        }
+    }
 }
 
 pub struct App {
@@ -65,6 +88,16 @@ impl App {
         clock: Arc<dyn Clock>,
         extra_routes: Router<AppState>,
     ) -> Result<Self, StartupError> {
+        Self::new_with_options(config, pool, clock, extra_routes, Options::default()).await
+    }
+
+    pub async fn new_with_options(
+        config: Config,
+        pool: PgPool,
+        clock: Arc<dyn Clock>,
+        extra_routes: Router<AppState>,
+        options: Options,
+    ) -> Result<Self, StartupError> {
         tls::install_crypto_provider();
         sqlx::migrate!("./migrations").run(&pool).await?;
         let http = tls::http_client(config.tls_extra_ca_path.as_deref())?;
@@ -77,6 +110,16 @@ impl App {
             std::time::Duration::from_secs(30),
         ));
         let tokens = Arc::new(TokenService::new(repo.clone(), sso.clone(), clock.clone()));
+        let esi = Arc::new(EsiClient::new(http.clone(), &config, clock.clone()));
+        let events: Arc<dyn EventBus> = Arc::new(InProcessBus::new());
+        let poller = Arc::new(Poller::new(
+            pool.clone(),
+            tokens.clone(),
+            esi.clone(),
+            events.clone(),
+            clock.clone(),
+            config.order_poll_interval,
+        ));
         let state = AppState {
             config: Arc::new(config),
             pool,
@@ -85,6 +128,10 @@ impl App {
             repo,
             sso,
             tokens,
+            esi,
+            poller,
+            events,
+            sse_tick: options.sse_tick,
         };
         let router = router(state.clone(), extra_routes);
         Ok(Self { state, router })
@@ -104,8 +151,13 @@ impl App {
 pub fn router(state: AppState, extra_routes: Router<AppState>) -> Router {
     let routes = Router::new()
         .route("/", get(pages::index))
+        .route("/dashboard", get(pages::dashboard))
+        .route("/orders", get(orders::page))
+        .route("/orders/tables", get(orders::tables))
+        .route("/orders/freshness", get(orders::freshness))
         .route("/characters", get(pages::characters))
         .route("/characters/{id}/unlink", post(characters::unlink))
+        .route("/events", get(sse::stream))
         .route("/healthz", get(healthz))
         .route("/auth/login", get(auth::login))
         .route("/auth/add", get(auth::add))
@@ -115,8 +167,12 @@ pub fn router(state: AppState, extra_routes: Router<AppState>) -> Router {
 
     #[cfg(feature = "test-hooks")]
     let routes = {
-        tracing::warn!("built with the test-hooks feature: POST /_test/refresh/{{id}} is enabled");
-        routes.route("/_test/refresh/{id}", post(crate::test_hooks::refresh))
+        tracing::warn!(
+            "built with the test-hooks feature: POST /_test/refresh/{{id}} and POST /_test/poll/{{id}} are enabled"
+        );
+        routes
+            .route("/_test/refresh/{id}", post(crate::test_hooks::refresh))
+            .route("/_test/poll/{id}", post(crate::test_hooks::poll))
     };
 
     let router = routes
