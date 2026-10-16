@@ -1,0 +1,25 @@
+schema: spec-driven
+
+context: |
+  Tech stack: Rust, axum, htmx, PostgreSQL, and TimescaleDB
+  Domain: eve online tooling
+
+rules:
+  tasks:
+    - Break tasks into chunks of max 2 hours
+    - Every UI task includes a Playwright test
+
+operations:
+  explore:
+    guidance:
+      - Use the grilling skill
+  propose:
+    guidance:
+      - Use the grilling skill
+  review:
+    guidance:
+      - Use the grilling skill
+  apply:
+    guidance:
+      - Keep test summaries concise
+      - Use the tdd skill
