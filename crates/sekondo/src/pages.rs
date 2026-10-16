@@ -70,13 +70,6 @@ pub struct IndexTemplate {
 }
 
 #[derive(Template)]
-#[template(path = "dashboard.html")]
-pub struct DashboardTemplate {
-    pub csrf_token: String,
-    pub nav: Option<Nav>,
-}
-
-#[derive(Template)]
 #[template(path = "error.html")]
 pub struct ErrorTemplate {
     pub csrf_token: String,
@@ -149,28 +142,6 @@ pub async fn index(account: Option<CurrentAccount>, session: Session) -> Respons
         Ok(csrf_token) => render(&IndexTemplate {
             csrf_token,
             nav: None,
-        }),
-        Err(e) => internal_error(e),
-    }
-}
-
-/// The signed-in home. Empty for now: `orders-dashboard` fills it in. It accepts the character
-/// filter already, so the selection survives a visit.
-pub async fn dashboard(
-    State(state): State<AppState>,
-    account: CurrentAccount,
-    session: Session,
-    query: ViewQuery,
-) -> Response {
-    let characters = match state.repo.list_characters(account.id).await {
-        Ok(characters) => characters,
-        Err(e) => return internal_error(e),
-    };
-    let ids: Vec<i64> = characters.iter().map(|c| c.character_id).collect();
-    match csrf::token(&session).await {
-        Ok(csrf_token) => render(&DashboardTemplate {
-            csrf_token,
-            nav: Some(Nav::new(Page::Dashboard).with_chars_query(query.selection(&ids).query())),
         }),
         Err(e) => internal_error(e),
     }

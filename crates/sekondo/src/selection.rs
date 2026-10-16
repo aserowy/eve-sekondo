@@ -3,7 +3,7 @@
 use axum::{extract::FromRequestParts, http::request::Parts};
 
 /// The query string every character-scoped view accepts. Sorting is parsed by the view that owns
-/// the table (`orders`); this holds the raw values so one place carries them all.
+/// the table (`orders`) and the range by the dashboard; this holds the raw values so one place carries them all.
 #[derive(Debug, Default, Clone)]
 pub struct ViewQuery {
     pub chars: Option<String>,
@@ -11,6 +11,7 @@ pub struct ViewQuery {
     pub dir: Option<String>,
     pub bsort: Option<String>,
     pub bdir: Option<String>,
+    pub range: Option<String>,
 }
 
 impl ViewQuery {
@@ -24,6 +25,7 @@ impl ViewQuery {
                 "dir" => &mut parsed.dir,
                 "bsort" => &mut parsed.bsort,
                 "bdir" => &mut parsed.bdir,
+                "range" => &mut parsed.range,
                 _ => continue,
             };
             slot.get_or_insert_with(|| value.into_owned());
@@ -173,13 +175,14 @@ mod tests {
     #[test]
     fn the_query_string_is_parsed_leniently() {
         let q = ViewQuery::parse(Some(
-            "chars=1%2C2&sort=price&dir=desc&bsort=item&bdir=asc&x=1",
+            "chars=1%2C2&sort=price&dir=desc&bsort=item&bdir=asc&range=30d&x=1",
         ));
         assert_eq!(q.chars.as_deref(), Some("1,2"));
         assert_eq!(q.sort.as_deref(), Some("price"));
         assert_eq!(q.dir.as_deref(), Some("desc"));
         assert_eq!(q.bsort.as_deref(), Some("item"));
         assert_eq!(q.bdir.as_deref(), Some("asc"));
+        assert_eq!(q.range.as_deref(), Some("30d"));
         // Repeated keys: the first wins. Garbage: ignored.
         let q = ViewQuery::parse(Some("chars=1&chars=2&%ff=%ff&&="));
         assert_eq!(q.chars.as_deref(), Some("1"));

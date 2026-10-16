@@ -4,12 +4,13 @@ test('navigate between the signed-in pages, and sign out from the navigation', a
   await loginWith(page, 'Alice Alpha');
   const nav = page.getByRole('navigation');
 
-  // The stub dashboard is the landing page, says so, and links on to the orders.
+  // The dashboard is the landing page and shows the totals; the orders are one navigation link away.
   await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
-  await expect(page.getByText('dashboard is coming')).toBeVisible();
+  await expect(page.locator('#tile-sell-value')).toBeVisible();
+  await expect(page.locator('#tile-escrow')).toBeVisible();
   await expect(nav.getByRole('link', { name: 'Dashboard' })).toHaveAttribute('aria-current', 'page');
 
-  await page.getByRole('main').getByRole('link', { name: 'market orders' }).click();
+  await nav.getByRole('link', { name: 'Orders' }).click();
   await expect(page).toHaveURL(/\/orders$/);
   await expect(nav.getByRole('link', { name: 'Orders' })).toHaveAttribute('aria-current', 'page');
   await expect(nav.getByRole('link', { name: 'Dashboard' })).not.toHaveAttribute('aria-current', 'page');

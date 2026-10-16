@@ -30,3 +30,31 @@ input[type="checkbox"] {
   background-image: none;
   accent-color: var(--pico-primary-background);
 }
+
+/* Dashboard */
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 1rem; }
+.tiles article { margin: 0; }
+.tiles h2 { font-size: 1rem; margin-bottom: 0.25rem; }
+.tiles .amount { font-size: 2rem; font-variant-numeric: tabular-nums; margin-bottom: 0; }
+.tiles .amount[title], .corp-share span[title] { cursor: help; }
+
+/* Charts */
+.chart { position: relative; height: 18rem; }
+.chart-tooltip {
+  position: absolute;
+  pointer-events: none;
+  transform: translate(-50%, -110%);
+  padding: 0.4rem 0.6rem;
+  border-radius: var(--pico-border-radius);
+  background: var(--pico-card-background-color);
+  border: 1px solid var(--pico-muted-border-color);
+  box-shadow: var(--pico-card-box-shadow);
+  white-space: nowrap;
+  font-size: 0.85rem;
+  z-index: 1;
+}
+.chart-tooltip[hidden] { display: none; }
+.chart-tooltip-title { font-weight: 600; }
+.top-items { display: grid; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); gap: 1rem; }
+.range-control { display: flex; gap: 1rem; margin-bottom: 1rem; }
+.range-control a[aria-current="true"] { font-weight: 600; text-decoration: none; color: var(--pico-contrast); }

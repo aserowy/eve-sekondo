@@ -64,15 +64,18 @@ export function stubControl(name: string, body: unknown = {}): Promise<void> {
   });
 }
 
-/** One ESI order as the stub serves it (a sell order unless `buy`). */
-export function stubOrder(id: number, opts: { type?: number; price?: number; remain?: number; buy?: boolean } = {}) {
+/** One ESI order as the stub serves it (a sell order unless `buy`; `escrow` defaults to 1000). */
+export function stubOrder(
+  id: number,
+  opts: { type?: number; price?: number; remain?: number; buy?: boolean; corp?: boolean; escrow?: number } = {},
+) {
   return {
     order_id: id,
     type_id: opts.type ?? 34,
     region_id: 10000002,
     location_id: 60003760,
     is_buy_order: opts.buy ?? false,
-    is_corporation: false,
+    is_corporation: opts.corp ?? false,
     price: opts.price ?? 10,
     volume_remain: opts.remain ?? 5,
     volume_total: 10,
@@ -80,7 +83,7 @@ export function stubOrder(id: number, opts: { type?: number; price?: number; rem
     range: 'station',
     issued: new Date(Date.now() - 5 * 86_400_000).toISOString().replace(/\.\d+Z$/, 'Z'),
     duration: 90,
-    ...(opts.buy ? { escrow: 1000 } : {}),
+    ...(opts.buy ? { escrow: opts.escrow ?? 1000 } : {}),
   };
 }
 

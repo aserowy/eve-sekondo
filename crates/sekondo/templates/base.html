@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/static/app.css">
   <script src="/static/htmx.min.js"></script>
   <script src="/static/htmx-ext-sse.min.js"></script>
+  {% block head %}{% endblock %}
   <script src="/static/app.js"></script>
 </head>
 <body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>

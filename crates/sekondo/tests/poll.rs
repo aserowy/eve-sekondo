@@ -604,3 +604,109 @@ async fn a_failed_poll_and_a_needed_relogin_signal_too_so_freshness_updates(pool
     );
     assert!(tokio::time::timeout(wait, stream.next()).await.is_ok());
 }
+
+// ---- poll totals history ----
+
+fn buy_order(id: i64, escrow: f64, is_corporation: bool) -> Value {
+    let mut buy = order(id, 4.0, 5);
+    buy["is_buy_order"] = json!(true);
+    buy["escrow"] = json!(escrow);
+    buy["is_corporation"] = json!(is_corporation);
+    buy
+}
+
+/// Sell value, escrow, both corporation shares, sell and buy count of each entry, oldest first.
+type Entry = (String, String, String, String, i32, i32);
+
+async fn poll_totals(pool: &PgPool, character: i64) -> Vec<Entry> {
+    sqlx::query_as(
+        "SELECT sell_value::text, escrow::text, sell_corp::text, escrow_corp::text, sell_count, \
+         buy_count FROM order_poll_totals WHERE character_id = $1 ORDER BY polled_at",
+    )
+    .bind(character)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+fn entry(values: [&str; 4], sell_count: i32, buy_count: i32) -> Entry {
+    let [sell, escrow, sell_corp, escrow_corp] = values.map(str::to_owned);
+    (sell, escrow, sell_corp, escrow_corp, sell_count, buy_count)
+}
+
+#[sqlx::test]
+async fn a_poll_with_orders_records_its_totals_with_the_corporation_share(pool: PgPool) {
+    let env = linked(pool).await;
+    let mut corp_sell = order(2, 20.0, 6);
+    corp_sell["is_corporation"] = json!(true);
+    set_orders(
+        &env,
+        ALICE,
+        vec![
+            order(1, 10.0, 5),
+            corp_sell,
+            buy_order(3, 2.5, false),
+            buy_order(4, 7.5, true),
+        ],
+    )
+    .await;
+
+    env.poller.poll_character(ALICE).await;
+
+    assert_eq!(
+        poll_totals(&env.pool, ALICE).await,
+        vec![entry(["170.00", "10.00", "120.00", "7.50"], 2, 2)]
+    );
+}
+
+#[sqlx::test]
+async fn a_poll_without_orders_records_zeros(pool: PgPool) {
+    let env = linked(pool).await;
+    set_orders(&env, ALICE, vec![order(1, 10.0, 5)]).await;
+    env.poller.poll_character(ALICE).await;
+    set_orders(&env, ALICE, vec![]).await;
+    env.clock.advance(Duration::minutes(21));
+
+    env.poller.poll_character(ALICE).await;
+
+    assert_eq!(
+        poll_totals(&env.pool, ALICE).await,
+        vec![
+            entry(["50.00", "0.00", "0.00", "0.00"], 1, 0),
+            entry(["0.00", "0.00", "0.00", "0.00"], 0, 0),
+        ]
+    );
+}
+
+#[sqlx::test]
+async fn a_failed_poll_records_no_entry(pool: PgPool) {
+    let env = linked(pool).await;
+    set_orders(&env, ALICE, vec![order(1, 10.0, 5)]).await;
+    env.poller.poll_character(ALICE).await;
+    env.clock.advance(Duration::minutes(21));
+    env.control("esi-fail-next", json!({"status": 503})).await;
+
+    assert_eq!(env.poller.poll_character(ALICE).await, PollOutcome::Failed);
+
+    assert_eq!(poll_totals(&env.pool, ALICE).await.len(), 1);
+}
+
+#[sqlx::test]
+async fn unlinking_a_character_removes_its_poll_totals(pool: PgPool) {
+    let env = linked(pool).await;
+    let account = env
+        .repo
+        .find_character(ALICE)
+        .await
+        .unwrap()
+        .unwrap()
+        .account_id;
+    env.link(account, BOB).await;
+    env.poller.poll_character(ALICE).await;
+    env.poller.poll_character(BOB).await;
+
+    env.repo.unlink_character(account, ALICE).await.unwrap();
+
+    assert!(poll_totals(&env.pool, ALICE).await.is_empty());
+    assert_eq!(poll_totals(&env.pool, BOB).await.len(), 1);
+}

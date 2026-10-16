@@ -1,0 +1,6 @@
+<fieldset>
+    <legend>Characters</legend>
+    {% for c in characters %}
+    <label><input type="checkbox" name="chars" value="{{ c.id }}"{% if c.checked %} checked{% endif %}> {{ c.name }}</label>
+    {% endfor %}
+  </fieldset>

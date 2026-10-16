@@ -43,14 +43,32 @@ async fn a_signed_in_user_requesting_the_root_is_sent_to_the_dashboard(pool: PgP
 }
 
 #[sqlx::test]
-async fn the_stub_dashboard_says_it_is_coming_and_links_to_the_orders(pool: PgPool) {
+async fn completing_the_sign_in_lands_on_the_dashboard_showing_the_totals_of_the_orders(
+    pool: PgPool,
+) {
     let app = app(pool).await;
-    let browser = signed_in(&app).await;
+    let browser = app.browser();
+    let mut res = browser.sso_round_trip(&app, "/auth/login", ALICE).await;
+    app.state.poller.poll_character(ALICE).await;
 
-    let html = page(&app, &browser, "/dashboard").await;
+    // Follows the redirects the sign-in ends with, as a browser would.
+    for _ in 0..3 {
+        if !res.status().is_redirection() {
+            break;
+        }
+        let target = Browser::location(&res);
+        res = browser.get(&app.url(&target)).await;
+    }
 
-    assert!(html.to_lowercase().contains("coming"), "{html}");
-    assert!(html.contains(r#"href="/orders""#));
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.url().path(), "/dashboard");
+    let html = res.text().await.unwrap();
+    assert!(html.contains(r#"id="tile-sell-value""#), "{html}");
+    assert!(html.contains(r#"id="breakdown""#));
+    assert!(
+        html.contains(r#"href="/orders""#),
+        "the navigation leads to the orders"
+    );
 }
 
 #[sqlx::test]

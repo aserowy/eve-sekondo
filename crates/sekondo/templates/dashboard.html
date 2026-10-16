@@ -2,9 +2,24 @@
 
 {% block title %}Dashboard · Sekondo{% endblock %}
 
+{% block head %}
+<script src="/static/chart.umd.min.js"></script>
+{% endblock %}
+
 {% block content %}
-<article>
+<header>
   <h1>Dashboard</h1>
-  <p>The dashboard is coming. Until then, your <a href="/orders">market orders</a> are the place to look.</p>
-</article>
+</header>
+
+<div hx-ext="sse" sse-connect="/events">
+<div id="dashboard-view">
+  <form id="character-filter" data-character-filter hx-get="/dashboard" hx-trigger="change" hx-target="#dashboard-view" hx-select="#dashboard-view" hx-select-oob="#main-nav" hx-swap="outerHTML" hx-push-url="true">
+    {% include "character_filter.html" %}
+    <input type="hidden" name="range" value="{{ range_name }}">
+  </form>
+  <section id="dashboard-summary" hx-get="{{ view.summary_url }}" hx-trigger="sse:orders-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
+    {% include "dashboard_summary.html" %}
+  </section>
+</div>
+</div>
 {% endblock %}

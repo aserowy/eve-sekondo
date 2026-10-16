@@ -1,10 +1,6 @@
 <form id="character-filter" data-character-filter hx-get="/orders" hx-trigger="change" hx-target="#orders-view" hx-select="#orders-view" hx-select-oob="#main-nav" hx-swap="outerHTML" hx-push-url="true">
-  <fieldset>
-    <legend>Characters</legend>
-    {% for c in view.characters %}
-    <label><input type="checkbox" name="chars" value="{{ c.id }}"{% if c.checked %} checked{% endif %}> {{ c.name }}</label>
-    {% endfor %}
-  </fieldset>
+  {% let characters = view.characters %}
+  {% include "character_filter.html" %}
   <input type="hidden" name="sort" value="{{ view.sell_sort.key.name() }}">
   <input type="hidden" name="dir" value="{{ view.sell_sort.dir.name() }}">
   <input type="hidden" name="bsort" value="{{ view.buy_sort.key.name() }}">

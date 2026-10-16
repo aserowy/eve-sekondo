@@ -16,7 +16,7 @@ use crate::{
     clock::{Clock, SystemClock},
     config::Config,
     crypto::TokenCipher,
-    csrf,
+    csrf, dashboard,
     esi::EsiClient,
     events::{EventBus, InProcessBus},
     headers, orders, pages,
@@ -151,7 +151,8 @@ impl App {
 pub fn router(state: AppState, extra_routes: Router<AppState>) -> Router {
     let routes = Router::new()
         .route("/", get(pages::index))
-        .route("/dashboard", get(pages::dashboard))
+        .route("/dashboard", get(dashboard::page))
+        .route("/dashboard/summary", get(dashboard::summary))
         .route("/orders", get(orders::page))
         .route("/orders/tables", get(orders::tables))
         .route("/orders/freshness", get(orders::freshness))

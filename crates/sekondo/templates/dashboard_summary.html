@@ -1,0 +1,94 @@
+<section class="tiles" id="tiles">
+  <article id="tile-sell-value">
+    <h2>Sell value</h2>
+    <p class="amount" title="{{ view.sell.total.exact }}">{{ view.sell.total.short }}</p>
+    {% if let Some(corp) = view.sell.corp %}
+    <small class="corp-share">of which <span title="{{ corp.exact }}">{{ corp.short }}</span> corp</small>
+    {% endif %}
+  </article>
+  <article id="tile-escrow">
+    <h2>Buy escrow</h2>
+    <p class="amount" title="{{ view.escrow.total.exact }}">{{ view.escrow.total.short }}</p>
+    {% if let Some(corp) = view.escrow.corp %}
+    <small class="corp-share">of which <span title="{{ corp.exact }}">{{ corp.short }}</span> corp</small>
+    {% endif %}
+  </article>
+  <article id="tile-sell-count">
+    <h2>Sell orders</h2>
+    <p class="amount">{{ view.sell_count }}</p>
+  </article>
+  <article id="tile-buy-count">
+    <h2>Buy orders</h2>
+    <p class="amount">{{ view.buy_count }}</p>
+  </article>
+</section>
+<section>
+  <h2>Characters</h2>
+  <div class="table-wrap">
+  <table class="orders" id="breakdown">
+    <thead>
+      <tr>
+        <th scope="col">Character</th>
+        <th scope="col">Sell value</th>
+        <th scope="col">Escrow</th>
+        <th scope="col">Sell orders</th>
+        <th scope="col">Buy orders</th>
+        <th scope="col">Updates</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in view.rows %}
+      <tr id="character-{{ r.id }}">
+        <td>
+          {{ r.freshness.name }}
+          {% if r.freshness.stale %}<mark class="badge stale">Stale</mark>{% endif %}
+          {% if r.freshness.needs_relogin %}<a href="/auth/add">Log in again</a>{% endif %}
+          {% if r.freshness.waiting_for_first_update %}<mark class="badge">Waiting for first update</mark>{% endif %}
+        </td>
+        <td class="num" title="{{ r.sell.exact }}">{{ r.sell.short }}</td>
+        <td class="num" title="{{ r.escrow.exact }}">{{ r.escrow.short }}</td>
+        <td class="num">{{ r.sell_count }}</td>
+        <td class="num">{{ r.buy_count }}</td>
+        <td><small>Last update: {{ r.freshness.last_update }} EVE time · Next update: {{ r.freshness.next_update }}</small></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+<section>
+  <h2>Per character</h2>
+  <div class="chart"><canvas data-chart="split" data-series="{{ view.split_series }}" role="img" aria-label="{{ view.split_label }}"></canvas></div>
+</section>
+<section class="top-items">
+  <div>
+    <h2>Top items by sell value</h2>
+    {% if let Some(chart) = view.top_sell %}
+    <div class="chart"><canvas data-chart="top-sell" data-series="{{ chart.series }}" role="img" aria-label="{{ chart.label }}"></canvas></div>
+    {% else %}
+    <p>No sell orders.</p>
+    {% endif %}
+  </div>
+  <div>
+    <h2>Top items by buy escrow</h2>
+    {% if let Some(chart) = view.top_buy %}
+    <div class="chart"><canvas data-chart="top-buy" data-series="{{ chart.series }}" role="img" aria-label="{{ chart.label }}"></canvas></div>
+    {% else %}
+    <p>No buy orders.</p>
+    {% endif %}
+  </div>
+</section>
+<section class="history">
+  <h2>Over time</h2>
+  <div id="range-control" class="range-control" role="group" aria-label="Time range">
+    {% for r in view.ranges %}
+    <a href="{{ r.href }}" hx-get="{{ r.href }}" hx-target="#dashboard-view" hx-select="#dashboard-view" hx-swap="outerHTML" hx-push-url="true"{% if r.current %} aria-current="true"{% endif %}>{{ r.label }}</a>
+    {% endfor %}
+  </div>
+  {% if let Some(history) = view.history %}
+  <div class="chart"><canvas data-chart="value-history" data-series="{{ history.value.series }}" role="img" aria-label="{{ history.value.label }}"></canvas></div>
+  <div class="chart"><canvas data-chart="count-history" data-series="{{ history.count.series }}" role="img" aria-label="{{ history.count.label }}"></canvas></div>
+  {% else %}
+  <p>No history yet.</p>
+  {% endif %}
+</section>

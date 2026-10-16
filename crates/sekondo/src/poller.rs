@@ -275,6 +275,33 @@ impl Poller {
         .execute(&mut *tx)
         .await?;
 
+        // Computed from the rows just written, so the history and the current figures agree, and
+        // a poll without orders records zeros. Two polls in the same instant keep the later one
+        // rather than failing the whole poll.
+        sqlx::query(
+            "INSERT INTO order_poll_totals
+                 (character_id, polled_at, sell_value, escrow, sell_corp, escrow_corp, sell_count, buy_count)
+             SELECT $1, $2,
+                    COALESCE(SUM(price * volume_remain) FILTER (WHERE NOT is_buy_order), 0),
+                    COALESCE(SUM(COALESCE(escrow, 0)) FILTER (WHERE is_buy_order), 0),
+                    COALESCE(SUM(price * volume_remain) FILTER (WHERE NOT is_buy_order AND is_corporation), 0),
+                    COALESCE(SUM(COALESCE(escrow, 0)) FILTER (WHERE is_buy_order AND is_corporation), 0),
+                    COUNT(*) FILTER (WHERE NOT is_buy_order),
+                    COUNT(*) FILTER (WHERE is_buy_order)
+             FROM current_orders WHERE character_id = $1
+             ON CONFLICT (character_id, polled_at) DO UPDATE SET
+                 sell_value = excluded.sell_value,
+                 escrow = excluded.escrow,
+                 sell_corp = excluded.sell_corp,
+                 escrow_corp = excluded.escrow_corp,
+                 sell_count = excluded.sell_count,
+                 buy_count = excluded.buy_count",
+        )
+        .bind(character_id)
+        .bind(polled_at)
+        .execute(&mut *tx)
+        .await?;
+
         let next_poll_at = self.next_poll_at(polled_at, response.expires_at);
         sqlx::query(
             "INSERT INTO order_sync

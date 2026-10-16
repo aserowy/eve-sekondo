@@ -176,3 +176,167 @@ async fn names_can_hold_an_unresolvable_structure(pool: PgPool) {
     .unwrap();
     assert_eq!(count(&pool, "names").await, 1);
 }
+
+#[sqlx::test]
+async fn order_poll_totals_is_a_hypertable_with_thirty_day_chunks(pool: PgPool) {
+    let hypertables: Vec<String> =
+        sqlx::query_scalar("SELECT hypertable_name::text FROM timescaledb_information.hypertables")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(
+        hypertables.contains(&"order_poll_totals".to_owned()),
+        "{hypertables:?}"
+    );
+
+    let interval_secs: f64 = sqlx::query_scalar(
+        "SELECT extract(epoch FROM d.time_interval)::float8 FROM timescaledb_information.dimensions d \
+         WHERE d.hypertable_name = 'order_poll_totals'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(interval_secs, 30.0 * 86_400.0);
+}
+
+#[sqlx::test]
+async fn deleting_a_character_removes_its_poll_totals(pool: PgPool) {
+    let account = insert_account(&pool).await;
+    insert_character(&pool, account, 1).await;
+    insert_character(&pool, account, 2).await;
+    for character in [1_i64, 2] {
+        sqlx::query(
+            "INSERT INTO order_poll_totals (character_id, polled_at, sell_value, escrow, sell_corp, \
+             escrow_corp, sell_count, buy_count) VALUES ($1, now(), 0, 0, 0, 0, 0, 0)",
+        )
+        .bind(character)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    sqlx::query("DELETE FROM characters WHERE character_id = 1")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let remaining: Vec<i64> = sqlx::query_scalar("SELECT character_id FROM order_poll_totals")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(remaining, vec![2]);
+}
+
+/// Everything in the migration after the `-- backfill` marker.
+fn backfill_statement() -> &'static str {
+    let migration = include_str!("../migrations/20261016000004_order_poll_totals.sql");
+    migration
+        .split_once("-- backfill\n")
+        .expect("a `-- backfill` marker in the migration")
+        .1
+}
+
+async fn insert_snapshot(
+    pool: &PgPool,
+    polled_at: &str,
+    (character, order_id): (i64, i64),
+    (is_buy, is_corp): (bool, bool),
+    price: &str,
+    volume_remain: i64,
+    escrow: Option<&str>,
+) {
+    sqlx::query(
+        "INSERT INTO order_snapshots (polled_at, character_id, order_id, type_id, region_id, \
+         location_id, is_buy_order, is_corporation, price, volume_remain, volume_total, \
+         min_volume, range, escrow, issued, duration) \
+         VALUES ($1::timestamptz, $2, $3, 34, 10000002, 60003760, $4, $5, $6::numeric, $7, 100, 1, \
+         'station', $8::numeric, now(), 90)",
+    )
+    .bind(polled_at)
+    .bind(character)
+    .bind(order_id)
+    .bind(is_buy)
+    .bind(is_corp)
+    .bind(price)
+    .bind(volume_remain)
+    .bind(escrow)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+type Totals = (String, String, String, String, i32, i32);
+
+async fn totals_at(pool: &PgPool, character: i64, polled_at: &str) -> Totals {
+    sqlx::query_as(
+        "SELECT sell_value::text, escrow::text, sell_corp::text, escrow_corp::text, sell_count, \
+         buy_count FROM order_poll_totals WHERE character_id = $1 AND polled_at = $2::timestamptz",
+    )
+    .bind(character)
+    .bind(polled_at)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test]
+async fn the_backfill_sums_each_snapshot_poll_into_one_entry(pool: PgPool) {
+    let account = insert_account(&pool).await;
+    insert_character(&pool, account, 1).await;
+    insert_character(&pool, account, 2).await;
+    let (sell, buy) = ((false, false), (true, false));
+    let (corp_sell, corp_buy) = ((false, true), (true, true));
+
+    // Poll one of character 1: two sell orders (one corporation's) and two buy orders (one
+    // corporation's, one without an escrow).
+    let t1 = "2026-10-01 10:00:00+00";
+    insert_snapshot(&pool, t1, (1, 1), sell, "10.00", 3, None).await;
+    insert_snapshot(&pool, t1, (1, 2), corp_sell, "5.00", 2, None).await;
+    insert_snapshot(&pool, t1, (1, 3), buy, "4.00", 5, Some("2.00")).await;
+    insert_snapshot(&pool, t1, (1, 4), corp_buy, "9.00", 1, Some("7.50")).await;
+    insert_snapshot(&pool, t1, (1, 5), buy, "1.00", 1, None).await;
+    // Poll two of character 1, and a poll of character 2 at the first time.
+    let t2 = "2026-10-01 10:20:00+00";
+    insert_snapshot(&pool, t2, (1, 1), sell, "1.00", 1, None).await;
+    insert_snapshot(&pool, t1, (2, 6), sell, "2.50", 4, None).await;
+
+    sqlx::query(sqlx::AssertSqlSafe(backfill_statement().to_owned()))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(count(&pool, "order_poll_totals").await, 3);
+    assert_eq!(
+        totals_at(&pool, 1, t1).await,
+        (
+            "40.00".into(),
+            "9.50".into(),
+            "10.00".into(),
+            "7.50".into(),
+            2,
+            3
+        )
+    );
+    assert_eq!(
+        totals_at(&pool, 1, t2).await,
+        (
+            "1.00".into(),
+            "0.00".into(),
+            "0.00".into(),
+            "0.00".into(),
+            1,
+            0
+        )
+    );
+    assert_eq!(
+        totals_at(&pool, 2, t1).await,
+        (
+            "10.00".into(),
+            "0.00".into(),
+            "0.00".into(),
+            "0.00".into(),
+            1,
+            0
+        )
+    );
+}

@@ -7,7 +7,7 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
 };
 use sqlx::PgPool;
-use time::{Duration, OffsetDateTime};
+use time::OffsetDateTime;
 use tower_sessions::Session;
 use uuid::Uuid;
 
@@ -15,6 +15,7 @@ use crate::{
     account::CurrentAccount,
     app::AppState,
     csrf, format,
+    freshness::{FreshnessView, freshness_view, list_freshness},
     pages::{self, Nav, Page},
     selection::{CharacterSelection, ViewQuery},
 };
@@ -213,44 +214,6 @@ pub async fn list_orders(
         .await
 }
 
-// ---- freshness ----
-
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct FreshnessRecord {
-    pub character_id: i64,
-    pub name: String,
-    pub needs_relogin: bool,
-    pub last_success_at: Option<OffsetDateTime>,
-    pub next_poll_at: Option<OffsetDateTime>,
-}
-
-pub async fn list_freshness(
-    pool: &PgPool,
-    account_id: Uuid,
-    selection: &CharacterSelection,
-) -> Result<Vec<FreshnessRecord>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT c.character_id, c.name, c.needs_relogin, s.last_success_at, s.next_poll_at
-         FROM characters c
-         LEFT JOIN order_sync s ON s.character_id = c.character_id
-         WHERE c.account_id = $1 AND c.character_id = ANY($2)
-         ORDER BY c.created_at, c.character_id",
-    )
-    .bind(account_id)
-    .bind(selection.ids())
-    .fetch_all(pool)
-    .await
-}
-
-/// Stale: needs a re-login, never polled successfully, or the last success is older than twice
-/// the refresh interval.
-fn is_stale(record: &FreshnessRecord, now: OffsetDateTime, interval: Duration) -> bool {
-    record.needs_relogin
-        || record
-            .last_success_at
-            .is_none_or(|last| now - last > interval * 2)
-}
-
 // ---- view model ----
 
 pub struct HeaderView {
@@ -286,15 +249,6 @@ pub struct FilterEntry {
     pub id: i64,
     pub name: String,
     pub checked: bool,
-}
-
-pub struct FreshnessView {
-    pub name: String,
-    pub stale: bool,
-    pub needs_relogin: bool,
-    pub waiting_for_first_update: bool,
-    pub last_update: String,
-    pub next_update: String,
 }
 
 /// Everything the orders page and its fragments show for one request.
@@ -433,26 +387,6 @@ fn row_view(row: &OrderRow, side: Side, now: OffsetDateTime) -> RowView {
         amount_exact: format::isk_exact(amount_cents),
         issued: format::eve_time(row.issued),
         left: format::time_left(row.expires_at(), now),
-    }
-}
-
-fn freshness_view(
-    record: &FreshnessRecord,
-    now: OffsetDateTime,
-    interval: Duration,
-) -> FreshnessView {
-    FreshnessView {
-        name: record.name.clone(),
-        stale: is_stale(record, now, interval),
-        needs_relogin: record.needs_relogin,
-        waiting_for_first_update: record.last_success_at.is_none() && !record.needs_relogin,
-        last_update: record
-            .last_success_at
-            .map_or_else(|| "never".to_owned(), format::eve_time),
-        next_update: match (record.needs_relogin, record.next_poll_at) {
-            (false, Some(next)) => format::eve_time(next),
-            _ => "\u{2014}".to_owned(),
-        },
     }
 }
 
