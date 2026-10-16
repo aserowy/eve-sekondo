@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["crates/sekondo", "crates/eve-stub"]
+
+[workspace.package]
+edition = "2024"
+publish = false

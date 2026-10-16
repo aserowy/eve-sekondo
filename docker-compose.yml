@@ -1,0 +1,78 @@
+services:
+  db:
+    # Pinned: a stored data directory only starts with the PostgreSQL major version that created it.
+    image: docker.io/timescale/timescaledb:2.17.2-pg17
+    entrypoint: ["/etc/sekondo/entrypoint.sh"]
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/var/lib/postgresql/db.pem
+      - -c
+      - ssl_key_file=/var/lib/postgresql/db-key.pem
+      - -c
+      - ssl_min_protocol_version=TLSv1.2
+      - -c
+      - hba_file=/etc/sekondo/pg_hba.conf
+      - -c
+      - ident_file=/etc/sekondo/pg_ident.conf
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sekondo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-sekondo}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - sekondo-db-data:/var/lib/postgresql/data
+      - ./docker/db/pg_hba.conf:/etc/sekondo/pg_hba.conf:ro
+      - ./docker/db/pg_ident.conf:/etc/sekondo/pg_ident.conf:ro
+      - ./docker/db/entrypoint.sh:/etc/sekondo/entrypoint.sh:ro
+      - ./certs:/certs-ro:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      # `environment` wins over `env_file`: inside Compose the database is db:5432, verified
+      # against the mounted CA. POSTGRES_PASSWORD must be URL-safe (openssl rand -hex 24).
+      DATABASE_URL: postgres://${POSTGRES_USER:-sekondo}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-sekondo}?sslmode=verify-full&sslrootcert=/certs/rootCA.pem
+      BIND_ADDR: 0.0.0.0:8443
+      TLS_CERT_PATH: /certs/dev.pem
+      TLS_KEY_PATH: /run/sekondo/tls-key.pem
+      TLS_EXTRA_CA_PATH: /certs/rootCA.pem
+      PUBLIC_BASE_URL: https://localhost:8443
+    ports:
+      # Loopback only: never the default 0.0.0.0.
+      - "127.0.0.1:8443:8443"
+    volumes:
+      - ./certs:/certs:ro
+    tmpfs:
+      - /run/sekondo
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_READ_SEARCH
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "/app/sekondo", "healthcheck"]
+      interval: 10s
+      timeout: 6s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  sekondo-db-data:

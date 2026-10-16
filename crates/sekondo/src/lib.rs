@@ -1,0 +1,21 @@
+//! Sekondo: a personal helper for EVE Online.
+
+pub mod account;
+pub mod app;
+pub mod auth;
+pub mod characters;
+pub mod clock;
+pub mod config;
+pub mod crypto;
+pub mod csrf;
+pub mod decision;
+pub mod headers;
+pub mod oauth;
+pub mod pages;
+pub mod repo;
+pub mod session;
+pub mod sso;
+#[cfg(feature = "test-hooks")]
+pub mod test_hooks;
+pub mod tls;
+pub mod tokens;

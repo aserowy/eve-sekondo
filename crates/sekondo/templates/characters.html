@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block title %}Characters · Sekondo{% endblock %}
+
+{% block content %}
+<header>
+  <hgroup>
+    <h1>Your characters</h1>
+    <p>Everything Sekondo knows is read through these characters.</p>
+  </hgroup>
+</header>
+
+{% if let Some(message) = flash %}
+<article role="alert" id="flash">{{ message }}</article>
+{% endif %}
+
+<section id="characters">
+  {% for c in characters %}
+  <article class="character" id="character-{{ c.id }}">
+    <img src="https://images.evetech.net/characters/{{ c.id }}/portrait?size=64" width="64" height="64" alt="Portrait of {{ c.name }}">
+    <div>
+      <strong>{{ c.name }}</strong>
+      {% if c.needs_relogin %}
+      <mark class="badge">Needs re-login</mark>
+      <a href="/auth/add">Log in again</a>
+      {% endif %}
+    </div>
+    <button class="secondary outline" hx-post="/characters/{{ c.id }}/unlink"
+            hx-confirm="Unlink {{ c.name }}? Its tokens and all data stored for it will be deleted."
+            hx-target="#character-{{ c.id }}" hx-swap="outerHTML">Unlink</button>
+  </article>
+  {% endfor %}
+</section>
+
+<p>
+  <a role="button" href="/auth/add">Add character</a>
+  <button class="secondary outline" hx-post="/auth/logout">Sign out</button>
+</p>
+{% endblock %}

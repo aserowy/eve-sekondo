@@ -47,6 +47,15 @@
             nodejs_24
             markdownlint-cli
             prettier
+
+            sqlx-cli
+            mkcert
+
+            podman
+            podman-compose
+
+            postgresql_17
+            openssl
           ];
 
           shell = pkgs.mkShell {
@@ -65,6 +74,11 @@
             '';
 
             RUST_BACKTRACE = "full";
+
+            # NixOS can't run Playwright's downloaded browsers; use the nixpkgs build.
+            # `@playwright/test` in e2e/package.json must match playwright-driver's version.
+            PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
+            PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
           };
         in
         {

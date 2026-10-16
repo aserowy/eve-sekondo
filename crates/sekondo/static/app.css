@@ -1,0 +1,8 @@
+/* htmx indicator styles (htmx.config.includeIndicatorStyles is off because of the CSP). */
+.htmx-indicator { opacity: 0; transition: opacity 200ms ease-in; }
+.htmx-request .htmx-indicator, .htmx-request.htmx-indicator { opacity: 1; }
+
+/* Characters page */
+.character { display: flex; gap: 1rem; align-items: center; }
+.character img { border-radius: 50%; }
+.badge { margin-right: 0.5rem; }

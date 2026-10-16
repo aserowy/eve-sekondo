@@ -1,0 +1,10 @@
+target
+.git
+.direnv
+.claude
+.agents
+openspec
+e2e
+certs
+.env
+**/node_modules
