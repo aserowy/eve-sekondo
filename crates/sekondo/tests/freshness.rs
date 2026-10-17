@@ -131,3 +131,45 @@ async fn the_freshness_fragment_is_the_strip_alone(pool: PgPool) {
     assert!(html.contains("Alice Alpha") && html.contains("Last update"));
     assert!(!html.contains(r#"id="sell-orders""#));
 }
+
+const WARNINGS_BADGE: &str = r#"class="badge stale warnings">"#;
+
+#[sqlx::test]
+async fn a_character_needing_relogin_counts_as_one_warning(pool: PgPool) {
+    let (app, browser) = setup(pool).await;
+    app.state.poller.poll_character(ALICE).await;
+    app.state.repo.mark_needs_relogin(ALICE).await.unwrap();
+
+    let html = orders_page(&app, &browser).await;
+
+    assert!(
+        strip(&html).contains(&format!("{WARNINGS_BADGE}1</mark>")),
+        "{}",
+        strip(&html)
+    );
+}
+
+#[sqlx::test]
+async fn a_never_polled_character_counts_as_one_warning(pool: PgPool) {
+    let (app, browser) = setup(pool).await;
+
+    let html = orders_page(&app, &browser).await;
+
+    assert!(strip(&html).contains(&format!("{WARNINGS_BADGE}1</mark>")));
+}
+
+#[sqlx::test]
+async fn fresh_characters_show_no_warning_count(pool: PgPool) {
+    let (app, browser) = setup(pool.clone()).await;
+    let now = OffsetDateTime::now_utc();
+    seed_sync(
+        &pool,
+        Some(now - Duration::minutes(5)),
+        now + Duration::minutes(15),
+    )
+    .await;
+
+    let html = orders_page(&app, &browser).await;
+
+    assert!(!strip(&html).contains("warnings"), "{}", strip(&html));
+}

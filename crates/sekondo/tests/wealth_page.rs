@@ -488,3 +488,48 @@ async fn an_unknown_range_selects_seven_days(pool: PgPool) {
     assert!(html.contains(r#"value="7d""#));
     assert_eq!(html.matches(r#"aria-current="true""#).count(), 1);
 }
+
+const WARNINGS_BADGE: &str = r#"class="badge stale warnings">"#;
+
+#[sqlx::test]
+async fn a_character_needing_relogin_with_stale_wallet_and_assets_counts_once(pool: PgPool) {
+    let app = app(pool.clone()).await;
+    let browser = signed_in(&app).await;
+    let now = OffsetDateTime::now_utc();
+    sync(&pool, ALICE, "wallet", Some(now - Duration::hours(5))).await;
+    sync(&pool, ALICE, "assets", Some(now - Duration::hours(5))).await;
+    app.state.repo.mark_needs_relogin(ALICE).await.unwrap();
+
+    let html = get(&app, &browser, "/wealth/freshness").await;
+
+    assert!(
+        html.contains(&format!("{WARNINGS_BADGE}1</mark>")),
+        "{html}"
+    );
+}
+
+#[sqlx::test]
+async fn stale_assets_alone_count_as_a_warning(pool: PgPool) {
+    let app = app(pool.clone()).await;
+    let browser = signed_in(&app).await;
+    let now = OffsetDateTime::now_utc();
+    sync(&pool, ALICE, "wallet", Some(now)).await;
+    sync(&pool, ALICE, "assets", Some(now - Duration::hours(3))).await;
+
+    let html = get(&app, &browser, "/wealth/freshness").await;
+
+    assert!(html.contains(&format!("{WARNINGS_BADGE}1</mark>")), "{html}");
+}
+
+#[sqlx::test]
+async fn fresh_wallet_and_assets_show_no_warning_count(pool: PgPool) {
+    let app = app(pool.clone()).await;
+    let browser = signed_in(&app).await;
+    let now = OffsetDateTime::now_utc();
+    sync(&pool, ALICE, "wallet", Some(now)).await;
+    sync(&pool, ALICE, "assets", Some(now)).await;
+
+    let html = get(&app, &browser, "/wealth/freshness").await;
+
+    assert!(!html.contains("warnings"), "{html}");
+}

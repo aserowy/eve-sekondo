@@ -9,7 +9,7 @@
 {% block content %}
 <div class="fill" hx-ext="sse" sse-connect="/events">
 <div id="orders-view">
-  <section id="freshness" class="panel" hx-get="{{ view.freshness_url }}" hx-trigger="sse:orders-updated, sse:fees-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
+  <section id="freshness" class="panel" data-freshness hx-get="{{ view.freshness_url }}" hx-trigger="sse:orders-updated, sse:fees-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
     {% include "orders_freshness.html" %}
   </section>
   <div id="order-tables" hx-get="{{ view.tables_url }}" hx-trigger="sse:orders-updated, sse:market-updated, sse:fees-updated, htmx:sseOpen from:body" hx-swap="innerHTML">

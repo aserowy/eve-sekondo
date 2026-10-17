@@ -1,6 +1,6 @@
 import type { Page } from '@playwright/test';
 import {
-  expect, loginWith, marketPoll, openCharacters, pollCharacter, query, stubControl, stubMarket, stubMarketOrder, stubOrder, test, wealthPoll, stubAsset, feePoll, stubTradeSkills,
+  expect, loginWith, marketPoll, openCharacters, pollCharacter, query, stubControl, stubMarket, stubMarketOrder, stubOrder, test, wealthPoll, stubAsset, feePoll, stubTradeSkills, unfoldFreshness,
 } from '../support/fixtures';
 
 const scroller = (page: Page, key: string) => page.locator(`[data-scroll-key="${key}"]`);
@@ -167,6 +167,7 @@ test('a fees signal keeps the scroll position of the freshness column', async ({
   await page.goto('/orders');
   await opened;
   await page.waitForTimeout(300);
+  await unfoldFreshness(page);
   const top = await scrollTo(page, 'freshness', 1);
   expect(top).toBeGreaterThan(0);
 

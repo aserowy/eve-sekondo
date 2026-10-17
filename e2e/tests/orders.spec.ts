@@ -1,6 +1,6 @@
 import {
   expect, feePoll, loginWith, marketPoll, pollCharacter, stubControl, stubMarket, stubMarketOrder, stubOrder,
-  stubTradeSkills, stubTransaction, test, wealthPoll,
+  stubTradeSkills, stubTransaction, test, unfoldFreshness, wealthPoll,
 } from '../support/fixtures';
 
 test('sell and buy orders show up after a poll, sortable, with exact amounts on hover', async ({ page }) => {
@@ -9,6 +9,7 @@ test('sell and buy orders show up after a poll, sortable, with exact amounts on 
   await expect(page).toHaveURL(/\/orders$/);
 
   // Nothing has been polled yet.
+  await unfoldFreshness(page);
   await expect(page.getByText('Waiting for first update')).toBeVisible();
   await expect(page.getByText('No sell orders.')).toBeVisible();
   await expect(page.getByText('No buy orders.')).toBeVisible();
@@ -69,6 +70,7 @@ test('a stale character keeps its orders listed', async ({ page }) => {
   expect(await pollCharacter(page, 90000001)).toBe('200 needs-relogin');
 
   await page.goto('/orders');
+  await unfoldFreshness(page);
   await expect(page.locator('#freshness').getByText('Stale')).toBeVisible();
   await expect(page.locator('#freshness').getByRole('link', { name: 'Log in again' })).toBeVisible();
   await expect(page.locator('#sell-orders tbody.order')).toHaveCount(2);

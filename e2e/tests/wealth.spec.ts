@@ -1,6 +1,6 @@
 import { chartData, chartDrawn, expectTooltip } from '../support/charts';
 import {
-  expect, loginWith, openCharacters, pollCharacter, priceRefresh, query, stubAsset, stubControl, stubOrder, test, wealthPoll,
+  expect, loginWith, openCharacters, pollCharacter, priceRefresh, query, stubAsset, stubControl, stubOrder, test, unfoldFreshness, wealthPoll,
 } from '../support/fixtures';
 import type { Page } from '@playwright/test';
 
@@ -26,6 +26,7 @@ test('the wealth page opens from the dashboard with the narrowed selection and s
   await expect(page).toHaveURL(/\/wealth\?chars=90000001$/);
   await expect(page.locator('#wealth-items')).toBeVisible();
   await expect(page.getByRole('navigation').getByRole('link', { name: 'Wealth' })).toHaveAttribute('aria-current', 'page');
+  await unfoldFreshness(page);
   const freshness = page.locator('#wealth-freshness');
   await expect(freshness).toContainText('Alice Alpha');
   await expect(freshness).not.toContainText('Bob Bravo');
@@ -41,6 +42,7 @@ test('narrowing the selection on the wealth page keeps the page and leaves the d
   await twoCharacters(page);
   await page.getByRole('navigation').getByRole('link', { name: 'Wealth' }).click();
   await expect(page).toHaveURL(/\/wealth$/);
+  await unfoldFreshness(page);
 
   await page.getByRole('checkbox', { name: 'Alice Alpha' }).uncheck();
 
@@ -54,6 +56,7 @@ test('a character that needs a new login shows stale wallet and assets and a lin
   await query('UPDATE characters SET needs_relogin = true');
 
   await page.goto('/wealth');
+  await unfoldFreshness(page);
 
   const freshness = page.locator('#wealth-freshness');
   await expect(freshness.locator('[data-kind="wallet"]').getByText('Stale')).toBeVisible();

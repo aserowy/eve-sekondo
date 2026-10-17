@@ -401,6 +401,8 @@ pub struct OrdersView {
     pub sell: TableView,
     pub buy: TableView,
     pub freshness: Vec<FreshnessView>,
+    /// How many of the selected characters are stale or need re-login.
+    pub warnings: usize,
 }
 
 /// The view state a URL carries: the selection and one sorting per table.
@@ -630,6 +632,14 @@ async fn build_view(
         fees::locations_by_character(&state.pool, account_id, selection.ids()).await?;
 
     let page_query = view_state.query();
+    let freshness: Vec<FreshnessView> = freshness
+        .iter()
+        .map(|r| FreshnessView {
+            locations: fee_locations.remove(&r.character_id).unwrap_or_default(),
+            ..freshness_view(r, now, interval)
+        })
+        .collect();
+    let warnings = freshness.iter().filter(|f| f.stale).count();
     let view = OrdersView {
         characters: characters
             .iter()
@@ -659,13 +669,8 @@ async fn build_view(
                 .map(|r| row_view(r, Side::Buy, now))
                 .collect(),
         },
-        freshness: freshness
-            .iter()
-            .map(|r| FreshnessView {
-                locations: fee_locations.remove(&r.character_id).unwrap_or_default(),
-                ..freshness_view(r, now, interval)
-            })
-            .collect(),
+        freshness,
+        warnings,
     };
     Ok(Some((view, selection)))
 }

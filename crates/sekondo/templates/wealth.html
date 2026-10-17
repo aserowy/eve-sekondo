@@ -19,7 +19,7 @@
 {% block content %}
 <div class="fill" hx-ext="sse" sse-connect="/events">
 <div id="wealth-view">
-  <section id="wealth-freshness" class="panel" hx-get="{{ view.freshness_url }}" hx-trigger="sse:wealth-updated, sse:orders-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
+  <section id="wealth-freshness" class="panel" data-freshness hx-get="{{ view.freshness_url }}" hx-trigger="sse:wealth-updated, sse:orders-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
     {% include "wealth_freshness.html" %}
   </section>
   {% include "wealth_graph.html" %}

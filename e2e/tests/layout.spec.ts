@@ -1,4 +1,4 @@
-import { expect, loginWith, openCharacters, pollCharacter, query, stubControl, stubOrder, test } from '../support/fixtures';
+import { expect, loginWith, openCharacters, pollCharacter, query, stubControl, stubOrder, test, unfoldFreshness } from '../support/fixtures';
 import { chartDrawn } from '../support/charts';
 import { expectInsideViewport, horizontalOverflow, verticalOverflow } from '../support/layout';
 
@@ -79,7 +79,7 @@ async function threeCharactersWithOrders(page: import('@playwright/test').Page) 
   }
 }
 
-test('the dashboard fits a 1920x1080 window without page scrolling', async ({ page }) => {
+test('the dashboard lays out tiles, breakdown, one row of three graphs, then each over-time graph on its own row', async ({ page }) => {
   await page.setViewportSize({ width: 1920, height: 1080 });
   await threeCharactersWithOrders(page);
   await page.goto('/dashboard');
@@ -87,17 +87,37 @@ test('the dashboard fits a 1920x1080 window without page scrolling', async ({ pa
 
   // The summary refreshes itself once the event stream opens, which swaps its tiles and canvases for fresh ones.
   await expect(async () => {
-    expect(await verticalOverflow(page)).toBeLessThanOrEqual(0);
     for (const tile of ['#tile-sell-value', '#tile-escrow', '#tile-wealth', '#tile-sell-count', '#tile-buy-count', '#breakdown']) {
       await expectInsideViewport(page, page.locator(tile));
     }
-    const canvases = page.locator('canvas[data-chart]');
-    expect(await canvases.count()).toBe(6);
-    for (let i = 0; i < 6; i++) await expectInsideViewport(page, canvases.nth(i));
+    const canvas = (kind: string) => page.locator(`canvas[data-chart="${kind}"]`);
+    for (const kind of ['split', 'top-sell', 'top-buy']) await expectInsideViewport(page, canvas(kind));
+
+    const box = async (selector: string) => (await page.locator(selector).boundingBox())!;
+    const tiles = await box('#tiles');
+    const breakdown = await box('.breakdown');
+    expect(Math.abs(breakdown.width - tiles.width), 'breakdown as wide as the tiles').toBeLessThanOrEqual(2);
+    expect(breakdown.y).toBeGreaterThanOrEqual(tiles.y + tiles.height - 1);
+
+    const [split, sell, buy] = [await box('.split'), await box('.top-sell'), await box('.top-buy')];
+    expect(Math.abs(split.y - sell.y)).toBeLessThanOrEqual(2);
+    expect(Math.abs(sell.y - buy.y)).toBeLessThanOrEqual(2);
+    expect(sell.x).toBeGreaterThanOrEqual(split.x + split.width - 1);
+    expect(buy.x).toBeGreaterThanOrEqual(sell.x + sell.width - 1);
+    expect(split.y).toBeGreaterThanOrEqual(breakdown.y + breakdown.height - 1);
+
+    let above = split;
+    for (const panel of ['.history-value', '.history-count', '.history-wealth']) {
+      const b = await box(panel);
+      expect(Math.abs(b.width - tiles.width), `${panel} as wide as the tiles`).toBeLessThanOrEqual(2);
+      expect(b.y, `${panel} below the previous row`).toBeGreaterThanOrEqual(above.y + above.height - 1);
+      expect(b.height, `${panel} height`).toBeGreaterThanOrEqual(16 * 11);
+      above = b;
+    }
   }).toPass();
 });
 
-test('with twenty characters the breakdown scrolls inside its panel and keeps its header', async ({ page }) => {
+test('with twenty characters the breakdown scrolls inside itself, keeps its header, and the graph row stays on the first screen', async ({ page }) => {
   await page.setViewportSize({ width: 1920, height: 1080 });
   await loginWith(page, 'Alice Alpha');
   // The stub only knows three characters, so the other nineteen are linked straight in the database.
@@ -125,8 +145,8 @@ test('with twenty characters the breakdown scrolls inside its panel and keeps it
   const header = (await page.locator('#breakdown thead th').first().boundingBox())!;
   expect(header.y).toBeGreaterThanOrEqual(box.y - 1);
   expect(header.y).toBeLessThan(box.y + 24);
-  expect(await verticalOverflow(page)).toBeLessThanOrEqual(0);
   expect(await page.evaluate(() => window.scrollY)).toBe(0);
+  for (const panel of ['.split', '.top-sell', '.top-buy']) await expectInsideViewport(page, page.locator(panel));
 });
 
 test('orders page: freshness right of the tables, buy below sell, the sell table scrolls on its own', async ({ page }) => {
@@ -141,6 +161,7 @@ test('orders page: freshness right of the tables, buy below sell, the sell table
   // The event stream opening refreshes the tables once; scrolling before that would be undone by it.
   await refreshed;
   await page.waitForTimeout(300);
+  await unfoldFreshness(page);
 
   // The tables refresh themselves once the event stream opens, so geometry is read until it settles.
   await expect(async () => {
@@ -182,6 +203,7 @@ test('the Log in again link keeps its text and carries an icon', async ({ page }
   });
   expect(await pollCharacter(page, 90000001)).toBe('200 needs-relogin');
   await page.goto('/orders');
+  await unfoldFreshness(page);
 
   const link = page.locator('#freshness').getByRole('link', { name: 'Log in again' });
   await expect(link).toBeVisible();
@@ -195,6 +217,7 @@ test('wealth page: freshness right of the graph and the items, items below the g
   await page.setViewportSize({ width: 1920, height: 1080 });
   await loginWith(page, 'Alice Alpha');
   await page.goto('/wealth');
+  await unfoldFreshness(page);
 
   // The panels refresh themselves once the event stream opens, so geometry is read until it settles.
   await expect(async () => {
@@ -223,6 +246,7 @@ test('the wealth page Log in again link keeps its text and carries an icon', asy
   });
   expect(await pollCharacter(page, 90000001)).toBe('200 needs-relogin');
   await page.goto('/wealth');
+  await unfoldFreshness(page);
 
   const link = page.locator('#wealth-freshness').getByRole('link', { name: 'Log in again' });
   await expect(link).toHaveText('Log in again');
@@ -282,6 +306,7 @@ test('walking through every signed-in page raises no policy violation', async ({
   await nav.getByRole('link', { name: 'Orders' }).click();
   await expect(page).toHaveURL(/\/orders\?chars=90000001,90000002$/);
   await expect(page.locator('#sell-orders tbody.order')).toHaveCount(2);
+  await unfoldFreshness(page);
   await page.locator('#sell-orders').getByRole('link', { name: 'Price' }).click();
   await expect(page).toHaveURL(/sort=price&dir=asc/);
   await nav.getByRole('checkbox', { name: 'Bob Bravo' }).uncheck();
@@ -289,6 +314,7 @@ test('walking through every signed-in page raises no policy violation', async ({
 
   await nav.getByRole('link', { name: 'Wealth' }).click();
   await expect(page).toHaveURL(/\/wealth\?chars=90000001/);
+  await unfoldFreshness(page);
   await page.locator('#wealth-range-control').getByRole('link', { name: '30 days' }).click();
   await expect(page.locator('#wealth-range-control [aria-current="true"]')).toHaveText('30 days');
   await nav.getByRole('checkbox', { name: 'Bob Bravo' }).check();

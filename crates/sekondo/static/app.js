@@ -65,11 +65,39 @@ document.addEventListener('htmx:afterSwap', (event) => {
   const positions = scrollPositions.get(event.detail.xhr);
   if (!positions) return;
   scrollPositions.delete(event.detail.xhr);
+  // A swapped freshness column arrives collapsed; unfold it first, or its list has no height to scroll.
+  applyFreshness();
   for (const el of document.querySelectorAll('[data-scroll-key]')) {
     const position = positions.get(el.dataset.scrollKey);
     if (position) [el.scrollTop, el.scrollLeft] = position;
   }
 });
+
+// ---- freshness column ----
+// The freshness side column of the orders and wealth pages starts collapsed. Whether the user has
+// unfolded it lives here, for the life of the page: live refreshes and view changes swap the
+// column's HTML (always rendered collapsed), and every htmx load puts the state back on it.
+// A reload or another page starts collapsed again. Nothing is stored.
+let freshnessOpen = false;
+
+function applyFreshness() {
+  for (const section of document.querySelectorAll('[data-freshness]')) {
+    section.toggleAttribute('data-open', freshnessOpen);
+    const toggle = section.querySelector('.freshness-toggle');
+    toggle?.setAttribute('aria-expanded', String(freshnessOpen));
+    toggle?.setAttribute('title', freshnessOpen ? 'Hide freshness' : 'Show freshness');
+    const body = section.querySelector('.freshness-body');
+    if (body) body.hidden = !freshnessOpen;
+  }
+}
+
+document.addEventListener('click', (event) => {
+  if (!(event.target instanceof Element) || !event.target.closest('.freshness-toggle')) return;
+  freshnessOpen = !freshnessOpen;
+  applyFreshness();
+});
+
+document.addEventListener('htmx:load', applyFreshness);
 
 // ---- charts ----
 // Chart.js 4.5.1, vendored as static/chart.umd.min.js (MIT, see chart.js.LICENSE.md),

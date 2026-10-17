@@ -1,7 +1,7 @@
 import { chartData, chartDrawn } from '../support/charts';
 import {
   expect, feePoll, loginWith, marketPoll, marketPollOutsideBrowser, pollCharacter, pollOutsideBrowser, stubControl,
-  stubMarket, stubMarketOrder, stubOrder, stubAsset, stubTradeSkills, stubTransaction, test, wealthPoll,
+  stubMarket, stubMarketOrder, stubOrder, stubAsset, stubTradeSkills, stubTransaction, test, unfoldFreshness, wealthPoll,
 } from '../support/fixtures';
 
 test('the tables refresh after a poll without reloading', async ({ page }) => {
@@ -236,6 +236,7 @@ test('selection, range and sorting are kept by a live wealth refresh', async ({ 
   await wealthPoll(page, 90000002, 'assets');
   await wealthPoll(page, 90000001, 'wallet');
   await page.goto('/wealth?chars=90000001&range=24h&sort=item&dir=asc');
+  await unfoldFreshness(page);
   await expect(page.locator('#inventory tbody tr')).toHaveCount(2);
   await expect(page.locator('#inventory th[aria-sort="ascending"]')).toContainText('Item');
   await page.waitForTimeout(1000);

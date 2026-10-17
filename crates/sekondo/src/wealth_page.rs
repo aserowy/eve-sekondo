@@ -87,6 +87,8 @@ pub struct WealthView {
     pub items_url: String,
     pub graph_url: String,
     pub freshness: Vec<WealthFreshnessView>,
+    /// How many of the selected characters need re-login or have a stale wallet or assets.
+    pub warnings: usize,
     pub items: ItemsView,
     pub graph: GraphView,
 }
@@ -303,6 +305,14 @@ async fn build_view(
     let points =
         wealth::history(&state.pool, account_id, &selection, view_state.range, now).await?;
 
+    let freshness: Vec<WealthFreshnessView> = freshness
+        .iter()
+        .map(|r| wealth_freshness_view(r, now, order_interval, ASSETS_INTERVAL))
+        .collect();
+    let warnings = freshness
+        .iter()
+        .filter(|f| f.needs_relogin || f.wallet.stale || f.assets.stale)
+        .count();
     let view = WealthView {
         characters: characters
             .iter()
@@ -317,10 +327,8 @@ async fn build_view(
         freshness_url: format!("/wealth/freshness{}", view_state.query(false, false)),
         items_url: format!("/wealth/items{}", view_state.query(true, false)),
         graph_url: format!("/wealth/graph{}", view_state.query(false, true)),
-        freshness: freshness
-            .iter()
-            .map(|r| wealth_freshness_view(r, now, order_interval, ASSETS_INTERVAL))
-            .collect(),
+        freshness,
+        warnings,
         items: items_view(&view_state, &inventory),
         graph: graph_view(&view_state, &points),
     };

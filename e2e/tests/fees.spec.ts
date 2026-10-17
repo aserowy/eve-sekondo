@@ -1,6 +1,6 @@
 import type { Page } from '@playwright/test';
 import {
-  expect, feePoll, loginWith, openCharacters, pollCharacter, stubControl, stubTradeSkills, test,
+  expect, feePoll, loginWith, openCharacters, pollCharacter, stubControl, stubTradeSkills, test, unfoldFreshness,
 } from '../support/fixtures';
 
 const ALICE = 90000001;
@@ -15,6 +15,7 @@ async function aliceTrained(page: Page) {
   expect(await feePoll(page)).toBe('200 ok');
   await page.getByRole('navigation').getByRole('link', { name: 'Orders' }).click();
   await expect(page).toHaveURL(/\/orders$/);
+  await unfoldFreshness(page);
 }
 
 const row = (page: Page, location: string) =>
@@ -55,6 +56,7 @@ test('a character whose skills were not polled yet shows dashes', async ({ page 
   await loginWith(page, 'Alice Alpha');
   expect(await pollCharacter(page, ALICE)).toBe('200 updated');
   await page.getByRole('navigation').getByRole('link', { name: 'Orders' }).click();
+  await unfoldFreshness(page);
 
   const jita = row(page, JITA);
   for (const figure of ['sales-tax', 'broker-fee', 'min-margin']) {
@@ -73,6 +75,7 @@ test('narrowing the selection narrows the locations and fees', async ({ page }) 
   for (const id of [ALICE, BOB]) expect(await pollCharacter(page, id)).toBe('200 updated');
   expect(await feePoll(page)).toBe('200 ok');
   await page.getByRole('navigation').getByRole('link', { name: 'Orders' }).click();
+  await unfoldFreshness(page);
 
   const alice = page.locator('#freshness li').filter({ hasText: 'Alice Alpha' });
   const bob = page.locator('#freshness li').filter({ hasText: 'Bob Bravo' });
@@ -100,6 +103,7 @@ test('a trained skill updates the sales tax without a reload and re-fetches the 
   ]);
   await page.getByRole('navigation').getByRole('link', { name: 'Orders' }).click();
   await opened;
+  await unfoldFreshness(page);
   const tax = row(page, JITA).locator('[data-fee="sales-tax"]');
   // 7.5 x (1 - 0.11 x 4)
   await expect(tax).toHaveText('4.20%');

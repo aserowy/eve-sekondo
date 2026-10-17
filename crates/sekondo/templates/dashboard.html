@@ -19,7 +19,7 @@
 {% endblock %}
 
 {% block content %}
-<div class="fill" hx-ext="sse" sse-connect="/events">
+<div hx-ext="sse" sse-connect="/events">
 <div id="dashboard-view">
   <section id="dashboard-summary" hx-get="{{ view.summary_url }}" hx-trigger="sse:orders-updated, sse:wealth-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
     {% include "dashboard_summary.html" %}
