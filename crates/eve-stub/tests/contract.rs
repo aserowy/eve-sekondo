@@ -389,6 +389,8 @@ async fn injected_failures_conform_on_every_esi_route() {
     let structure = format!("/universe/structures/{STRUCTURE}");
     let orders = format!("/characters/{ALICE}/orders");
     let market = "/markets/10000002/orders?order_type=all&type_id=34";
+    let wallet = format!("/characters/{ALICE}/wallet");
+    let assets = format!("/characters/{ALICE}/assets");
 
     let failures: [(u16, &str, Value); 3] = [
         (
@@ -409,6 +411,9 @@ async fn injected_failures_conform_on_every_esi_route() {
             ("names", "names"),
             ("structures", "structures"),
             ("market", "market-orders"),
+            ("wallet", "wallet"),
+            ("assets", "assets"),
+            ("prices", "prices"),
         ] {
             control(
                 &f,
@@ -420,10 +425,105 @@ async fn injected_failures_conform_on_every_esi_route() {
                 "orders" => get(&f, &orders, Some(&token)).await,
                 "names" => names(&f, &[34]).await,
                 "market" => get(&f, market, None).await,
+                "wallet" => get(&f, &wallet, Some(&token)).await,
+                "assets" => get(&f, &assets, Some(&token)).await,
+                "prices" => get(&f, "/markets/prices", None).await,
                 _ => get(&f, &structure, Some(&token)).await,
             };
             assert_eq!(answer.status, status, "{route}");
             conforms(call, variant, &answer);
         }
     }
+}
+
+async fn wallet_of(f: &Fixture, character: i64, token: Option<&str>) -> Answer {
+    get(f, &format!("/characters/{character}/wallet"), token).await
+}
+
+async fn assets_page(f: &Fixture, character: i64, token: &str, page: usize) -> Answer {
+    get(
+        f,
+        &format!("/characters/{character}/assets?page={page}"),
+        Some(token),
+    )
+    .await
+}
+
+fn asset(id: i64) -> Value {
+    json!({
+        "item_id": id, "type_id": 34, "location_id": STATION, "location_type": "station",
+        "location_flag": "Hangar", "quantity": 5, "is_singleton": false,
+    })
+}
+
+#[tokio::test]
+async fn the_wallet_answers_conform_with_and_without_the_scope() {
+    let f = common::start_unverified().await;
+    let token = f.stub.issue_access_token(ALICE).unwrap();
+    conforms(
+        "wallet",
+        "balance",
+        &wallet_of(&f, ALICE, Some(&token)).await,
+    );
+
+    let narrow = f
+        .stub
+        .issue_token(
+            ALICE,
+            &eve_stub::TokenOptions {
+                scopes: Some(vec!["esi-universe.read_structures.v1".to_owned()]),
+                ..eve_stub::TokenOptions::default()
+            },
+        )
+        .unwrap();
+    let forbidden = wallet_of(&f, ALICE, Some(&narrow)).await;
+    assert_eq!(forbidden.status, 403);
+    conforms("wallet", "forbidden", &forbidden);
+}
+
+#[tokio::test]
+async fn the_asset_answers_conform_on_every_page_and_without_the_scope() {
+    let f = common::start_unverified().await;
+    control(
+        &f,
+        "assets",
+        json!({"character_id": ALICE, "page_size": 1, "assets": [asset(1), asset(2)]}),
+    )
+    .await;
+    let token = f.stub.issue_access_token(ALICE).unwrap();
+    for page in 1..=2 {
+        let answer = assets_page(&f, ALICE, &token, page).await;
+        assert_eq!(answer.headers["x-pages"], "2");
+        conforms("assets", "items", &answer);
+    }
+
+    let narrow = f
+        .stub
+        .issue_token(
+            ALICE,
+            &eve_stub::TokenOptions {
+                scopes: Some(vec!["esi-universe.read_structures.v1".to_owned()]),
+                ..eve_stub::TokenOptions::default()
+            },
+        )
+        .unwrap();
+    let forbidden = assets_page(&f, ALICE, &narrow, 1).await;
+    assert_eq!(forbidden.status, 403);
+    conforms("assets", "forbidden", &forbidden);
+}
+
+#[tokio::test]
+async fn the_market_prices_conform_with_and_without_an_average() {
+    let f = common::start_unverified().await;
+    let answer = get(&f, "/markets/prices", None).await;
+    conforms("prices", "list", &answer);
+    let items = answer.body.unwrap();
+    assert!(
+        items
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p.get("average_price").is_none()),
+        "the fixture has an item without an average"
+    );
 }

@@ -29,6 +29,9 @@ pub const ROUTE_NAMES: &str = "names";
 pub const ROUTE_STRUCTURES: &str = "structures";
 /// Public market orders, in a rate-limit group of their own.
 pub const ROUTE_MARKET: &str = "market";
+pub const ROUTE_WALLET: &str = "wallet";
+pub const ROUTE_ASSETS: &str = "assets";
+pub const ROUTE_PRICES: &str = "prices";
 
 #[derive(Debug, thiserror::Error)]
 pub enum EsiError {
@@ -83,6 +86,30 @@ pub struct EsiMarketOrder {
     #[serde(rename = "price", deserialize_with = "cents")]
     pub price_cents: i64,
     pub range: String,
+}
+
+/// One asset of a character, with only what the valuation and the list read.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct EsiAsset {
+    pub item_id: i64,
+    pub type_id: i64,
+    pub location_id: i64,
+    pub location_type: String,
+    pub location_flag: String,
+    pub quantity: i64,
+    pub is_singleton: bool,
+    /// ESI leaves the flag out of everything that is not a blueprint copy.
+    #[serde(default)]
+    pub is_blueprint_copy: bool,
+}
+
+/// ESI's market price of one item. An item nobody trades has no average.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct EsiPrice {
+    pub type_id: i64,
+    /// ISK in cents, as for orders.
+    #[serde(rename = "average_price", default, deserialize_with = "optional_cents")]
+    pub average_price_cents: Option<i64>,
 }
 
 fn no_minimum() -> i64 {
@@ -149,6 +176,57 @@ impl EsiClient {
             .get(self.url(&format!("characters/{character_id}/orders")))
             .bearer_auth(token.expose_secret());
         self.fetch(ROUTE_ORDERS, request).await
+    }
+
+    /// The wallet balance in cents. ESI answers with a bare number.
+    pub async fn wallet(
+        &self,
+        character_id: i64,
+        token: &SecretString,
+    ) -> Result<EsiResponse<i64>, EsiError> {
+        let request = self
+            .http
+            .get(self.url(&format!("characters/{character_id}/wallet")))
+            .bearer_auth(token.expose_secret());
+        let response = self.fetch::<f64>(ROUTE_WALLET, request).await?;
+        Ok(EsiResponse {
+            body: (response.body * 100.0).round() as i64,
+            expires_at: response.expires_at,
+        })
+    }
+
+    /// All assets of a character, every page read one after another. The expiry is the first
+    /// page's. One failing page fails the whole answer.
+    pub async fn assets(
+        &self,
+        character_id: i64,
+        token: &SecretString,
+    ) -> Result<EsiResponse<Vec<EsiAsset>>, EsiError> {
+        let page_request = |page: u32| {
+            let mut url = self.url(&format!("characters/{character_id}/assets"));
+            url.query_pairs_mut().append_pair("page", &page.to_string());
+            self.http.get(url).bearer_auth(token.expose_secret())
+        };
+        let (first, pages) = self
+            .fetch_paged::<Vec<EsiAsset>>(ROUTE_ASSETS, page_request(1))
+            .await?;
+        let mut assets = first.body;
+        for page in 2..=pages.unwrap_or(1) {
+            let (next, _) = self
+                .fetch_paged::<Vec<EsiAsset>>(ROUTE_ASSETS, page_request(page))
+                .await?;
+            assets.extend(next.body);
+        }
+        Ok(EsiResponse {
+            body: assets,
+            expires_at: first.expires_at,
+        })
+    }
+
+    /// ESI's market price of every item. Public.
+    pub async fn prices(&self) -> Result<EsiResponse<Vec<EsiPrice>>, EsiError> {
+        self.fetch(ROUTE_PRICES, self.http.get(self.url("markets/prices")))
+            .await
     }
 
     /// Resolves up to 1000 IDs. One unknown ID fails the whole request with `NotFound`.

@@ -151,3 +151,92 @@ async fn the_market_poll_needs_the_csrf_token_and_a_session(pool: PgPool) {
     assert_ne!(without_session.status(), 200);
     assert_eq!(app.stub().esi_calls("market"), 0);
 }
+
+async fn wealth_poll(
+    app: &TestApp,
+    browser: &Browser,
+    token: &str,
+    id: i64,
+    kind: &str,
+) -> reqwest::Response {
+    browser
+        .send(
+            browser
+                .post(&app.url(&format!("/_test/wealth-poll/{id}/{kind}")))
+                .header("origin", &app.base_url)
+                .header("hx-request", "true")
+                .header("x-csrf-token", token),
+        )
+        .await
+}
+
+#[sqlx::test]
+async fn the_wealth_poll_polls_the_wallet_and_the_assets_of_a_character_of_the_account(
+    pool: PgPool,
+) {
+    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+    let browser = app.browser();
+    browser.sso_round_trip(&app, "/auth/login", ALICE).await;
+    let token = token(&app, &browser).await;
+
+    let wallet = wealth_poll(&app, &browser, &token, ALICE, "wallet").await;
+    let assets = wealth_poll(&app, &browser, &token, ALICE, "assets").await;
+
+    assert_eq!(wallet.text().await.unwrap(), "updated");
+    assert_eq!(assets.text().await.unwrap(), "updated");
+    let balances: i64 = sqlx::query_scalar("SELECT count(*) FROM wallet_balances")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let items: i64 = sqlx::query_scalar("SELECT count(*) FROM current_assets")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!((balances, items), (1, 2));
+}
+
+#[sqlx::test]
+async fn the_wealth_poll_refuses_other_accounts_and_unknown_kinds(pool: PgPool) {
+    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+    let alice = app.browser();
+    alice.sso_round_trip(&app, "/auth/login", ALICE).await;
+    let bob = app.browser();
+    bob.sso_round_trip(&app, "/auth/login", BOB).await;
+    let token = token(&app, &alice).await;
+
+    assert_eq!(
+        wealth_poll(&app, &alice, &token, BOB, "wallet")
+            .await
+            .status(),
+        404
+    );
+    assert_eq!(
+        wealth_poll(&app, &alice, &token, ALICE, "journal")
+            .await
+            .status(),
+        404
+    );
+    assert_eq!(app.stub().esi_calls("wallet"), 0);
+}
+
+#[sqlx::test]
+async fn the_price_refresh_fetches_the_prices_and_revalues_the_inventory(pool: PgPool) {
+    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+    let browser = app.browser();
+    browser.sso_round_trip(&app, "/auth/login", ALICE).await;
+    let token = token(&app, &browser).await;
+    wealth_poll(&app, &browser, &token, ALICE, "assets").await;
+
+    let res = browser
+        .send(
+            browser
+                .post(&app.url("/_test/price-refresh"))
+                .header("origin", &app.base_url)
+                .header("hx-request", "true")
+                .header("x-csrf-token", &token),
+        )
+        .await;
+
+    assert_eq!(res.text().await.unwrap(), "updated");
+    assert_eq!(app.stub().esi_calls("prices"), 1);
+}

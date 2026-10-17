@@ -131,6 +131,44 @@ export async function pollCharacter(page: Page, characterId: number): Promise<st
   }, characterId);
 }
 
+/** Polls the wallet or the assets of a character now through the test-only hook. */
+export async function wealthPoll(page: Page, characterId: number, kind: 'wallet' | 'assets'): Promise<string> {
+  return page.evaluate(
+    async ([id, what]) => {
+      const token = document.querySelector('meta[name="csrf-token"]')!.getAttribute('content')!;
+      const res = await fetch(`/_test/wealth-poll/${id}/${what}`, { method: 'POST', headers: { 'X-CSRF-Token': token } });
+      return `${res.status} ${await res.text()}`;
+    },
+    [characterId, kind] as const,
+  );
+}
+
+/** Refreshes ESI's market prices now through the test-only hook. */
+export async function priceRefresh(page: Page): Promise<string> {
+  return page.evaluate(async () => {
+    const token = document.querySelector('meta[name="csrf-token"]')!.getAttribute('content')!;
+    const res = await fetch('/_test/price-refresh', { method: 'POST', headers: { 'X-CSRF-Token': token } });
+    return `${res.status} ${await res.text()}`;
+  });
+}
+
+/** One ESI asset as the stub serves it: in the station of `stubOrder` unless told. */
+export function stubAsset(
+  id: number,
+  opts: { type?: number; quantity?: number; location?: number; locationType?: string; copy?: boolean } = {},
+) {
+  return {
+    item_id: id,
+    type_id: opts.type ?? 34,
+    location_id: opts.location ?? 60003760,
+    location_type: opts.locationType ?? 'station',
+    location_flag: 'Hangar',
+    quantity: opts.quantity ?? 1,
+    is_singleton: false,
+    ...(opts.copy ? { is_blueprint_copy: true } : {}),
+  };
+}
+
 /** Log in through the stub's character picker the way a player would. */
 export async function loginWith(page: Page, characterName: string): Promise<void> {
   await page.goto('/');
@@ -163,7 +201,7 @@ export const test = base.extend<{ cspGuard: void; cleanSlate: void }>({
   ],
   cleanSlate: [
     async ({ page }, use) => {
-      await withDatabase((c) => c.query('TRUNCATE accounts, sessions, market_orders, market_sync CASCADE'));
+      await withDatabase((c) => c.query('TRUNCATE accounts, sessions, market_orders, market_sync, item_prices, price_sync CASCADE'));
       await stubControl('reset');
       await page.route('https://images.evetech.net/**', (route) =>
         route.fulfill({ status: 200, contentType: 'image/png', body: PIXEL }),

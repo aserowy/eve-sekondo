@@ -430,10 +430,7 @@ async fn orders_of_another_account_for_the_same_item_are_not_summed_in(pool: PgP
 
 // ---- history ----
 
-use sekondo::{
-    clock::Clock,
-    dashboard::{HistoryPoint, Range},
-};
+use sekondo::{clock::Clock, dashboard::HistoryPoint, range::Range};
 use time::{Duration, OffsetDateTime};
 
 async fn history(env: &PollEnv, account: Uuid, range: Range) -> Vec<HistoryPoint> {
@@ -1469,4 +1466,233 @@ async fn the_navigation_carries_the_selection_to_the_orders_page(pool: PgPool) {
         html.contains(&format!(r#"href="/orders?chars={ALICE}""#)),
         "{html}"
     );
+}
+
+// ---- the wealth tile ----
+
+use sekondo::wealth_poller::Kind;
+
+async fn stub_wallet(app: &TestApp, character: i64, balance: f64) {
+    let res = app
+        .stub_control(
+            "wallet",
+            json!({"character_id": character, "balance": balance}),
+        )
+        .await;
+    assert_eq!(res.status(), 204);
+}
+
+#[sqlx::test]
+async fn the_wealth_tile_adds_up_everything_of_all_selected_characters(pool: PgPool) {
+    let (app, _) = app_at(pool).await;
+    let browser = signed_in_with(&app, ALICE, &[BOB]).await;
+    // Alice: 200m wallet. Bob: 50m wallet, nothing else.
+    stub_orders(&app, ALICE, vec![]).await;
+    stub_orders(&app, BOB, vec![]).await;
+    stub_wallet(&app, ALICE, 200_000_000.0).await;
+    stub_wallet(&app, BOB, 50_000_000.0).await;
+    for id in [ALICE, BOB] {
+        app.state.poller.poll_character(id).await;
+        app.state.wealth.poll(id, Kind::Wallet).await;
+    }
+
+    let html = page(&app, &browser, "/dashboard").await;
+
+    let wealth = tile(&html, "tile-wealth");
+    assert!(wealth.contains(">250m<"), "{wealth}");
+    assert!(wealth.contains(r#"title="250,000,000.00 ISK""#), "{wealth}");
+    // A selection narrows it.
+    let alice = page(&app, &browser, &format!("/dashboard?chars={ALICE}")).await;
+    assert!(tile(&alice, "tile-wealth").contains(">200m<"));
+}
+
+#[sqlx::test]
+async fn the_wealth_tile_counts_wallet_orders_escrow_and_inventory_but_not_corporation_orders(
+    pool: PgPool,
+) {
+    let (app, _) = app_at(pool.clone()).await;
+    let browser = signed_in_with(&app, ALICE, &[]).await;
+    let mut corp = sell(3, 40_000_000.0, 1);
+    corp["is_corporation"] = json!(true);
+    stub_orders(
+        &app,
+        ALICE,
+        vec![sell(1, 3_000_000.0, 10), buy(2, Some(20_000_000.0)), corp],
+    )
+    .await;
+    stub_wallet(&app, ALICE, 100_000_000.0).await;
+    app.state.poller.poll_character(ALICE).await;
+    app.state.wealth.poll(ALICE, Kind::Wallet).await;
+    sqlx::query(
+        "INSERT INTO inventory_values (character_id, recorded_at, value) VALUES ($1, now() - interval '1 minute', 50000000)",
+    )
+    .bind(ALICE)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let html = page(&app, &browser, "/dashboard").await;
+
+    assert!(
+        tile(&html, "tile-wealth").contains(">200m<"),
+        "{}",
+        tile(&html, "tile-wealth")
+    );
+}
+
+#[sqlx::test]
+async fn the_wealth_tile_links_to_the_wealth_page_with_the_selection_and_never_the_range(
+    pool: PgPool,
+) {
+    let (app, _) = app_at(pool).await;
+    let browser = signed_in_with(&app, ALICE, &[BOB]).await;
+
+    let narrowed = page(
+        &app,
+        &browser,
+        &format!("/dashboard?chars={ALICE}&range=30d"),
+    )
+    .await;
+    let link = tile(&narrowed, "tile-wealth");
+    assert!(link.contains(r#"href="/wealth?chars=90000001""#), "{link}");
+    assert!(!link.contains("range"));
+
+    let all = page(&app, &browser, "/dashboard").await;
+    assert!(tile(&all, "tile-wealth").contains(r#"href="/wealth""#));
+}
+
+#[sqlx::test]
+async fn a_character_without_any_figure_makes_a_wealth_of_zero(pool: PgPool) {
+    let (app, _) = app_at(pool).await;
+    let browser = signed_in_with(&app, ALICE, &[]).await;
+
+    let html = page(&app, &browser, "/dashboard").await;
+
+    assert!(tile(&html, "tile-wealth").contains(">0.00<"));
+}
+
+// ---- the wealth line ----
+
+use sekondo::wealth;
+
+#[sqlx::test]
+async fn the_wealth_line_is_the_top_edge_of_the_wealth_stack_and_ends_at_the_tile(pool: PgPool) {
+    let (app, clock) = app_at(pool.clone()).await;
+    let browser = signed_in_with(&app, ALICE, &[BOB]).await;
+    stub_orders(
+        &app,
+        ALICE,
+        vec![sell(1, 1_000_000.0, 3), buy(2, Some(2_000_000.0))],
+    )
+    .await;
+    stub_orders(&app, BOB, vec![]).await;
+    stub_wallet(&app, ALICE, 10_000_000.0).await;
+    stub_wallet(&app, BOB, 5_000_000.0).await;
+    for id in [ALICE, BOB] {
+        clock.advance(Duration::hours(1));
+        app.state.poller.poll_character(id).await;
+        app.state.wealth.poll(id, Kind::Wallet).await;
+    }
+    sqlx::query(
+        "INSERT INTO inventory_values (character_id, recorded_at, value) VALUES ($1, $2, 7000000)",
+    )
+    .bind(ALICE)
+    .bind(clock.now() - Duration::minutes(30))
+    .execute(&pool)
+    .await
+    .unwrap();
+    clock.advance(Duration::minutes(10));
+
+    let html = page(&app, &browser, "/dashboard?range=24h").await;
+
+    let (_, line) = chart_series(&html, "wealth-history");
+    assert_eq!(line["series"].as_array().unwrap().len(), 1);
+    assert_eq!(line["series"][0]["name"], "Wealth");
+    let values: Vec<i64> = line["series"][0]["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    // The same query that draws the wealth page's stack.
+    let ids = [ALICE, BOB];
+    let selection = CharacterSelection::resolve(&ids, None);
+    let account = app
+        .state
+        .repo
+        .find_character(ALICE)
+        .await
+        .unwrap()
+        .unwrap()
+        .account_id;
+    let stack = wealth::history(&pool, account, &selection, Range::Day, clock.now())
+        .await
+        .unwrap();
+    let top: Vec<i64> = stack.iter().map(|p| p.total_cents()).collect();
+    assert_eq!(values, top);
+    // Ends at the tile: 10m + 5m wallets, 3m sell, 2m escrow, 7m inventory.
+    assert_eq!(*values.last().unwrap(), 2_700_000_000);
+    assert!(tile(&html, "tile-wealth").contains(">27m<"));
+    assert_eq!(
+        line["totals"],
+        Value::Null,
+        "a single line has no stack total"
+    );
+}
+
+#[sqlx::test]
+async fn the_wealth_line_steps_with_the_wallet_polls(pool: PgPool) {
+    let (app, clock) = app_at(pool).await;
+    let browser = signed_in_with(&app, ALICE, &[]).await;
+    stub_orders(&app, ALICE, vec![]).await;
+    stub_wallet(&app, ALICE, 10_000_000.0).await;
+    clock.advance(Duration::hours(1));
+    let first = clock.now();
+    app.state.wealth.poll(ALICE, Kind::Wallet).await;
+    stub_wallet(&app, ALICE, 15_000_000.0).await;
+    clock.advance(Duration::hours(1));
+    let second = clock.now();
+    app.state.wealth.poll(ALICE, Kind::Wallet).await;
+    clock.advance(Duration::minutes(10));
+
+    let html = page(&app, &browser, "/dashboard?range=24h").await;
+
+    let (_, line) = chart_series(&html, "wealth-history");
+    let times = line["times"].as_array().unwrap();
+    let values = line["series"][0]["values"].as_array().unwrap();
+    let at = |t: time::OffsetDateTime, from: bool| {
+        let ms = t.unix_timestamp() * 1000;
+        let found = if from {
+            times.iter().position(|x| x.as_i64().unwrap() >= ms)
+        } else {
+            times.iter().rposition(|x| x.as_i64().unwrap() < ms)
+        };
+        values[found.unwrap()].as_i64().unwrap()
+    };
+    assert_eq!(at(first, false), 0);
+    assert_eq!(at(first, true), 1_000_000_000);
+    assert_eq!(at(second, false), 1_000_000_000);
+    assert_eq!(at(second, true), 1_500_000_000);
+}
+
+#[sqlx::test]
+async fn without_any_wealth_figure_the_graph_says_there_is_no_wealth_history(pool: PgPool) {
+    let (app, _) = app_at(pool).await;
+    let browser = signed_in_with(&app, ALICE, &[]).await;
+
+    let html = page(&app, &browser, "/dashboard").await;
+
+    assert!(html.contains("No wealth history yet."));
+    assert!(!html.contains(r#"data-chart="wealth-history""#));
+}
+
+#[sqlx::test]
+async fn the_summary_also_refreshes_on_the_wealth_signal_and_keeps_the_range(pool: PgPool) {
+    let (app, _) = app_at(pool).await;
+    let browser = signed_in_with(&app, ALICE, &[]).await;
+
+    let html = page(&app, &browser, "/dashboard?range=30d").await;
+
+    assert!(html.contains("sse:orders-updated, sse:wealth-updated, htmx:sseOpen from:body"));
+    assert!(html.contains(r#"hx-get="/dashboard/summary?range=30d""#));
 }

@@ -226,3 +226,45 @@ async fn unlink_with_a_foreign_origin_or_another_sessions_token_is_forbidden(poo
     assert_eq!(wrong.status(), 403);
     assert_eq!(e.count("characters").await, 3, "nothing was deleted");
 }
+
+#[sqlx::test]
+async fn unlinking_a_character_removes_its_wealth_data_and_keeps_the_others(pool: PgPool) {
+    let e = env(pool).await;
+    let (browser, _) = e.alice_and_bob().await;
+    for character in [ALICE, BOB] {
+        for statement in [
+            "INSERT INTO wallet_balances (character_id, polled_at, balance) VALUES ($1, now(), 5)",
+            "INSERT INTO inventory_values (character_id, recorded_at, value) VALUES ($1, now(), 5)",
+            "INSERT INTO current_assets (item_id, character_id, type_id, location_id, location_type, \
+             location_flag, quantity, is_singleton, is_blueprint_copy) \
+             VALUES ($1, $1, 34, 60003760, 'station', 'Hangar', 1, false, false)",
+            "INSERT INTO wealth_sync (character_id, kind, next_poll_at) VALUES ($1, 'wallet', now())",
+            "INSERT INTO wealth_sync (character_id, kind, next_poll_at) VALUES ($1, 'assets', now())",
+        ] {
+            sqlx::query(statement)
+                .bind(character)
+                .execute(&e.pool)
+                .await
+                .unwrap();
+        }
+    }
+    let token = e.csrf_token(&browser).await;
+
+    assert_eq!(e.unlink(&browser, &token, BOB).await.status(), 200);
+
+    for (table, expected) in [
+        ("wallet_balances", 1),
+        ("inventory_values", 1),
+        ("current_assets", 1),
+        ("wealth_sync", 2),
+    ] {
+        assert_eq!(e.count(table).await, expected, "{table}");
+        let gone: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT count(*) FROM {table} WHERE character_id = {BOB}"
+        )))
+        .fetch_one(&e.pool)
+        .await
+        .unwrap();
+        assert_eq!(gone, 0, "{table}");
+    }
+}

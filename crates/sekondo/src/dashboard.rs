@@ -18,7 +18,9 @@ use crate::{
     freshness::{FreshnessRecord, FreshnessView, freshness_view},
     orders::{FilterEntry, Side},
     pages::{self, Nav, Page},
+    range::{BUCKET_CTES, Range},
     selection::{CharacterSelection, ViewQuery},
+    wealth,
 };
 
 /// One character's current figures, in cents, with what the freshness rule needs.
@@ -146,56 +148,6 @@ pub async fn top_items(
         .await
 }
 
-/// The time range of the over-time graphs, as the `range` query parameter names it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Range {
-    Day,
-    #[default]
-    Week,
-    Month,
-    Quarter,
-}
-
-impl Range {
-    pub const ALL: [Range; 4] = [Range::Day, Range::Week, Range::Month, Range::Quarter];
-
-    /// Never fails: a missing or unknown value is the default.
-    pub fn parse(raw: Option<&str>) -> Self {
-        Self::ALL
-            .into_iter()
-            .find(|range| Some(range.name()) == raw)
-            .unwrap_or_default()
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Range::Day => "24h",
-            Range::Week => "7d",
-            Range::Month => "30d",
-            Range::Quarter => "90d",
-        }
-    }
-
-    pub fn span(self) -> Duration {
-        match self {
-            Range::Day => Duration::hours(24),
-            Range::Week => Duration::days(7),
-            Range::Month => Duration::days(30),
-            Range::Quarter => Duration::days(90),
-        }
-    }
-
-    /// The width of one point of the graphs: 48 to 120 points per range.
-    pub fn bucket(self) -> Duration {
-        match self {
-            Range::Day => Duration::minutes(30),
-            Range::Week => Duration::hours(2),
-            Range::Month => Duration::hours(6),
-            Range::Quarter => Duration::days(1),
-        }
-    }
-}
-
 /// One point of the over-time graphs: the figures in force at `at`, summed over the selection.
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct HistoryPoint {
@@ -225,19 +177,8 @@ pub async fn history(
     now: OffsetDateTime,
 ) -> Result<Vec<HistoryPoint>, sqlx::Error> {
     let seconds = |d: Duration| d.as_seconds_f64();
-    sqlx::query_as(
-        "WITH width AS (SELECT make_interval(secs => $4) AS w, make_interval(secs => $5) AS span),
-              ends AS (
-                  SELECT g AS at
-                  FROM width, generate_series(time_bucket(w, $3 - span) + w, $3, w) AS g
-                  WHERE g < $3
-                  UNION ALL
-                  SELECT $3
-              ),
-              chars AS (
-                  SELECT character_id FROM characters
-                  WHERE account_id = $1 AND character_id = ANY($2)
-              )
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "{BUCKET_CTES}
          SELECT e.at,
                 (COALESCE(SUM(t.sell_value), 0) * 100)::bigint AS sell_cents,
                 (COALESCE(SUM(t.escrow), 0) * 100)::bigint AS escrow_cents,
@@ -254,8 +195,8 @@ pub async fn history(
              LIMIT 1
          ) t ON true
          GROUP BY e.at
-         ORDER BY e.at",
-    )
+         ORDER BY e.at"
+    )))
     .bind(account_id)
     .bind(selection.ids())
     .bind(now)
@@ -297,6 +238,13 @@ impl AmountTile {
     }
 }
 
+/// The wealth tile: the current total and where it leads.
+pub struct WealthTile {
+    pub total: Amount,
+    /// The wealth page with the selection and never the range, which is a page's own.
+    pub href: String,
+}
+
 pub struct BreakdownRow {
     pub id: i64,
     pub sell: Amount,
@@ -312,6 +260,7 @@ pub struct SummaryView {
     pub summary_url: String,
     pub sell: AmountTile,
     pub escrow: AmountTile,
+    pub wealth: WealthTile,
     pub sell_count: i64,
     pub buy_count: i64,
     pub rows: Vec<BreakdownRow>,
@@ -323,6 +272,7 @@ pub struct SummaryView {
     pub top_buy: Option<TopChart>,
     /// The over-time graphs; `None` while no selected character has been polled.
     pub history: Option<HistoryCharts>,
+    pub wealth_history: Option<TopChart>,
     pub ranges: Vec<RangeLink>,
 }
 
@@ -350,29 +300,22 @@ fn view_query(selection: &CharacterSelection, range: Range) -> String {
     }
 }
 
-impl Range {
-    fn label(self) -> &'static str {
-        match self {
-            Range::Day => "24 hours",
-            Range::Week => "7 days",
-            Range::Month => "30 days",
-            Range::Quarter => "90 days",
-        }
-    }
-}
-
 pub struct HistoryCharts {
     pub value: TopChart,
     pub count: TopChart,
 }
 
 /// A line of an over-time graph: its name, how to read it from a point, how to print its value.
-type Line<'a> = (&'a str, fn(&HistoryPoint) -> i64, fn(i64) -> String);
+type Line<'a, P> = (&'a str, fn(&P) -> i64, fn(i64) -> String);
 
-fn line_series(points: &[HistoryPoint], lines: [Line; 2]) -> String {
+fn line_series<P, const N: usize>(
+    points: &[P],
+    at: fn(&P) -> OffsetDateTime,
+    lines: [Line<P>; N],
+) -> String {
     serde_json::json!({
-        "times": points.iter().map(|p| p.at.unix_timestamp() * 1000).collect::<Vec<_>>(),
-        "labels": points.iter().map(|p| format::eve_time(p.at)).collect::<Vec<_>>(),
+        "times": points.iter().map(|p| at(p).unix_timestamp() * 1000).collect::<Vec<_>>(),
+        "labels": points.iter().map(|p| format::eve_time(at(p))).collect::<Vec<_>>(),
         "series": lines.iter().map(|(name, value, exact)| serde_json::json!({
             "name": name,
             "values": points.iter().map(value).collect::<Vec<_>>(),
@@ -395,6 +338,7 @@ fn history_charts(points: &[HistoryPoint]) -> Option<HistoryCharts> {
         value: TopChart {
             series: line_series(
                 points,
+                |p| p.at,
                 [
                     ("Sell value", |p| p.sell_cents, format::isk_exact),
                     ("Buy escrow", |p| p.escrow_cents, format::isk_exact),
@@ -409,6 +353,7 @@ fn history_charts(points: &[HistoryPoint]) -> Option<HistoryCharts> {
         count: TopChart {
             series: line_series(
                 points,
+                |p| p.at,
                 [
                     ("Sell orders", |p| p.sell_count, |n| n.to_string()),
                     ("Buy orders", |p| p.buy_count, |n| n.to_string()),
@@ -420,6 +365,26 @@ fn history_charts(points: &[HistoryPoint]) -> Option<HistoryCharts> {
                 orders_text(last.buy_count, "buy")
             ),
         },
+    })
+}
+
+/// The total wealth over time as one line: the top edge of the wealth page's stack, from the
+/// same query. `None` while no selected character has a recorded figure.
+fn wealth_chart(points: &[wealth::WealthPoint]) -> Option<TopChart> {
+    if !wealth::has_history(points) {
+        return None;
+    }
+    let last = points.last()?;
+    Some(TopChart {
+        series: line_series(
+            points,
+            |p| p.at,
+            [("Wealth", |p| p.total_cents(), format::isk_exact)],
+        ),
+        label: format!(
+            "Wealth over time; now {}",
+            format::isk_exact(last.total_cents())
+        ),
     })
 }
 
@@ -468,12 +433,12 @@ fn split_series(figures: &[CharacterFigures]) -> String {
 
 fn summary_view(
     figures: &[CharacterFigures],
+    (wealth, wealth_points): (&wealth::Current, &[wealth::WealthPoint]),
     (top_sell, top_buy): (&[TopItem], &[TopItem]),
     history: &[HistoryPoint],
     range: Range,
     selection: &CharacterSelection,
-    now: OffsetDateTime,
-    interval: Duration,
+    (now, interval): (OffsetDateTime, Duration),
 ) -> SummaryView {
     let totals = Totals::of(figures);
     SummaryView {
@@ -488,9 +453,14 @@ fn summary_view(
             .collect(),
         sell: AmountTile::of(totals.sell_cents, totals.sell_corp_cents),
         escrow: AmountTile::of(totals.escrow_cents, totals.escrow_corp_cents),
+        wealth: WealthTile {
+            total: Amount::of(wealth.total_cents()),
+            href: format!("/wealth{}", selection.query()),
+        },
         sell_count: totals.sell_count,
         buy_count: totals.buy_count,
         history: history_charts(history),
+        wealth_history: wealth_chart(wealth_points),
         top_sell: top_chart(top_sell, "Sell value"),
         top_buy: top_chart(top_buy, "Buy escrow"),
         split_series: split_series(figures),
@@ -565,14 +535,20 @@ async fn load(
     let history = history(&state.pool, account.id, &selection, range, now)
         .await
         .map_err(|e| Box::new(pages::internal_error(e)))?;
+    let wealth_points = wealth::history(&state.pool, account.id, &selection, range, now)
+        .await
+        .map_err(|e| Box::new(pages::internal_error(e)))?;
+    let wealth = wealth::current(&state.pool, account.id, &selection)
+        .await
+        .map_err(|e| Box::new(pages::internal_error(e)))?;
     let view = summary_view(
         &figures,
+        (&wealth, &wealth_points),
         (&top_sell, &top_buy),
         &history,
         range,
         &selection,
-        now,
-        state.config.order_poll_interval,
+        (now, state.config.order_poll_interval),
     );
     let characters = characters
         .iter()
@@ -628,46 +604,5 @@ pub async fn summary(
     match load(&state, &account, &session, &query).await {
         Ok(loaded) => pages::render(&SummaryFragment { view: loaded.view }),
         Err(response) => *response,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn each_range_value_selects_its_range() {
-        assert_eq!(Range::parse(Some("24h")), Range::Day);
-        assert_eq!(Range::parse(Some("7d")), Range::Week);
-        assert_eq!(Range::parse(Some("30d")), Range::Month);
-        assert_eq!(Range::parse(Some("90d")), Range::Quarter);
-    }
-
-    #[test]
-    fn a_missing_or_unknown_range_falls_back_to_seven_days() {
-        assert_eq!(Range::parse(None), Range::Week);
-        assert_eq!(Range::parse(Some("1y")), Range::Week);
-        assert_eq!(Range::parse(Some("")), Range::Week);
-        assert_eq!(Range::parse(Some("7D")), Range::Week);
-    }
-
-    #[test]
-    fn names_round_trip_through_parse() {
-        for range in Range::ALL {
-            assert_eq!(Range::parse(Some(range.name())), range);
-        }
-    }
-
-    #[test]
-    fn spans_and_bucket_widths_follow_the_design() {
-        let table = [
-            (Range::Day, Duration::hours(24), Duration::minutes(30)),
-            (Range::Week, Duration::days(7), Duration::hours(2)),
-            (Range::Month, Duration::days(30), Duration::hours(6)),
-            (Range::Quarter, Duration::days(90), Duration::days(1)),
-        ];
-        for (range, span, bucket) in table {
-            assert_eq!((range.span(), range.bucket()), (span, bucket), "{range:?}");
-        }
     }
 }

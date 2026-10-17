@@ -418,3 +418,77 @@ async fn market_sync_has_one_row_per_region_and_item(pool: PgPool) {
         assert_eq!(found, 1, "{column}");
     }
 }
+
+#[sqlx::test]
+async fn wallet_balances_and_inventory_values_are_hypertables_with_thirty_day_chunks(pool: PgPool) {
+    let hypertables: Vec<String> =
+        sqlx::query_scalar("SELECT hypertable_name::text FROM timescaledb_information.hypertables")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    for table in ["wallet_balances", "inventory_values"] {
+        assert!(
+            hypertables.contains(&table.to_owned()),
+            "{table}: {hypertables:?}"
+        );
+        let interval_secs: f64 = sqlx::query_scalar(
+            "SELECT extract(epoch FROM d.time_interval)::float8 \
+             FROM timescaledb_information.dimensions d WHERE d.hypertable_name = $1",
+        )
+        .bind(table)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(interval_secs, 30.0 * 86_400.0, "{table}");
+    }
+}
+
+#[sqlx::test]
+async fn the_wealth_tables_exist_and_the_price_tables_have_no_owner(pool: PgPool) {
+    for table in [
+        "wallet_balances",
+        "current_assets",
+        "item_prices",
+        "price_sync",
+        "inventory_values",
+        "wealth_sync",
+    ] {
+        assert_eq!(count(&pool, table).await, 0, "{table}");
+    }
+    let owned: Vec<String> = sqlx::query_scalar(
+        "SELECT table_name::text FROM information_schema.columns \
+         WHERE table_name IN ('item_prices', 'price_sync') \
+           AND column_name IN ('account_id', 'character_id')",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(owned.is_empty(), "{owned:?}");
+}
+
+#[sqlx::test]
+async fn wealth_sync_only_knows_wallet_and_assets(pool: PgPool) {
+    let account = insert_account(&pool).await;
+    insert_character(&pool, account, 1).await;
+    let bad = sqlx::query(
+        "INSERT INTO wealth_sync (character_id, kind, next_poll_at) VALUES (1, 'orders', now())",
+    )
+    .execute(&pool)
+    .await;
+    assert!(bad.is_err());
+    for kind in ["wallet", "assets"] {
+        sqlx::query(
+            "INSERT INTO wealth_sync (character_id, kind, next_poll_at) VALUES (1, $1, now())",
+        )
+        .bind(kind)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let twice = sqlx::query(
+        "INSERT INTO wealth_sync (character_id, kind, next_poll_at) VALUES (1, 'wallet', now())",
+    )
+    .execute(&pool)
+    .await;
+    assert!(twice.is_err(), "one row per character and kind");
+}

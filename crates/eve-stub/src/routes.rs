@@ -21,8 +21,8 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::state::{
-    ACCESS_TOKEN_SECONDS, EsiFailure, Inner, MARKET_PAGE_SIZE, MarketFixture, NAMES, PendingCode,
-    RefreshRecord, STRUCTURES, Shared, now_secs, random_token,
+    ACCESS_TOKEN_SECONDS, ASSETS_PAGE_SIZE, EsiFailure, Inner, MARKET_PAGE_SIZE, MarketFixture,
+    NAMES, PendingCode, RefreshRecord, STRUCTURES, Shared, now_secs, random_token,
 };
 
 macro_rules! method_router {
@@ -56,6 +56,9 @@ eve_routes! {
     ("POST", "/universe/names", universe_names),
     ("GET", "/universe/structures/{id}", universe_structure),
     ("GET", "/markets/{region_id}/orders", market_orders),
+    ("GET", "/characters/{id}/wallet", character_wallet),
+    ("GET", "/characters/{id}/assets", character_assets),
+    ("GET", "/markets/prices", market_prices),
 }
 
 pub fn router(shared: Shared) -> Router {
@@ -66,6 +69,9 @@ pub fn router(shared: Shared) -> Router {
         .route("/fail-next-token", post(fail_next_token))
         .route("/orders", post(set_orders))
         .route("/market-orders", post(set_market_orders))
+        .route("/wallet", post(set_wallet))
+        .route("/assets", post(set_assets))
+        .route("/prices", post(set_prices))
         .route("/esi-expires", post(set_esi_expires))
         .route("/structure-access", post(set_structure_access))
         .route("/esi-fail-next", post(esi_fail_next))
@@ -423,6 +429,9 @@ async fn stats(State(shared): State<Shared>) -> Json<Value> {
         "names_calls": calls("names"),
         "structures_calls": calls("structures"),
         "market_calls": calls("market"),
+        "wallet_calls": calls("wallet"),
+        "assets_calls": calls("assets"),
+        "prices_calls": calls("prices"),
     }))
 }
 
@@ -440,6 +449,8 @@ async fn reset(State(shared): State<Shared>) -> StatusCode {
 
 const ORDERS_SCOPE: &str = "esi-markets.read_character_orders.v1";
 const STRUCTURES_SCOPE: &str = "esi-universe.read_structures.v1";
+const WALLET_SCOPE: &str = "esi-wallet.read_character_wallet.v1";
+const ASSETS_SCOPE: &str = "esi-assets.read_assets.v1";
 
 /// Counts the call and, while a failure is armed, answers it instead of the route.
 fn begin_esi_call(
@@ -758,5 +769,167 @@ async fn set_market_orders(
             page_size: body.page_size.unwrap_or(MARKET_PAGE_SIZE).max(1),
         },
     );
+    StatusCode::NO_CONTENT
+}
+
+/// Like real ESI on the character wallet and asset routes (verified): the rate-limit headers of
+/// the route's group instead of the error-limit ones.
+fn char_route_headers(inner: &Inner, group: &'static str, limit: &'static str) -> HeaderMap {
+    let mut headers = esi_headers(inner);
+    headers.remove("x-esi-error-limit-remain");
+    headers.remove("x-esi-error-limit-reset");
+    for (name, value) in [
+        ("x-ratelimit-group", group),
+        ("x-ratelimit-limit", limit),
+        ("x-ratelimit-remaining", "148"),
+        ("x-ratelimit-used", "2"),
+    ] {
+        headers.insert(name, value.parse().expect("header value"));
+    }
+    headers
+}
+
+/// The bearer's character, when the token is the character's own and carries `scope`; otherwise
+/// the answer to send instead (401 without a token, 403 with the wrong one).
+#[allow(clippy::result_large_err)] // a test double: the error is a ready-made HTTP response
+fn authorize_character(
+    inner: &Inner,
+    headers: &HeaderMap,
+    character_id: i64,
+    scope: &str,
+    mut forbidden_headers: HeaderMap,
+) -> Result<(), Response> {
+    let (token_character, scopes) = authorize_bearer(inner, headers)?;
+    if token_character != character_id || !scopes.iter().any(|s| s == scope) {
+        forbidden_headers.remove("expires");
+        return Err((
+            StatusCode::FORBIDDEN,
+            forbidden_headers,
+            Json(json!({"error": "Forbidden"})),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
+/// The wallet balance of a character: a bare JSON number.
+async fn character_wallet(
+    State(shared): State<Shared>,
+    Path(character_id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let mut inner = shared.lock().unwrap();
+    if let Some(response) = begin_esi_call(&mut inner, "wallet", &headers) {
+        return response;
+    }
+    let response_headers = char_route_headers(&inner, "char-wallet", "150/15m");
+    if let Err(response) = authorize_character(
+        &inner,
+        &headers,
+        character_id,
+        WALLET_SCOPE,
+        response_headers.clone(),
+    ) {
+        return response;
+    }
+    let balance = inner.wallets.get(&character_id).copied().unwrap_or(0.0);
+    (response_headers, Json(balance)).into_response()
+}
+
+#[derive(Deserialize)]
+struct PageQuery {
+    page: Option<usize>,
+}
+
+/// The assets of a character, paged like ESI's.
+async fn character_assets(
+    State(shared): State<Shared>,
+    Path(character_id): Path<i64>,
+    Query(query): Query<PageQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let mut inner = shared.lock().unwrap();
+    if let Some(response) = begin_esi_call(&mut inner, "assets", &headers) {
+        return response;
+    }
+    let mut response_headers = char_route_headers(&inner, "char-asset", "1800/15m");
+    if let Err(response) = authorize_character(
+        &inner,
+        &headers,
+        character_id,
+        ASSETS_SCOPE,
+        response_headers.clone(),
+    ) {
+        return response;
+    }
+    let (assets, page_size) = inner
+        .assets
+        .get(&character_id)
+        .map_or((&[][..], ASSETS_PAGE_SIZE), |f| {
+            (&f.orders[..], f.page_size)
+        });
+    let pages = assets.len().div_ceil(page_size).max(1);
+    let page = query.page.unwrap_or(1).max(1);
+    let slice: Vec<&Value> = assets
+        .iter()
+        .skip((page - 1) * page_size)
+        .take(page_size)
+        .collect();
+    response_headers.insert("x-pages", pages.to_string().parse().expect("header value"));
+    (response_headers, Json(slice)).into_response()
+}
+
+/// ESI's market prices. Needs no token.
+async fn market_prices(State(shared): State<Shared>, headers: HeaderMap) -> Response {
+    let mut inner = shared.lock().unwrap();
+    if let Some(response) = begin_esi_call(&mut inner, "prices", &headers) {
+        return response;
+    }
+    (esi_headers(&inner), Json(inner.prices.clone())).into_response()
+}
+
+#[derive(Deserialize)]
+struct WalletBody {
+    character_id: i64,
+    balance: f64,
+}
+
+/// Replaces what ESI returns as a character's wallet balance.
+async fn set_wallet(State(shared): State<Shared>, Json(body): Json<WalletBody>) -> StatusCode {
+    shared
+        .lock()
+        .unwrap()
+        .wallets
+        .insert(body.character_id, body.balance);
+    StatusCode::NO_CONTENT
+}
+
+#[derive(Deserialize)]
+struct AssetsBody {
+    character_id: i64,
+    assets: Vec<Value>,
+    page_size: Option<usize>,
+}
+
+/// Replaces what ESI returns as a character's assets.
+async fn set_assets(State(shared): State<Shared>, Json(body): Json<AssetsBody>) -> StatusCode {
+    shared.lock().unwrap().assets.insert(
+        body.character_id,
+        MarketFixture {
+            orders: body.assets,
+            page_size: body.page_size.unwrap_or(ASSETS_PAGE_SIZE).max(1),
+        },
+    );
+    StatusCode::NO_CONTENT
+}
+
+#[derive(Deserialize)]
+struct PricesBody {
+    prices: Vec<Value>,
+}
+
+/// Replaces what ESI returns as the market prices.
+async fn set_prices(State(shared): State<Shared>, Json(body): Json<PricesBody>) -> StatusCode {
+    shared.lock().unwrap().prices = body.prices;
     StatusCode::NO_CONTENT
 }

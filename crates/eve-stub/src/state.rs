@@ -34,6 +34,8 @@ pub fn default_characters() -> Vec<Character> {
     let scopes: Vec<String> = [
         "esi-markets.read_character_orders.v1",
         "esi-universe.read_structures.v1",
+        "esi-wallet.read_character_wallet.v1",
+        "esi-assets.read_assets.v1",
     ]
     .map(str::to_owned)
     .into();
@@ -101,7 +103,8 @@ pub const ESI_EXPIRES_SECONDS: u64 = 1200;
 /// The next ESI calls answer with this instead of their normal response.
 #[derive(Clone, Debug)]
 pub struct EsiFailure {
-    /// Only calls to this route fail (`orders`, `names`, `structures`, `market`); `None`: any route.
+    /// Only calls to this route fail (`orders`, `names`, `structures`, `market`, `wallet`,
+    /// `assets`, `prices`); `None`: any route.
     pub route: Option<String>,
     pub remaining: u32,
     pub status: u16,
@@ -158,6 +161,12 @@ pub struct Inner {
     pub orders: HashMap<i64, Vec<Value>>,
     /// Fixture public market orders per region, as ESI's JSON.
     pub market_orders: HashMap<i64, MarketFixture>,
+    /// Fixture wallet balance per character.
+    pub wallets: HashMap<i64, f64>,
+    /// Fixture assets per character, as ESI's JSON.
+    pub assets: HashMap<i64, MarketFixture>,
+    /// Fixture market prices, as ESI's JSON.
+    pub prices: Vec<Value>,
     /// Seconds ahead that ESI's `Expires` header points.
     pub esi_expires_secs: u64,
     /// Calls per ESI route (`orders`), counting every request, failed or not.
@@ -178,7 +187,8 @@ pub struct Inner {
     pub jwk_e: String,
 }
 
-/// The public market orders of one region and how many fit on a page.
+/// A list of ESI's JSON objects and how many fit on a page: the public market orders of one
+/// region, or the assets of one character.
 #[derive(Clone, Debug)]
 pub struct MarketFixture {
     pub orders: Vec<Value>,
@@ -187,6 +197,9 @@ pub struct MarketFixture {
 
 /// ESI's page size for the region market.
 pub const MARKET_PAGE_SIZE: usize = 1000;
+
+/// ESI's page size for the assets of a character.
+pub const ASSETS_PAGE_SIZE: usize = 1000;
 
 /// Overrides for issuing deliberately odd tokens in tests.
 #[derive(Clone, Debug, Default)]
@@ -259,6 +272,9 @@ impl Inner {
             issued_tokens: HashMap::new(),
             orders: default_orders(),
             market_orders: HashMap::new(),
+            wallets: default_wallets(),
+            assets: default_assets(),
+            prices: default_prices(),
             esi_expires_secs: ESI_EXPIRES_SECONDS,
             esi_calls: HashMap::new(),
             names_requests: Vec::new(),
@@ -386,6 +402,9 @@ impl Inner {
         self.token_options = TokenOptions::default();
         self.orders = default_orders();
         self.market_orders.clear();
+        self.wallets = default_wallets();
+        self.assets = default_assets();
+        self.prices = default_prices();
         self.esi_expires_secs = ESI_EXPIRES_SECONDS;
         self.esi_calls.clear();
         self.names_requests.clear();
@@ -475,4 +494,44 @@ fn default_orders() -> HashMap<i64, Vec<Value>> {
         ),
         (90000003, vec![]),
     ])
+}
+
+fn default_wallets() -> HashMap<i64, f64> {
+    HashMap::from([(90000001, 2_500_000.0), (90000002, 100.5), (90000003, 0.0)])
+}
+
+fn asset(item_id: i64, type_id: i64, location_id: i64, quantity: i64) -> Value {
+    json!({
+        "item_id": item_id, "type_id": type_id, "location_id": location_id,
+        "location_type": "station", "location_flag": "Hangar", "quantity": quantity,
+        "is_singleton": false,
+    })
+}
+
+/// Alice: two stacks in Jita. Bob: one stack in Amarr. Carol has none.
+fn default_assets() -> HashMap<i64, MarketFixture> {
+    let fixture = |assets: Vec<Value>| MarketFixture {
+        orders: assets,
+        page_size: ASSETS_PAGE_SIZE,
+    };
+    HashMap::from([
+        (
+            90000001,
+            fixture(vec![
+                asset(2001, 34, 60003760, 1000),
+                asset(2002, 35, 60003760, 50),
+            ]),
+        ),
+        (90000002, fixture(vec![asset(3001, 34, 60008494, 20)])),
+        (90000003, fixture(vec![])),
+    ])
+}
+
+/// Tritanium and Pyerite with an average; Mexallon with only an adjusted price.
+fn default_prices() -> Vec<Value> {
+    vec![
+        json!({"type_id": 34, "average_price": 5.5, "adjusted_price": 5.1}),
+        json!({"type_id": 35, "average_price": 10.25, "adjusted_price": 9.9}),
+        json!({"type_id": 36, "adjusted_price": 70.0}),
+    ]
 }

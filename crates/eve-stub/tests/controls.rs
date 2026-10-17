@@ -133,7 +133,7 @@ async fn reduced_scopes_apply_to_existing_refresh_tokens() {
             .as_array()
             .unwrap()
             .len(),
-        2
+        4
     );
 
     let res = control(
@@ -228,6 +228,6 @@ async fn reset_restores_the_fixture() {
             .as_array()
             .unwrap()
             .len(),
-        2
+        4
     );
 }

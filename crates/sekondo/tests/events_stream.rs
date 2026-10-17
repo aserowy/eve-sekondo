@@ -56,6 +56,71 @@ async fn a_poll_sends_the_orders_updated_signal(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn a_wallet_poll_sends_the_wealth_updated_signal_to_its_account_only(pool: PgPool) {
+    let app = app(pool).await;
+    let alice = signed_in(&app, ALICE).await;
+    let bob = signed_in(&app, BOB).await;
+    let mut alice_stream = open_stream(&app, &alice).await;
+    let mut bob_stream = open_stream(&app, &bob).await;
+
+    app.state
+        .wealth
+        .poll(ALICE, sekondo::wealth_poller::Kind::Wallet)
+        .await;
+
+    let (alice_text, _) = read_for(&mut alice_stream, Duration::from_millis(600)).await;
+    let (bob_text, _) = read_for(&mut bob_stream, Duration::from_millis(600)).await;
+    assert!(
+        alice_text.contains("event: wealth-updated"),
+        "{alice_text:?}"
+    );
+    assert!(!bob_text.contains("wealth-updated"), "{bob_text:?}");
+}
+
+#[sqlx::test]
+async fn an_assets_poll_sends_the_wealth_updated_signal(pool: PgPool) {
+    let app = app(pool).await;
+    let alice = signed_in(&app, ALICE).await;
+    let mut stream = open_stream(&app, &alice).await;
+
+    app.state
+        .wealth
+        .poll(ALICE, sekondo::wealth_poller::Kind::Assets)
+        .await;
+
+    let (text, _) = read_for(&mut stream, Duration::from_millis(600)).await;
+    assert!(text.contains("event: wealth-updated"), "{text:?}");
+}
+
+#[sqlx::test]
+async fn a_price_refresh_signals_each_account_with_assets_once(pool: PgPool) {
+    let app = app(pool).await;
+    let alice = signed_in(&app, ALICE).await;
+    let bob = signed_in(&app, BOB).await;
+    let carol = signed_in(&app, 90000003).await;
+    for character in [ALICE, BOB] {
+        app.state
+            .wealth
+            .poll(character, sekondo::wealth_poller::Kind::Assets)
+            .await;
+    }
+    let mut streams = vec![
+        open_stream(&app, &alice).await,
+        open_stream(&app, &bob).await,
+        open_stream(&app, &carol).await,
+    ];
+
+    app.state.prices.refresh().await;
+
+    let mut counts = Vec::new();
+    for stream in &mut streams {
+        let (text, _) = read_for(stream, Duration::from_millis(600)).await;
+        counts.push(text.matches("event: wealth-updated").count());
+    }
+    assert_eq!(counts, [1, 1, 0], "Carol has no assets");
+}
+
+#[sqlx::test]
 async fn signals_stay_within_the_account(pool: PgPool) {
     let app = app(pool).await;
     let alice = signed_in(&app, ALICE).await;

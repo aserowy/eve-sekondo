@@ -1,6 +1,7 @@
+import { chartData, chartDrawn } from '../support/charts';
 import {
   expect, loginWith, marketPoll, marketPollOutsideBrowser, pollCharacter, pollOutsideBrowser, stubControl, stubMarket,
-  stubMarketOrder, stubOrder, test,
+  stubMarketOrder, stubOrder, stubAsset, test, wealthPoll,
 } from '../support/fixtures';
 
 test('the tables refresh after a poll without reloading', async ({ page }) => {
@@ -179,4 +180,106 @@ test('a missed market signal is caught up after the stream reconnects', async ({
 
   await page.unroute('**/events');
   await expect(page.locator('#order-1 .badge.undercut')).toHaveText('Undercut 1', { timeout: 20_000 });
+});
+
+// ---- the wealth page ----
+
+const WALLET = 2; // the stack, bottom to top: sell orders, buy escrow, wallet, inventory
+
+test('the last wallet point shows a new balance after a wallet poll, without a reload', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  await stubControl('wallet', { character_id: 90000001, balance: 10_000_000 });
+  await wealthPoll(page, 90000001, 'wallet');
+  await page.goto('/wealth');
+  const lastWallet = async () => {
+    const data = await chartData(page, 'wealth-stack');
+    return data[WALLET][data[WALLET].length - 1].y;
+  };
+  expect(await lastWallet()).toBe(1_000_000_000);
+  await page.evaluate(() => ((window as unknown as { marker: string }).marker = 'same page'));
+
+  await stubControl('wallet', { character_id: 90000001, balance: 15_000_000 });
+  await wealthPoll(page, 90000001, 'wallet');
+
+  await expect.poll(lastWallet).toBe(1_500_000_000);
+  expect(await page.evaluate(() => (window as unknown as { marker: string }).marker)).toBe('same page');
+});
+
+test('selection, range and sorting are kept by a live wealth refresh', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  await page.getByRole('navigation').getByRole('link', { name: 'Characters' }).click();
+  await page.getByRole('button', { name: 'Add character' }).click();
+  await page.getByRole('link', { name: 'Bob Bravo' }).click();
+  await stubControl('assets', {
+    character_id: 90000001,
+    assets: [stubAsset(1, { type: 34, quantity: 5 }), stubAsset(2, { type: 35, quantity: 5 })],
+  });
+  await stubControl('assets', { character_id: 90000002, assets: [stubAsset(3, { type: 36, quantity: 5 })] });
+  await wealthPoll(page, 90000001, 'assets');
+  await wealthPoll(page, 90000002, 'assets');
+  await wealthPoll(page, 90000001, 'wallet');
+  await page.goto('/wealth?chars=90000001&range=24h&sort=item&dir=asc');
+  await expect(page.locator('#inventory tbody tr')).toHaveCount(2);
+  await expect(page.locator('#inventory th[aria-sort="ascending"]')).toContainText('Item');
+  await page.waitForTimeout(1000);
+
+  await stubControl('wallet', { character_id: 90000001, balance: 77_000_000 });
+  await wealthPoll(page, 90000001, 'wallet');
+  await wealthPoll(page, 90000002, 'wallet');
+
+  await expect.poll(async () => {
+    const data = await chartData(page, 'wealth-stack');
+    return data[WALLET][data[WALLET].length - 1].y;
+  }).toBe(7_700_000_000);
+  await expect(page).toHaveURL(/chars=90000001&range=24h&sort=item&dir=asc$/);
+  await expect(page.locator('#wealth-range-control [aria-current="true"]')).toHaveText('24 hours');
+  await expect(page.locator('#inventory tbody tr')).toHaveCount(2);
+  await expect(page.locator('#inventory th[aria-sort="ascending"]')).toContainText('Item');
+  await expect(page.locator('#wealth-freshness')).not.toContainText('Bob Bravo');
+  await chartDrawn(page, 'wealth-stack');
+  expect(
+    await page.evaluate(() => {
+      const chart = (window as any).Chart.getChart(document.querySelector('canvas[data-chart="wealth-stack"]'));
+      return Math.round((chart.scales.x.max - chart.scales.x.min) / 3_600_000);
+    }),
+  ).toBe(24);
+});
+
+test('the wealth page does not refresh because of a market refresh', async ({ page }) => {
+  await topSeller(page);
+  await page.goto('/wealth');
+  await expect(page.getByRole('heading', { name: 'Wealth' })).toBeVisible();
+  await page.waitForTimeout(1000);
+  const refreshes: string[] = [];
+  page.on('request', (request) => {
+    if (/\/wealth\/(graph|items|freshness)/.test(request.url())) refreshes.push(request.url());
+  });
+
+  // This one does change a standing, so the orders page would refresh.
+  await stubMarket([stubMarketOrder(1, { price: 100 }), stubMarketOrder(2, { price: 90 })]);
+  expect(await marketPoll(page)).toBe('200 1');
+  await page.waitForTimeout(1500);
+
+  expect(refreshes).toEqual([]);
+});
+
+test('missed wealth signals are caught up after the stream reconnects', async ({ page, context }) => {
+  await loginWith(page, 'Alice Alpha');
+  await stubControl('wallet', { character_id: 90000001, balance: 10_000_000 });
+  await wealthPoll(page, 90000001, 'wallet');
+  await page.route('**/events', (route) => route.abort('connectionrefused'));
+  await page.goto('/wealth');
+  const lastWallet = async () => {
+    const data = await chartData(page, 'wealth-stack');
+    return data[WALLET][data[WALLET].length - 1].y;
+  };
+  expect(await lastWallet()).toBe(1_000_000_000);
+
+  await stubControl('wallet', { character_id: 90000001, balance: 20_000_000 });
+  await wealthPoll(page, 90000001, 'wallet');
+  await page.waitForTimeout(500);
+  expect(await lastWallet()).toBe(1_000_000_000);
+
+  await page.unroute('**/events');
+  await expect.poll(lastWallet, { timeout: 20_000 }).toBe(2_000_000_000);
 });

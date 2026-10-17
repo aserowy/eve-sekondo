@@ -1,7 +1,9 @@
 {
-  "fingerprint": "9820de62adddef055ab2da3cdb58b9e95b21d2be35bcae5bb7c666af5e088066",
-  "verified_at": "2026-10-17T03:37:18.913175757Z",
+  "fingerprint": "704071bc1737a92f840a5f32a9720675566cfff7fa29be2a26546146d3317d62",
+  "verified_at": "2026-10-17T04:53:39.622253002Z",
   "variants": [
+    "assets/forbidden",
+    "assets/items",
     "authorization/callback",
     "authorization/request",
     "jwks/rsa-keys",
@@ -10,10 +12,13 @@
     "names/unknown-id",
     "orders/buy-orders",
     "orders/sell-orders",
+    "prices/list",
     "structures/forbidden",
     "structures/found",
     "token/access-token-claims",
     "token/authorization-code",
-    "token/refresh"
+    "token/refresh",
+    "wallet/balance",
+    "wallet/forbidden"
   ]
 }

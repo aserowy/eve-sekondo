@@ -1,0 +1,13 @@
+<section id="wealth-graph" class="history" hx-get="{{ view.graph_url }}" hx-trigger="sse:wealth-updated, sse:orders-updated, htmx:sseOpen from:body" hx-swap="outerHTML">
+  <h2>Over time</h2>
+  <div id="wealth-range-control" class="range-control" role="group" aria-label="Time range">
+    {% for r in view.graph.ranges %}
+    <a href="{{ r.href }}" hx-get="{{ r.graph_url }}" hx-target="#wealth-graph" hx-swap="outerHTML" hx-sync="#wealth-graph:replace" hx-push-url="{{ r.href }}"{% if r.current %} aria-current="true"{% endif %}>{{ r.label }}</a>
+    {% endfor %}
+  </div>
+  {% if let Some(chart) = view.graph.chart %}
+  <div class="chart"><canvas data-chart="wealth-stack" data-series="{{ chart.series }}" role="img" aria-label="{{ chart.label }}"></canvas></div>
+  {% else %}
+  <p>No history yet.</p>
+  {% endif %}
+</section>

@@ -57,7 +57,7 @@ pub fn challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
-pub const SCOPES: &str = "esi-markets.read_character_orders.v1 esi-universe.read_structures.v1";
+pub const SCOPES: &str = "esi-markets.read_character_orders.v1 esi-universe.read_structures.v1 esi-wallet.read_character_wallet.v1 esi-assets.read_assets.v1";
 pub const VERIFIER: &str = "a-pkce-verifier-that-is-long-enough-0123456789abcdef";
 
 impl Fixture {

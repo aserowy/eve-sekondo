@@ -6,9 +6,11 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 /// Exactly the scopes the app asks for, and requires on every token.
-pub const REQUIRED_SCOPES: [&str; 2] = [
+pub const REQUIRED_SCOPES: [&str; 4] = [
     "esi-markets.read_character_orders.v1",
     "esi-universe.read_structures.v1",
+    "esi-wallet.read_character_wallet.v1",
+    "esi-assets.read_assets.v1",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

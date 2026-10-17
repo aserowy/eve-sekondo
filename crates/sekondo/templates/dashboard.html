@@ -17,7 +17,7 @@
     {% include "character_filter.html" %}
     <input type="hidden" name="range" value="{{ range_name }}">
   </form>
-  <section id="dashboard-summary" hx-get="{{ view.summary_url }}" hx-trigger="sse:orders-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
+  <section id="dashboard-summary" hx-get="{{ view.summary_url }}" hx-trigger="sse:orders-updated, sse:wealth-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
     {% include "dashboard_summary.html" %}
   </section>
 </div>

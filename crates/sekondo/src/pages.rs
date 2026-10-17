@@ -13,6 +13,7 @@ use crate::{account::CurrentAccount, app::AppState, auth, csrf, selection::ViewQ
 pub enum Page {
     Dashboard,
     Orders,
+    Wealth,
     Characters,
 }
 
@@ -45,12 +46,21 @@ impl Nav {
         self.current == Page::Orders
     }
 
+    pub fn wealth_current(&self) -> bool {
+        self.current == Page::Wealth
+    }
+
     pub fn characters_current(&self) -> bool {
         self.current == Page::Characters
     }
 
     pub fn orders_href(&self) -> String {
         format!("/orders{}", self.chars_query)
+    }
+
+    /// Carries the selection and never the range: the wealth page has a range of its own.
+    pub fn wealth_href(&self) -> String {
+        format!("/wealth{}", self.chars_query)
     }
 
     pub fn dashboard_href(&self) -> String {

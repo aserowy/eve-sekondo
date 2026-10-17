@@ -21,7 +21,7 @@ Without Nix you need the same tools installed yourself. Below, `podman-compose` 
 At <https://developers.eveonline.com/> create an application with:
 
 - **Callback URL:** `https://localhost:8443/auth/callback`
-- **Scopes:** `esi-markets.read_character_orders.v1` and `esi-universe.read_structures.v1`
+- **Scopes:** `esi-markets.read_character_orders.v1`, `esi-universe.read_structures.v1`, `esi-wallet.read_character_wallet.v1` and `esi-assets.read_assets.v1` (characters linked with fewer scopes are asked to log in again)
 
 Keep the client ID and the secret for `.env` below.
 

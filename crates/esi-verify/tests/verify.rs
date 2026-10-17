@@ -262,6 +262,11 @@ async fn a_passing_verification_records_the_fingerprint_and_the_variants() {
         "structures/found",
         "structures/forbidden",
         "market-orders/orders",
+        "wallet/balance",
+        "wallet/forbidden",
+        "assets/items",
+        "assets/forbidden",
+        "prices/list",
     ] {
         assert!(record.variants.iter().any(|v| v == variant), "{variant}");
     }
@@ -301,6 +306,7 @@ async fn nothing_secret_is_printed() {
         "eyJ",
         "Bearer",
         "1500000",
+        "2500000",
         "Alice",
         "Tritanium",
         CLIENT_SECRET,
@@ -567,4 +573,63 @@ async fn a_market_answer_the_app_cannot_decode_fails_with_the_decoding_error() {
         output.contains("market-orders: the app cannot decode"),
         "{output}"
     );
+}
+
+#[tokio::test]
+async fn a_character_without_an_asset_is_told_so_and_the_record_stays() {
+    let w = world(Person::LogsIn).await;
+    let old = w.write_old_record();
+    w.control("assets", json!({"character_id": ALICE, "assets": []}))
+        .await;
+
+    let (result, output) = w.verify().await;
+
+    assert!(result.is_err());
+    assert!(output.contains("an asset is needed"), "{output}");
+    assert_eq!(w.record(), Some(old));
+}
+
+#[tokio::test]
+async fn no_balance_or_asset_value_is_printed_even_when_a_call_fails() {
+    let w = world(Person::LogsIn).await;
+    w.control(
+        "wallet",
+        json!({"character_id": ALICE, "balance": 7654321.5}),
+    )
+    .await;
+    let mut item = json!({
+        "item_id": 424242, "type_id": 34, "location_id": 60003760, "location_type": "station",
+        "location_flag": "Hangar", "quantity": 987654, "is_singleton": false,
+    });
+    item.as_object_mut().unwrap().remove("is_singleton");
+    w.control("assets", json!({"character_id": ALICE, "assets": [item]}))
+        .await;
+
+    let (result, output) = w.verify().await;
+
+    assert!(result.is_err());
+    assert!(output.contains("assets/items"), "{output}");
+    for value in ["7654321", "987654", "424242"] {
+        assert!(!output.contains(value), "{value} in:\n{output}");
+    }
+}
+
+#[tokio::test]
+async fn the_wallet_assets_and_prices_are_each_asked_once_and_the_foreign_ones_are_refused() {
+    let w = world(Person::LogsIn).await;
+
+    let (result, output) = w.verify().await;
+
+    result.unwrap_or_else(|e| panic!("{e}\n{output}"));
+    assert_eq!(
+        w.stub.esi_calls("wallet"),
+        2,
+        "own balance, foreign refused"
+    );
+    assert_eq!(
+        w.stub.esi_calls("assets"),
+        2,
+        "own first page, foreign refused"
+    );
+    assert_eq!(w.stub.esi_calls("prices"), 1);
 }

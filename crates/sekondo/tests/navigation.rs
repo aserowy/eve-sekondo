@@ -86,9 +86,13 @@ async fn every_signed_in_page_has_the_navigation_with_its_own_entry_marked(pool:
     let app = app(pool).await;
     let browser = signed_in(&app).await;
 
-    for (path, current) in [("/dashboard", "Dashboard"), ("/characters", "Characters")] {
+    for (path, current) in [
+        ("/dashboard", "Dashboard"),
+        ("/wealth", "Wealth"),
+        ("/characters", "Characters"),
+    ] {
         let html = page(&app, &browser, path).await;
-        for link in ["/dashboard", "/orders", "/characters"] {
+        for link in ["/dashboard", "/orders", "/wealth", "/characters"] {
             assert!(
                 html.contains(&format!(r#"href="{link}""#)),
                 "{path} lacks {link}"
@@ -135,7 +139,7 @@ async fn navigation_links_carry_a_narrowed_selection(pool: PgPool) {
         format!("/orders?chars={BOB}"),
     ] {
         let html = unescaped(&page(&app, &browser, &path).await);
-        for link in ["/dashboard", "/orders", "/characters"] {
+        for link in ["/dashboard", "/orders", "/wealth", "/characters"] {
             assert!(
                 html.contains(&format!(r#"href="{link}?chars={BOB}""#)),
                 "{path}: {link} lacks the selection"

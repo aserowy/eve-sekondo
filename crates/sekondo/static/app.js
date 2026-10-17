@@ -21,8 +21,12 @@ document.addEventListener('htmx:configRequest', (event) => {
     query.push('chars=' + selected.map(encodeURIComponent).join(','));
   }
   const value = (name) => form.querySelector(`input[name="${name}"]`)?.value;
+  // The default sorting is per page: the orders tables sort by item, the wealth list by value.
+  const defaultSort = form.dataset.defaultSort ?? 'item';
+  const defaultDir = form.dataset.defaultDir ?? 'asc';
+  const defaults = { sort: [defaultSort, defaultDir], bsort: ['item', 'asc'] };
   for (const [sort, dir] of [['sort', 'dir'], ['bsort', 'bdir']]) {
-    if (value(sort) && !(value(sort) === 'item' && value(dir) === 'asc')) {
+    if (value(sort) && !(value(sort) === defaults[sort][0] && value(dir) === defaults[sort][1])) {
       query.push(`${sort}=${encodeURIComponent(value(sort))}`, `${dir}=${encodeURIComponent(value(dir))}`);
     }
   }
@@ -42,6 +46,13 @@ document.addEventListener('htmx:configRequest', (event) => {
 // redrawn whenever htmx swaps a fresh copy in.
 const SELL_COLOR = '#3987e5';
 const BUY_COLOR = '#d95926';
+// Wallet and inventory take the next two slots of the dataviz palette (dark steps). In the stack
+// order sell, escrow, wallet, inventory every touching pair passes the validator's colour-blind
+// separation check.
+const WALLET_COLOR = '#199e70';
+const INVENTORY_COLOR = '#c98500';
+const TOTAL_COLOR = '#ebeadf';
+const SURFACE = '#1a1a19';
 const INK = '#c3c2b7';
 const GRID = '#2c2c2a';
 
@@ -84,6 +95,9 @@ function externalTooltip(context) {
   for (const point of tooltip.dataPoints) {
     lines.push(['chart-tooltip-value', `${point.dataset.label}: ${point.dataset.exact[point.dataIndex]}`]);
   }
+  // A stacked chart also says what the stack adds up to (formatted by the server).
+  const totals = chart.config.options.totals;
+  if (totals) lines.push(['chart-tooltip-total', `Total: ${totals[tooltip.dataPoints[0].dataIndex]}`]);
   element.replaceChildren(
     ...lines.map(([className, text]) => {
       const line = document.createElement('div');
@@ -127,6 +141,10 @@ const COLORS = {
   'Buy escrow': BUY_COLOR,
   'Sell orders': SELL_COLOR,
   'Buy orders': BUY_COLOR,
+  Wallet: WALLET_COLOR,
+  Inventory: INVENTORY_COLOR,
+  // The total is not a component: a neutral line that stands out from every component colour.
+  Wealth: TOTAL_COLOR,
 };
 
 // One bar per character and series: the per-character split.
@@ -227,7 +245,52 @@ function lineConfig(data, yAxis) {
   };
 }
 
+// Four areas stacked on one axis of epoch milliseconds: the top edge is the total. The areas are
+// separated by a gap in the surface colour, and one tooltip lists every layer and the total.
+function stackConfig(data) {
+  return {
+    type: 'line',
+    data: {
+      datasets: data.series.map((series) => ({
+        label: series.name,
+        data: series.values.map((value, index) => ({ x: data.times[index], y: value })),
+        exact: series.exact,
+        fill: true,
+        borderColor: SURFACE,
+        backgroundColor: COLORS[series.name],
+        borderWidth: 2,
+        pointRadius: 0,
+        pointHoverRadius: 5,
+        pointHitRadius: 12,
+        tension: 0,
+      })),
+    },
+    options: baseOptions({
+      totals: data.totals,
+      interaction: { mode: 'index', axis: 'x', intersect: false },
+      plugins: {
+        legend: { display: true, labels: { color: INK } },
+        tooltip: {
+          external: externalTooltip,
+          callbacks: { title: (items) => `${data.labels[items[0].dataIndex]} EVE time` },
+        },
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          min: data.times[0],
+          max: data.times[data.times.length - 1],
+          ticks: { ...AXIS_TEXT, maxTicksLimit: 8, callback: (value) => eveTick(value) },
+          grid: GRID_LINES,
+        },
+        y: { ...moneyAxis(), stacked: true },
+      },
+    }),
+  };
+}
+
 const valueHistoryConfig = (data) => lineConfig(data, moneyAxis());
+const wealthHistoryConfig = valueHistoryConfig;
 const countHistoryConfig = (data) =>
   lineConfig(data, {
     beginAtZero: true,
@@ -241,6 +304,8 @@ const CHART_KINDS = {
   'top-buy': topItemsConfig,
   'value-history': valueHistoryConfig,
   'count-history': countHistoryConfig,
+  'wealth-stack': stackConfig,
+  'wealth-history': wealthHistoryConfig,
 };
 
 function drawCharts(root) {

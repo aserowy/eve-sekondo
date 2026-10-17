@@ -23,11 +23,14 @@ use crate::{
     market::{MARKET_INTERVAL, MarketPoller},
     orders, pages,
     poller::Poller,
+    prices::PricePoller,
     repo::Repo,
     session, sse,
     sso::SsoClient,
     tls,
     tokens::TokenService,
+    wealth_page,
+    wealth_poller::WealthPoller,
 };
 
 #[derive(Clone)]
@@ -42,6 +45,8 @@ pub struct AppState {
     pub esi: Arc<EsiClient>,
     pub poller: Arc<Poller>,
     pub market: Arc<MarketPoller>,
+    pub wealth: Arc<WealthPoller>,
+    pub prices: Arc<PricePoller>,
     pub events: Arc<dyn EventBus>,
     pub sse_tick: std::time::Duration,
 }
@@ -130,6 +135,20 @@ impl App {
             clock.clone(),
             MARKET_INTERVAL,
         ));
+        let wealth = Arc::new(WealthPoller::new(
+            pool.clone(),
+            tokens.clone(),
+            esi.clone(),
+            events.clone(),
+            clock.clone(),
+            config.order_poll_interval,
+        ));
+        let prices = Arc::new(PricePoller::new(
+            pool.clone(),
+            esi.clone(),
+            events.clone(),
+            clock.clone(),
+        ));
         let state = AppState {
             config: Arc::new(config),
             pool,
@@ -141,6 +160,8 @@ impl App {
             esi,
             poller,
             market,
+            wealth,
+            prices,
             events,
             sse_tick: options.sse_tick,
         };
@@ -167,6 +188,10 @@ pub fn router(state: AppState, extra_routes: Router<AppState>) -> Router {
         .route("/orders", get(orders::page))
         .route("/orders/tables", get(orders::tables))
         .route("/orders/freshness", get(orders::freshness))
+        .route("/wealth", get(wealth_page::page))
+        .route("/wealth/freshness", get(wealth_page::freshness))
+        .route("/wealth/graph", get(wealth_page::graph))
+        .route("/wealth/items", get(wealth_page::items))
         .route("/characters", get(pages::characters))
         .route("/characters/{id}/unlink", post(characters::unlink))
         .route("/events", get(sse::stream))
@@ -180,12 +205,20 @@ pub fn router(state: AppState, extra_routes: Router<AppState>) -> Router {
     #[cfg(feature = "test-hooks")]
     let routes = {
         tracing::warn!(
-            "built with the test-hooks feature: POST /_test/refresh/{{id}}, POST /_test/poll/{{id}} and POST /_test/market-poll are enabled"
+            "built with the test-hooks feature: POST /_test/refresh/{{id}}, POST /_test/poll/{{id}} and POST /_test/market-poll, POST /_test/wealth-poll/{{id}}/{{kind}} and POST /_test/price-refresh are enabled"
         );
         routes
             .route("/_test/refresh/{id}", post(crate::test_hooks::refresh))
             .route("/_test/poll/{id}", post(crate::test_hooks::poll))
             .route("/_test/market-poll", post(crate::test_hooks::market_poll))
+            .route(
+                "/_test/wealth-poll/{id}/{kind}",
+                post(crate::test_hooks::wealth_poll),
+            )
+            .route(
+                "/_test/price-refresh",
+                post(crate::test_hooks::price_refresh),
+            )
     };
 
     let router = routes

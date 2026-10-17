@@ -1,5 +1,6 @@
-import { expect, loginWith, openCharacters, pollCharacter, stubControl, stubOrder, test } from '../support/fixtures';
+import { expect, loginWith, openCharacters, pollCharacter, query, stubControl, stubOrder, test, wealthPoll } from '../support/fixtures';
 import type { Page } from '@playwright/test';
+import { chartData, expectTooltip } from '../support/charts';
 
 /** Alice and Bob on one account, signed in as Alice on the dashboard. */
 async function twoCharacters(page: Page) {
@@ -61,63 +62,6 @@ test('a character that was never polled waits for its first update', async ({ pa
   await expect(page.locator('#tile-sell-value .amount')).toHaveText('0.00');
   await expect(page.locator('#tile-sell-value .corp-share')).toHaveCount(0);
 });
-
-/** Waits until the chart of this kind is drawn: the page may still be navigating. */
-async function chartDrawn(page: Page, kind: string) {
-  await page.waitForFunction(
-    (kind) => {
-      const canvas = document.querySelector(`canvas[data-chart="${kind}"]`);
-      return Boolean(canvas && (window as any).Chart?.getChart(canvas));
-    },
-    kind,
-  );
-}
-
-/** The page position of the middle of a bar or point of a chart, for hovering it. */
-async function chartPoint(page: Page, kind: string, dataset: number, index: number) {
-  await chartDrawn(page, kind);
-  return page.evaluate(
-    ([kind, dataset, index]) => {
-      const canvas = document.querySelector<HTMLCanvasElement>(`canvas[data-chart="${kind}"]`)!;
-      const chart = (window as any).Chart.getChart(canvas);
-      canvas.scrollIntoView({ block: 'center' });
-      const centre = chart.getDatasetMeta(dataset).data[index].getCenterPoint();
-      const box = canvas.getBoundingClientRect();
-      return { x: box.left + centre.x, y: box.top + centre.y };
-    },
-    [kind, dataset, index] as const,
-  );
-}
-
-async function chartData(page: Page, kind: string): Promise<any[][]> {
-  let data: any[][] = [];
-  // A live refresh can replace the chart between waiting for it and reading it: read again.
-  await expect(async () => {
-    await chartDrawn(page, kind);
-    data = await page.evaluate((kind) => {
-      const canvas = document.querySelector<HTMLCanvasElement>(`canvas[data-chart="${kind}"]`)!;
-      return (window as any).Chart.getChart(canvas).data.datasets.map((d: { data: unknown[] }) => d.data);
-    }, kind);
-  }).toPass();
-  return data;
-}
-
-async function hover(page: Page, kind: string, dataset: number, index: number) {
-  const { x, y } = await chartPoint(page, kind, dataset, index);
-  await page.mouse.move(x, y);
-}
-
-/**
- * Hovers a bar or point and expects the chart's tooltip to hold these texts. A live refresh may
- * replace the charts right after the page opens, so hovering and reading are retried together.
- */
-async function expectTooltip(page: Page, kind: string, dataset: number, index: number, texts: (string | RegExp)[]) {
-  await expect(async () => {
-    await hover(page, kind, dataset, index);
-    const tooltip = page.locator(`canvas[data-chart="${kind}"] + .chart-tooltip`);
-    for (const text of texts) await expect(tooltip).toContainText(text, { timeout: 1000 });
-  }).toPass();
-}
 
 test('the split graph has a sell and an escrow bar per character, with exact values on hover', async ({ page }) => {
   await twoCharacters(page);
@@ -266,13 +210,13 @@ test('opening the dashboard, switching the range and narrowing the selection rai
   await stubControl('orders', { character_id: 90000001, orders: [stubOrder(1)] });
   await pollCharacter(page, 90000001);
   await page.goto('/dashboard');
-  await expect(page.locator('canvas[data-chart]')).toHaveCount(4);
+  await expect(page.locator('canvas[data-chart]')).toHaveCount(5);
 
   await page.locator('#range-control').getByRole('link', { name: '90 days' }).click();
   await expect(page).toHaveURL(/range=90d$/);
   await page.getByRole('checkbox', { name: 'Bob Bravo' }).uncheck();
   await expect(page).toHaveURL(/chars=90000001&range=90d$/);
-  await expect(page.locator('canvas[data-chart]')).toHaveCount(4);
+  await expect(page.locator('canvas[data-chart]')).toHaveCount(5);
   // The CSP guard fixture fails the test on any violation reported while the page did all this.
 });
 
@@ -286,7 +230,7 @@ test('totals, row, split bar and the last line point refresh after a poll withou
   await pollCharacter(page, 90000001);
   await page.goto('/dashboard');
   await expect(page.locator('#tile-sell-value .amount')).toHaveText('10m');
-  await expect(page.locator('canvas[data-chart]')).toHaveCount(4);
+  await expect(page.locator('canvas[data-chart]')).toHaveCount(5);
   await page.evaluate(() => ((window as unknown as { marker: string }).marker = 'same page'));
 
   await stubControl('orders', { character_id: 90000001, orders: [stubOrder(1, { price: 1_500_000, remain: 10 })] });
@@ -308,8 +252,8 @@ test('a live refresh keeps the selection and the range, and leaks no chart', asy
   await pollCharacter(page, 90000001);
   await pollCharacter(page, 90000002);
   await page.goto('/dashboard?chars=90000001&range=24h');
-  await expect(page.locator('canvas[data-chart]')).toHaveCount(4);
-  await expect.poll(() => instanceCount(page)).toBe(4);
+  await expect(page.locator('canvas[data-chart]')).toHaveCount(5);
+  await expect.poll(() => instanceCount(page)).toBe(5);
 
   for (const [round, price] of [1_100_000, 1_200_000, 1_300_000].entries()) {
     await stubControl('orders', { character_id: 90000001, orders: [stubOrder(1, { price, remain: 10 })] });
@@ -325,6 +269,95 @@ test('a live refresh keeps the selection and the range, and leaks no chart', asy
   await expect(page.locator('#character-90000002')).toHaveCount(0);
   await expect(page.locator('#range-control').getByRole('link', { name: '24 hours' })).toHaveAttribute('aria-current', 'true');
   expect((await chartData(page, 'value-history'))[0].length).toBeLessThanOrEqual(49);
-  // After three refreshes there are exactly the four charts of the page, not twelve more.
-  expect(await instanceCount(page)).toBe(4);
+  // After three refreshes there are exactly the five charts of the page, not fifteen more.
+  expect(await instanceCount(page)).toBe(5);
+});
+
+test('the wealth tile adds up both characters, shows the exact amount on hover and links to the wealth page with the selection', async ({ page }) => {
+  await twoCharacters(page);
+  await stubControl('orders', { character_id: 90000001, orders: [] });
+  await stubControl('orders', { character_id: 90000002, orders: [] });
+  await stubControl('wallet', { character_id: 90000001, balance: 200_000_000 });
+  await stubControl('wallet', { character_id: 90000002, balance: 50_000_000 });
+  await wealthPoll(page, 90000001, 'wallet');
+  await wealthPoll(page, 90000002, 'wallet');
+  await openDashboard(page);
+
+  const tile = page.locator('#tile-wealth');
+  await expect(tile.locator('.amount')).toHaveText('250m');
+  await expect(tile.locator('.amount')).toHaveAttribute('title', '250,000,000.00 ISK');
+  await expect(tile.getByRole('link', { name: 'Wealth' })).toHaveAttribute('href', '/wealth');
+
+  await page.getByRole('checkbox', { name: 'Bob Bravo' }).uncheck();
+  await expect(tile.locator('.amount')).toHaveText('200m');
+  await expect(tile.getByRole('link', { name: 'Wealth' })).toHaveAttribute('href', '/wealth?chars=90000001');
+
+  await tile.getByRole('link', { name: 'Wealth' }).click();
+  await expect(page).toHaveURL(/\/wealth\?chars=90000001$/);
+});
+
+test('one range click updates the value, count and wealth graphs', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  await stubControl('orders', { character_id: 90000001, orders: [stubOrder(1, { price: 1_000_000, remain: 4 })] });
+  await pollCharacter(page, 90000001);
+  await wealthPoll(page, 90000001, 'wallet');
+  await page.goto('/dashboard');
+  const points = async (kind: string) => (await chartData(page, kind))[0].length;
+  expect(await points('wealth-history')).toBeGreaterThanOrEqual(84);
+
+  await page.locator('#range-control').getByRole('link', { name: '30 days' }).click();
+
+  await expect(page).toHaveURL(/range=30d$/);
+  for (const kind of ['value-history', 'count-history', 'wealth-history']) {
+    await expect.poll(() => points(kind), { message: kind }).toBeGreaterThanOrEqual(120);
+  }
+});
+
+test('the wealth line steps with the wallet and its last point is the tile', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  await stubControl('orders', { character_id: 90000001, orders: [] });
+  // Polls two hours and one hour ago (the polls themselves only know "now").
+  await query(
+    `INSERT INTO wallet_balances (character_id, polled_at, balance) VALUES
+       (90000001, now() - interval '2 hours', 10000000), (90000001, now() - interval '1 hour', 15000000)`,
+  );
+  await page.goto('/dashboard?range=24h');
+
+  const line = (await chartData(page, 'wealth-history'))[0].map((point) => point.y);
+  expect(line).toContain(1_000_000_000);
+  expect(line[line.length - 1]).toBe(1_500_000_000);
+  expect(line.indexOf(1_000_000_000)).toBeLessThan(line.indexOf(1_500_000_000));
+  expect(line[0]).toBeLessThanOrEqual(1_000_000_000);
+  await expect(page.locator('#tile-wealth .amount')).toHaveText('15m');
+  await expectTooltip(page, 'wealth-history', 0, line.length - 1, ['Wealth: 15,000,000.00 ISK']);
+});
+
+test('a wallet poll refreshes the wealth tile and line without a reload', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  await stubControl('orders', { character_id: 90000001, orders: [] });
+  await stubControl('wallet', { character_id: 90000001, balance: 10_000_000 });
+  await wealthPoll(page, 90000001, 'wallet');
+  await page.goto('/dashboard');
+  await expect(page.locator('#tile-wealth .amount')).toHaveText('10m');
+  await page.evaluate(() => ((window as unknown as { marker: string }).marker = 'same page'));
+  await page.waitForTimeout(1000);
+
+  await stubControl('wallet', { character_id: 90000001, balance: 25_000_000 });
+  await wealthPoll(page, 90000001, 'wallet');
+
+  await expect(page.locator('#tile-wealth .amount')).toHaveText('25m');
+  await expect
+    .poll(async () => {
+      const line = (await chartData(page, 'wealth-history'))[0];
+      return line[line.length - 1].y;
+    })
+    .toBe(2_500_000_000);
+  expect(await page.evaluate(() => (window as unknown as { marker: string }).marker)).toBe('same page');
+});
+
+test('without a wealth figure the dashboard says there is no wealth history', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+
+  await expect(page.getByText('No wealth history yet.')).toBeVisible();
+  await expect(page.locator('canvas[data-chart="wealth-history"]')).toHaveCount(0);
 });

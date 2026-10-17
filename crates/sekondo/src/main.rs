@@ -35,9 +35,13 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     // Started here and not in `App::new`, so tests opt in to background polling.
     let scheduler = app.state.poller.clone().spawn_scheduler();
     let market_scheduler = app.state.market.clone().spawn_scheduler();
+    let wealth_scheduler = app.state.wealth.clone().spawn_scheduler();
+    let price_scheduler = app.state.prices.clone().spawn_scheduler();
     let result = app::serve(app, listener, Handle::new()).await;
     scheduler.abort();
     market_scheduler.abort();
+    wealth_scheduler.abort();
+    price_scheduler.abort();
     result?;
     Ok(())
 }

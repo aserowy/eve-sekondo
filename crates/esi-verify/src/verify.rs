@@ -6,7 +6,10 @@ use esi_contract::{Verifiable, ViolationKind, check, contract, contracts, gate::
 use reqwest::header::{HeaderMap, USER_AGENT};
 use secrecy::{ExposeSecret, SecretString};
 use sekondo::{
-    esi::{COMPATIBILITY_DATE, EsiMarketOrder, EsiName, EsiOrder, EsiStructure, user_agent},
+    esi::{
+        COMPATIBILITY_DATE, EsiAsset, EsiMarketOrder, EsiName, EsiOrder, EsiPrice, EsiStructure,
+        user_agent,
+    },
     oauth::{Intent, PendingFlow},
     poller::STRUCTURE_ID_MIN,
     sso::{SsoClient, decode_token_body},
@@ -505,6 +508,68 @@ async fn verify_esi(
             );
         }
     }
+
+    verify_wealth(settings, run, http, token, me).await
+}
+
+/// The wallet, the assets and the market prices. Nothing of the answers is printed: not a
+/// balance, not an item.
+async fn verify_wealth(
+    settings: &Settings,
+    run: &mut Run<'_>,
+    http: &reqwest::Client,
+    token: &SecretString,
+    me: i64,
+) -> Result<()> {
+    let esi = |path: &str| {
+        settings
+            .esi_base_url
+            .join(path)
+            .map_err(|e| VerifyError(e.to_string()))
+    };
+
+    let answer = esi_request(
+        settings,
+        http.get(esi(&format!("characters/{me}/wallet"))?)
+            .bearer_auth(token.expose_secret()),
+        "wallet",
+    )
+    .await?;
+    run.check("wallet", "balance", &answer);
+    let _: Option<f64> = decode(run, "wallet", &answer);
+
+    let answer = esi_request(
+        settings,
+        http.get(esi(&format!("characters/{me}/assets"))?)
+            .bearer_auth(token.expose_secret()),
+        "assets",
+    )
+    .await?;
+    run.check("assets", "items", &answer);
+    if let Some(assets) = decode::<Vec<EsiAsset>>(run, "assets", &answer)
+        && assets.is_empty()
+    {
+        run.problem(
+            "assets/items: an asset is needed: the verification character has none, so the answer cannot be checked".to_owned(),
+        );
+    }
+
+    // Another character's data is refused whatever the scopes are.
+    let stranger = me + 1;
+    for (call, path) in [("wallet", "wallet"), ("assets", "assets")] {
+        let answer = esi_request(
+            settings,
+            http.get(esi(&format!("characters/{stranger}/{path}"))?)
+                .bearer_auth(token.expose_secret()),
+            call,
+        )
+        .await?;
+        run.check(call, "forbidden", &answer);
+    }
+
+    let answer = esi_request(settings, http.get(esi("markets/prices")?), "prices").await?;
+    run.check("prices", "list", &answer);
+    let _: Option<Vec<EsiPrice>> = decode(run, "prices", &answer);
     Ok(())
 }
 

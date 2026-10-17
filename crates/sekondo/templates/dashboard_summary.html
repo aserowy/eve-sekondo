@@ -13,6 +13,10 @@
     <small class="corp-share">of which <span title="{{ corp.exact }}">{{ corp.short }}</span> corp</small>
     {% endif %}
   </article>
+  <article id="tile-wealth">
+    <h2><a href="{{ view.wealth.href }}">Wealth</a></h2>
+    <p class="amount" title="{{ view.wealth.total.exact }}">{{ view.wealth.total.short }}</p>
+  </article>
   <article id="tile-sell-count">
     <h2>Sell orders</h2>
     <p class="amount">{{ view.sell_count }}</p>
@@ -90,5 +94,10 @@
   <div class="chart"><canvas data-chart="count-history" data-series="{{ history.count.series }}" role="img" aria-label="{{ history.count.label }}"></canvas></div>
   {% else %}
   <p>No history yet.</p>
+  {% endif %}
+  {% if let Some(wealth) = view.wealth_history %}
+  <div class="chart"><canvas data-chart="wealth-history" data-series="{{ wealth.series }}" role="img" aria-label="{{ wealth.label }}"></canvas></div>
+  {% else %}
+  <p>No wealth history yet.</p>
   {% endif %}
 </section>

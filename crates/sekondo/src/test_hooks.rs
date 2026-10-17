@@ -8,7 +8,8 @@ use axum::{
 };
 
 use crate::{
-    account::CurrentAccount, app::AppState, pages, poller::PollOutcome, tokens::TokenError,
+    account::CurrentAccount, app::AppState, market::RefreshOutcome, pages, poller::PollOutcome,
+    tokens::TokenError, wealth_poller::Kind,
 };
 
 /// Forces a token refresh for one of the signed-in account's characters, as the background
@@ -48,12 +49,43 @@ pub async fn poll(
         Ok(_) => return StatusCode::NOT_FOUND.into_response(),
         Err(e) => return pages::internal_error(e),
     }
-    match state.poller.poll_character(character_id).await {
+    outcome_text(state.poller.poll_character(character_id).await).into_response()
+}
+
+fn outcome_text(outcome: PollOutcome) -> &'static str {
+    match outcome {
         PollOutcome::Updated => "updated",
         PollOutcome::NeedsRelogin => "needs-relogin",
         PollOutcome::Failed => "failed",
         PollOutcome::Deferred => "deferred",
         PollOutcome::Dropped => "dropped",
+    }
+}
+
+/// Polls the wallet or the assets of one of the signed-in account's characters right now,
+/// ignoring the schedule (but not the ESI gate).
+pub async fn wealth_poll(
+    State(state): State<AppState>,
+    account: CurrentAccount,
+    Path((character_id, kind)): Path<(i64, String)>,
+) -> Response {
+    let Some(kind) = Kind::ALL.into_iter().find(|k| k.as_str() == kind) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match state.repo.find_character(character_id).await {
+        Ok(Some(c)) if c.account_id == account.id => {}
+        Ok(_) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => return pages::internal_error(e),
+    }
+    outcome_text(state.wealth.poll(character_id, kind).await).into_response()
+}
+
+/// Refreshes ESI's market prices right now, whatever the schedule says (but not the ESI gate).
+pub async fn price_refresh(State(state): State<AppState>, _account: CurrentAccount) -> Response {
+    match state.prices.refresh().await {
+        RefreshOutcome::Updated => "updated",
+        RefreshOutcome::Failed => "failed",
+        RefreshOutcome::Deferred => "deferred",
     }
     .into_response()
 }

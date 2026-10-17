@@ -12,6 +12,9 @@ pub enum Event {
     /// A market refresh changed the standing or the gap of an order. Only the orders page
     /// listens to it.
     MarketUpdated,
+    /// A wallet or assets poll, or a price refresh, changed what a character is worth. The wealth
+    /// views listen to it and to `OrdersUpdated`, which is also what a lagging subscriber gets.
+    WealthUpdated,
 }
 
 impl Event {
@@ -20,6 +23,7 @@ impl Event {
         match self {
             Self::OrdersUpdated => "orders-updated",
             Self::MarketUpdated => "market-updated",
+            Self::WealthUpdated => "wealth-updated",
         }
     }
 }
@@ -131,6 +135,34 @@ mod tests {
     fn the_sse_names_are_stable() {
         assert_eq!(Event::OrdersUpdated.name(), "orders-updated");
         assert_eq!(Event::MarketUpdated.name(), "market-updated");
+        assert_eq!(Event::WealthUpdated.name(), "wealth-updated");
+    }
+
+    #[tokio::test]
+    async fn a_wealth_signal_reaches_only_its_account() {
+        let bus = InProcessBus::new();
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        let mut stream_a = bus.subscribe(a);
+        let mut stream_b = bus.subscribe(b);
+
+        bus.publish(a, Event::WealthUpdated);
+
+        assert_eq!(next(&mut stream_a).await, Some(Event::WealthUpdated));
+        assert_eq!(next(&mut stream_b).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_lagging_subscriber_that_missed_wealth_signals_still_gets_the_orders_signal() {
+        let bus = InProcessBus::with_capacity(2);
+        let account = Uuid::new_v4();
+        let mut stream = bus.subscribe(account);
+
+        for _ in 0..10 {
+            bus.publish(Uuid::new_v4(), Event::WealthUpdated);
+        }
+
+        // Every wealth view also listens to the orders signal.
+        assert_eq!(next(&mut stream).await, Some(Event::OrdersUpdated));
     }
 
     #[tokio::test]

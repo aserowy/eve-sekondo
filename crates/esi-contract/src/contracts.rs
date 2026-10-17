@@ -402,6 +402,112 @@ pub fn market_orders() -> Call {
     }
 }
 
+/// What real ESI sends on the character wallet and asset routes (verified): the rate-limit group
+/// of the route and what is left of it, and no error-limit headers. A success is cacheable.
+fn char_route_headers(success: bool) -> Vec<HeaderSpec> {
+    let mut headers = vec![header("date", HttpDate, Always)];
+    if success {
+        headers.push(header("expires", HttpDate, Always));
+    }
+    headers.extend([
+        header("x-ratelimit-group", Token, Always),
+        header("x-ratelimit-remaining", Integer, Always),
+        header("x-esi-error-limit-remain", Integer, Absent),
+        header("x-esi-error-limit-reset", Integer, Absent),
+    ]);
+    headers
+}
+
+/// The wallet balance of a character: a bare JSON number.
+pub fn wallet() -> Call {
+    let mut variants = vec![
+        variant(
+            "balance",
+            StatusSpec::Exact(200),
+            char_route_headers(true),
+            BodySpec::Json(Ty::Number),
+        ),
+        variant(
+            "forbidden",
+            StatusSpec::Exact(403),
+            char_route_headers(false),
+            error_body(),
+        ),
+    ];
+    variants.extend(esi_failure_variants());
+    Call {
+        name: "wallet",
+        routes: vec![Route {
+            method: "GET",
+            path: "/characters/{id}/wallet",
+        }],
+        variants,
+    }
+}
+
+/// The assets of a character, one page per call; every page carries `X-Pages`.
+pub fn assets() -> Call {
+    let mut headers = char_route_headers(true);
+    headers.push(header("x-pages", Integer, Always));
+    // Only what the app reads. ESI leaves the blueprint flag out of everything else.
+    let fields = vec![
+        field("item_id", Ty::Int, Always),
+        field("type_id", Ty::Int, Always),
+        field("location_id", Ty::Int, Always),
+        field("location_type", Ty::Str, Always),
+        field("location_flag", Ty::Str, Always),
+        field("quantity", Ty::Int, Always),
+        field("is_singleton", Ty::Bool, Always),
+        field("is_blueprint_copy", Ty::Bool, Optional),
+    ];
+    let mut variants = vec![
+        variant(
+            "items",
+            StatusSpec::Exact(200),
+            headers,
+            BodySpec::Json(Ty::array_of(Ty::Object(fields))),
+        ),
+        variant(
+            "forbidden",
+            StatusSpec::Exact(403),
+            char_route_headers(false),
+            error_body(),
+        ),
+    ];
+    variants.extend(esi_failure_variants());
+    Call {
+        name: "assets",
+        routes: vec![Route {
+            method: "GET",
+            path: "/characters/{id}/assets",
+        }],
+        variants,
+    }
+}
+
+/// ESI's market prices for every item. Public; an item may have no average.
+pub fn prices() -> Call {
+    let mut variants = vec![variant(
+        "list",
+        StatusSpec::Exact(200),
+        esi_success_headers(),
+        // `adjusted_price` is not read.
+        BodySpec::Json(Ty::array_of(Ty::Object(vec![
+            field("type_id", Ty::Int, Always),
+            field("average_price", Ty::Number, Optional),
+        ]))),
+    )];
+    variants.extend(esi_failure_variants());
+    Call {
+        name: "prices",
+        routes: vec![Route {
+            method: "GET",
+            path: "/markets/prices",
+        }],
+        variants,
+    }
+}
+
 /// Every contract.
 pub fn contracts() -> Vec<Call> {
     vec![
@@ -412,6 +518,9 @@ pub fn contracts() -> Vec<Call> {
         names(),
         structures(),
         market_orders(),
+        wallet(),
+        assets(),
+        prices(),
     ]
 }
 
@@ -542,7 +651,14 @@ mod tests {
 
     #[test]
     fn the_failure_variants_are_not_verifiable_and_say_why() {
-        for call in [orders(), names(), structures()] {
+        for call in [
+            orders(),
+            names(),
+            structures(),
+            wallet(),
+            assets(),
+            prices(),
+        ] {
             for name in ["error-limited", "rate-limited", "server-error"] {
                 let v = call.variant(name).unwrap();
                 assert!(
@@ -916,6 +1032,178 @@ mod tests {
         assert_eq!(call.routes[0].path, "/markets/{region_id}/orders");
     }
 
+    fn asset() -> Value {
+        json!({
+            "item_id": 1000000000001_i64, "type_id": 34, "location_id": 60003760,
+            "location_type": "station", "location_flag": "Hangar", "quantity": 100,
+            "is_singleton": false,
+        })
+    }
+
+    /// What real ESI sends on the character wallet and asset routes: a rate-limit group of the
+    /// route, no error-limit headers (verified).
+    fn char_ok(group: &str) -> HeaderMap {
+        headers(&[
+            ("date", "Fri, 16 Oct 2026 10:00:00 GMT"),
+            ("expires", "Fri, 16 Oct 2026 10:20:00 GMT"),
+            ("x-ratelimit-group", group),
+            ("x-ratelimit-remaining", "148"),
+        ])
+    }
+
+    fn char_forbidden(group: &str) -> HeaderMap {
+        headers(&[
+            ("date", "Fri, 16 Oct 2026 10:00:00 GMT"),
+            ("x-ratelimit-group", group),
+            ("x-ratelimit-remaining", "143"),
+        ])
+    }
+
+    fn assets_ok() -> HeaderMap {
+        let mut h = char_ok("char-asset");
+        h.insert("x-pages", HeaderValue::from_static("2"));
+        h
+    }
+
+    #[test]
+    fn wallet_and_assets_are_rate_limited_not_error_limited() {
+        let balance = json!(1.0);
+        let mut h = char_ok("char-wallet");
+        h.insert("x-esi-error-limit-remain", HeaderValue::from_static("100"));
+        assert_eq!(
+            problems(&wallet(), "balance", Some(200), &h, Some(balance.clone())),
+            ["header x-esi-error-limit-remain is present but must be absent"]
+        );
+        let mut h = char_ok("char-wallet");
+        h.remove("x-ratelimit-group");
+        assert_eq!(
+            problems(&wallet(), "balance", Some(200), &h, Some(balance)),
+            ["header x-ratelimit-group is missing but always present"]
+        );
+        let mut h = char_forbidden("char-asset");
+        h.insert("x-esi-error-limit-reset", HeaderValue::from_static("60"));
+        assert_eq!(
+            problems(
+                &assets(),
+                "forbidden",
+                Some(403),
+                &h,
+                Some(json!({"error": "Forbidden"}))
+            ),
+            ["header x-esi-error-limit-reset is present but must be absent"]
+        );
+    }
+
+    #[test]
+    fn the_wallet_is_a_bare_number() {
+        let call = wallet();
+        assert!(
+            problems(
+                &call,
+                "balance",
+                Some(200),
+                &char_ok("char-wallet"),
+                Some(json!(1234.56))
+            )
+            .is_empty()
+        );
+        assert!(
+            problems(
+                &call,
+                "balance",
+                Some(200),
+                &char_ok("char-wallet"),
+                Some(json!(0))
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            problems(
+                &call,
+                "balance",
+                Some(200),
+                &char_ok("char-wallet"),
+                Some(json!({"balance": 1}))
+            ),
+            ["$ expected number, found object"]
+        );
+        assert!(
+            problems(
+                &call,
+                "forbidden",
+                Some(403),
+                &char_forbidden("char-wallet"),
+                Some(json!({"error": "Forbidden"}))
+            )
+            .is_empty()
+        );
+        assert_eq!(call.routes[0].path, "/characters/{id}/wallet");
+    }
+
+    #[test]
+    fn assets_answer_with_the_fields_and_pages_the_app_reads() {
+        let call = assets();
+        let mut copy = asset();
+        copy["is_blueprint_copy"] = json!(true);
+        let body = json!([asset(), copy]);
+        assert!(problems(&call, "items", Some(200), &assets_ok(), Some(body.clone())).is_empty());
+
+        let mut h = assets_ok();
+        h.remove("x-pages");
+        assert_eq!(
+            problems(&call, "items", Some(200), &h, Some(body)),
+            ["header x-pages is missing but always present"]
+        );
+        for field in [
+            "item_id",
+            "type_id",
+            "location_id",
+            "location_type",
+            "location_flag",
+            "quantity",
+            "is_singleton",
+        ] {
+            let mut item = asset();
+            item.as_object_mut().unwrap().remove(field);
+            assert_eq!(
+                problems(&call, "items", Some(200), &assets_ok(), Some(json!([item]))),
+                [format!("$[0].{field} is missing but always present")]
+            );
+        }
+        assert!(
+            problems(
+                &call,
+                "forbidden",
+                Some(403),
+                &char_forbidden("char-asset"),
+                Some(json!({"error": "Forbidden"}))
+            )
+            .is_empty()
+        );
+        assert_eq!(call.routes[0].path, "/characters/{id}/assets");
+    }
+
+    #[test]
+    fn prices_may_lack_an_average_and_need_no_token() {
+        let call = prices();
+        let body = json!([
+            {"type_id": 34, "average_price": 5.5, "adjusted_price": 5.1},
+            {"type_id": 99, "adjusted_price": 1.0},
+        ]);
+        assert!(problems(&call, "list", Some(200), &esi_ok(), Some(body)).is_empty());
+        assert_eq!(
+            problems(
+                &call,
+                "list",
+                Some(200),
+                &esi_ok(),
+                Some(json!([{"average_price": 1.0}]))
+            ),
+            ["$[0].type_id is missing but always present"]
+        );
+        assert_eq!(call.routes[0].path, "/markets/prices");
+    }
+
     #[test]
     fn names_found_and_unknown() {
         let call = names();
@@ -1037,7 +1325,7 @@ mod tests {
         assert!(problems(&call, "server-error", Some(502), &HeaderMap::new(), None).is_empty());
     }
 
-    const ALL_ROUTES: [(&str, &str); 8] = [
+    const ALL_ROUTES: [(&str, &str); 11] = [
         ("GET", "/oauth/jwks"),
         ("GET", "/v2/oauth/authorize"),
         ("GET", "/v2/oauth/authorize/select"),
@@ -1046,6 +1334,9 @@ mod tests {
         ("POST", "/universe/names"),
         ("GET", "/universe/structures/{id}"),
         ("GET", "/markets/{region_id}/orders"),
+        ("GET", "/characters/{id}/wallet"),
+        ("GET", "/characters/{id}/assets"),
+        ("GET", "/markets/prices"),
     ];
 
     #[test]
@@ -1056,10 +1347,10 @@ mod tests {
     #[test]
     fn a_route_without_a_contract_is_reported_by_name() {
         let mut routes = ALL_ROUTES.to_vec();
-        routes.push(("GET", "/characters/{id}/wallet"));
+        routes.push(("GET", "/characters/{id}/journal"));
         assert_eq!(
             coverage(&routes),
-            ["stub route GET /characters/{id}/wallet has no contract"]
+            ["stub route GET /characters/{id}/journal has no contract"]
         );
     }
 

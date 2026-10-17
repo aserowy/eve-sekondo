@@ -42,6 +42,82 @@ pub fn is_stale(record: &FreshnessRecord, now: OffsetDateTime, interval: Duratio
             .is_none_or(|last| now - last > interval * 2)
 }
 
+/// How fresh the wallet and the assets of one character are.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct WealthFreshnessRecord {
+    pub character_id: i64,
+    pub name: String,
+    pub needs_relogin: bool,
+    pub wallet_last_success_at: Option<OffsetDateTime>,
+    pub wallet_next_poll_at: Option<OffsetDateTime>,
+    pub assets_last_success_at: Option<OffsetDateTime>,
+    pub assets_next_poll_at: Option<OffsetDateTime>,
+}
+
+pub async fn list_wealth_freshness(
+    pool: &PgPool,
+    account_id: Uuid,
+    selection: &CharacterSelection,
+) -> Result<Vec<WealthFreshnessRecord>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT c.character_id, c.name, c.needs_relogin,
+                w.last_success_at AS wallet_last_success_at, w.next_poll_at AS wallet_next_poll_at,
+                a.last_success_at AS assets_last_success_at, a.next_poll_at AS assets_next_poll_at
+         FROM characters c
+         LEFT JOIN wealth_sync w ON w.character_id = c.character_id AND w.kind = 'wallet'
+         LEFT JOIN wealth_sync a ON a.character_id = c.character_id AND a.kind = 'assets'
+         WHERE c.account_id = $1 AND c.character_id = ANY($2)
+         ORDER BY c.created_at, c.character_id",
+    )
+    .bind(account_id)
+    .bind(selection.ids())
+    .fetch_all(pool)
+    .await
+}
+
+pub struct WealthFreshnessView {
+    pub name: String,
+    pub needs_relogin: bool,
+    pub wallet: FreshnessView,
+    pub assets: FreshnessView,
+}
+
+/// The wallet is stale by the order refresh interval, the assets by the assets' hour.
+pub fn wealth_freshness_view(
+    record: &WealthFreshnessRecord,
+    now: OffsetDateTime,
+    wallet_interval: Duration,
+    assets_interval: Duration,
+) -> WealthFreshnessView {
+    let kind = |last_success_at, next_poll_at, interval| {
+        freshness_view(
+            &FreshnessRecord {
+                character_id: record.character_id,
+                name: record.name.clone(),
+                needs_relogin: record.needs_relogin,
+                last_success_at,
+                next_poll_at,
+            },
+            now,
+            interval,
+        )
+    };
+    WealthFreshnessView {
+        name: record.name.clone(),
+        needs_relogin: record.needs_relogin,
+        wallet: kind(
+            record.wallet_last_success_at,
+            record.wallet_next_poll_at,
+            wallet_interval,
+        ),
+        assets: kind(
+            record.assets_last_success_at,
+            record.assets_next_poll_at,
+            assets_interval,
+        ),
+    }
+}
+
 pub struct FreshnessView {
     pub name: String,
     pub stale: bool,
@@ -97,6 +173,21 @@ mod tests {
     #[test]
     fn a_character_never_polled_is_stale() {
         assert!(is_stale(&record(false, None), NOW, INTERVAL));
+    }
+
+    #[test]
+    fn assets_follow_the_same_rule_with_twice_one_hour() {
+        let hour = Duration::hours(1);
+        assert!(is_stale(
+            &record(false, Some(NOW - Duration::hours(3))),
+            NOW,
+            hour
+        ));
+        assert!(!is_stale(
+            &record(false, Some(NOW - Duration::minutes(110))),
+            NOW,
+            hour
+        ));
     }
 
     #[test]

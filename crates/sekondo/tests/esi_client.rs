@@ -367,3 +367,152 @@ async fn a_market_error_limit_does_not_exist_but_the_global_one_still_applies() 
     ));
     assert_eq!(h.stub.esi_calls("market"), 0);
 }
+
+fn asset(id: i64, copy: bool) -> serde_json::Value {
+    let mut asset = json!({
+        "item_id": id, "type_id": 34, "location_id": 60003760, "location_type": "station",
+        "location_flag": "Hangar", "quantity": 7, "is_singleton": false,
+    });
+    if copy {
+        asset["is_blueprint_copy"] = json!(true);
+    }
+    asset
+}
+
+#[tokio::test]
+async fn the_wallet_balance_is_read_in_cents_with_its_expiry() {
+    let h = common::esi_harness().await;
+    let token = h.token(90000001);
+    h.control("esi-expires", json!({"seconds": 300})).await;
+
+    let response = h.client.wallet(90000001, &token).await.unwrap();
+    assert_eq!(response.body, 250_000_000);
+    let ahead = response.expires_at.unwrap() - h.clock.now();
+    assert!(ahead >= Duration::seconds(299), "{ahead}");
+
+    h.control(
+        "wallet",
+        json!({"character_id": 90000001, "balance": 12.34}),
+    )
+    .await;
+    assert_eq!(h.client.wallet(90000001, &token).await.unwrap().body, 1234);
+}
+
+#[tokio::test]
+async fn assets_are_read_from_every_page() {
+    let h = common::esi_harness().await;
+    let token = h.token(90000001);
+    h.control(
+        "assets",
+        json!({"character_id": 90000001, "page_size": 2,
+               "assets": [asset(1, false), asset(2, false), asset(3, true), asset(4, false), asset(5, false)]}),
+    )
+    .await;
+
+    let response = h.client.assets(90000001, &token).await.unwrap();
+
+    let ids: Vec<i64> = response.body.iter().map(|a| a.item_id).collect();
+    assert_eq!(ids, [1, 2, 3, 4, 5]);
+    assert_eq!(h.stub.esi_calls("assets"), 3);
+    assert!(response.expires_at.is_some());
+    let copies: Vec<bool> = response.body.iter().map(|a| a.is_blueprint_copy).collect();
+    assert_eq!(
+        copies,
+        [false, false, true, false, false],
+        "missing means false"
+    );
+    let first = &response.body[0];
+    assert_eq!((first.type_id, first.quantity), (34, 7));
+    assert_eq!(
+        (first.location_id, first.location_type.as_str()),
+        (60003760, "station")
+    );
+    assert!(!first.is_singleton);
+}
+
+#[tokio::test]
+async fn prices_are_read_in_cents_without_a_token_and_may_lack_an_average() {
+    let h = common::esi_harness().await;
+
+    let response = h.client.prices().await.unwrap();
+
+    let price = |type_id| {
+        response
+            .body
+            .iter()
+            .find(|p| p.type_id == type_id)
+            .unwrap()
+            .average_price_cents
+    };
+    assert_eq!(price(34), Some(550));
+    assert_eq!(price(35), Some(1025));
+    assert_eq!(price(36), None);
+    assert!(response.expires_at.is_some());
+}
+
+#[tokio::test]
+async fn the_new_calls_map_errors_like_the_orders_call() {
+    let h = common::esi_harness().await;
+    let foreign = h.token(90000002);
+    assert!(matches!(
+        h.client.wallet(90000001, &foreign).await,
+        Err(EsiError::Forbidden)
+    ));
+    assert!(matches!(
+        h.client.assets(90000001, &foreign).await,
+        Err(EsiError::Forbidden)
+    ));
+
+    let token = h.token(90000001);
+    for route in ["wallet", "assets", "prices"] {
+        h.control("esi-fail-next", json!({"route": route, "status": 503}))
+            .await;
+        let broken = match route {
+            "wallet" => h.client.wallet(90000001, &token).await.map(|_| ()),
+            "assets" => h.client.assets(90000001, &token).await.map(|_| ()),
+            _ => h.client.prices().await.map(|_| ()),
+        };
+        assert!(
+            matches!(broken, Err(EsiError::Temporary(_))),
+            "{route}: {broken:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_429_on_the_wallet_pauses_the_wallet_group_and_a_420_pauses_everything() {
+    let h = common::esi_harness().await;
+    let token = h.token(90000001);
+    h.control(
+        "esi-fail-next",
+        json!({"route": "wallet", "status": 429,
+               "headers": {"retry-after": "30", "x-ratelimit-group": "char-wallet"}}),
+    )
+    .await;
+    let Err(EsiError::Deferred { until }) = h.client.wallet(90000001, &token).await else {
+        panic!("expected a deferral");
+    };
+    assert_eq!(until - h.clock.now(), Duration::seconds(30));
+    assert!(matches!(
+        h.client.wallet(90000001, &token).await,
+        Err(EsiError::Deferred { .. })
+    ));
+    assert_eq!(h.stub.esi_calls("wallet"), 1, "nothing sent while paused");
+    // Another group keeps working.
+    assert!(h.client.assets(90000001, &token).await.is_ok());
+
+    h.control(
+        "esi-fail-next",
+        json!({"route": "prices", "status": 420,
+               "headers": {"x-esi-error-limit-remain": "0", "x-esi-error-limit-reset": "30"}}),
+    )
+    .await;
+    assert!(matches!(
+        h.client.prices().await,
+        Err(EsiError::Deferred { .. })
+    ));
+    assert!(matches!(
+        h.client.assets(90000001, &token).await,
+        Err(EsiError::Deferred { .. })
+    ));
+}

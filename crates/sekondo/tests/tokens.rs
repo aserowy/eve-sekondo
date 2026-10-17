@@ -324,6 +324,38 @@ async fn reduced_scopes_on_refresh_mark_the_character(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn a_character_linked_with_two_scopes_needs_relogin_until_it_logs_in_with_four(pool: PgPool) {
+    let e = env(pool).await;
+    let account = e.repo.create_account().await.unwrap();
+    let old = [
+        "esi-markets.read_character_orders.v1",
+        "esi-universe.read_structures.v1",
+    ];
+    e.stub_control("scopes", json!({"character_id": ALICE, "scopes": old}))
+        .await;
+    e.link(account, ALICE).await;
+    e.clock.advance(TimeDuration::hours(2));
+
+    assert!(matches!(
+        e.tokens.access_token(ALICE).await,
+        Err(TokenError::NeedsRelogin)
+    ));
+    assert!(e.needs_relogin(ALICE).await);
+
+    e.stub_control(
+        "scopes",
+        json!({"character_id": ALICE, "scopes": sekondo::oauth::REQUIRED_SCOPES}),
+    )
+    .await;
+    e.link(account, ALICE).await;
+    assert!(!e.needs_relogin(ALICE).await);
+    e.tokens
+        .access_token(ALICE)
+        .await
+        .expect("four scopes pass");
+}
+
+#[sqlx::test]
 async fn an_sso_server_error_is_temporary_and_does_not_mark_the_character(pool: PgPool) {
     let e = linked(pool).await;
     e.clock.advance(TimeDuration::hours(2));

@@ -1,0 +1,29 @@
+<h2>Inventory</h2>
+{% if view.items.rows.is_empty() %}
+<p>No items.</p>
+{% else %}
+<p class="inventory-total">Total value: <strong title="{{ view.items.total_exact }}">{{ view.items.total }}</strong>{% if view.items.unpriced > 0 %} · {{ view.items.unpriced }} unpriced{% endif %}</p>
+<div class="table-wrap">
+<table class="orders" id="inventory">
+  <thead>
+    <tr>
+      {% for h in view.items.headers %}
+      <th scope="col"{% if !h.aria_sort.is_empty() %} aria-sort="{{ h.aria_sort }}"{% endif %}><a href="{{ h.href }}" hx-get="{{ h.href }}" hx-target="#wealth-view" hx-select="#wealth-view" hx-select-oob="#main-nav" hx-swap="outerHTML" hx-push-url="true">{{ h.label }}{{ h.arrow }}</a></th>
+      {% endfor %}
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in view.items.rows %}
+    <tr>
+      <td>{{ r.character }}</td>
+      <td>{{ r.item }}</td>
+      <td class="num">{{ r.quantity }}</td>
+      <td class="num"{% if !r.price_exact.is_empty() %} title="{{ r.price_exact }}"{% endif %}>{{ r.price }}</td>
+      <td class="num"{% if !r.value_exact.is_empty() %} title="{{ r.value_exact }}"{% endif %}>{{ r.value }}</td>
+      <td>{{ r.location }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
