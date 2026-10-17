@@ -1,8 +1,9 @@
-<ul class="freshness">
+<h2 class="panel-title">Freshness</h2>
+<ul class="freshness scroll" data-scroll-key="wealth-freshness">
   {% for f in view.freshness %}
   <li>
     <strong>{{ f.name }}</strong>
-    {% if f.needs_relogin %}<a href="/auth/add">Log in again</a>{% endif %}
+    {% if f.needs_relogin %}<a class="relogin" href="/auth/add">{% include "icons/log-in.html" %}Log in again</a>{% endif %}
     <div data-kind="wallet">
       Wallet
       {% if f.wallet.stale %}<mark class="badge stale">Stale</mark>{% endif %}

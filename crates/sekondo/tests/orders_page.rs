@@ -41,9 +41,10 @@ fn buy_table(html: &str) -> &str {
     between(html, r#"id="buy-orders""#, "</section>")
 }
 
+/// An order: its figures row and its details row.
 fn row(html: &str, order_id: i64) -> &str {
     let marker = format!(r#"id="order-{order_id}""#);
-    between(html, &marker, "</tr>")
+    between(html, &marker, "</tbody>")
 }
 
 fn order(id: i64, type_id: i64, location: i64, buy: bool, price: f64) -> Value {
@@ -314,6 +315,30 @@ async fn unknown_sort_values_never_reach_sql_and_fall_back_to_the_default(pool: 
 }
 
 #[sqlx::test]
+async fn the_details_columns_are_no_longer_sortable_and_fall_back_to_the_default(pool: PgPool) {
+    let (app, browser) = with_polled_fixture(pool).await;
+
+    for name in ["character", "location", "region", "issued"] {
+        for dir in ["asc", "desc"] {
+            let html = get(&app, &browser, &format!("/orders?sort={name}&dir={dir}")).await;
+            // The default is the item name, ascending, whatever direction was asked for.
+            assert!(
+                position(&html, 5002) < position(&html, 5001),
+                "{name} {dir}"
+            );
+            assert!(
+                unescaped(&html).contains("sort=price&dir=asc"),
+                "{name} {dir}"
+            );
+            assert!(
+                !unescaped(&html).contains(&format!("sort={name}")),
+                "{name} {dir}"
+            );
+        }
+    }
+}
+
+#[sqlx::test]
 async fn the_tables_fragment_has_no_page_around_it_and_follows_the_query(pool: PgPool) {
     let (app, browser) = with_polled_fixture(pool).await;
 
@@ -375,31 +400,48 @@ fn cell_texts(row: &str) -> Vec<String> {
         .collect()
 }
 
+/// The text of an order's details line, without markup.
+fn details_text(html: &str, order_id: i64) -> String {
+    let details = between(row(html, order_id), r#"class="details""#, "</tr>");
+    cell_texts(details).remove(0)
+}
+
 #[sqlx::test]
-async fn location_and_region_come_last_in_both_tables(pool: PgPool) {
+async fn each_order_has_a_details_line_with_issued_character_location_and_region(pool: PgPool) {
     let (app, browser) = with_polled_fixture(pool).await;
 
     let html = get(&app, &browser, "/orders").await;
 
-    for (table, amount) in [(sell_table(&html), "Value"), (buy_table(&html), "Escrow")] {
-        let labels = header_labels(table);
-        assert_eq!(
-            labels[labels.len() - 3..],
-            ["Time left", "Location", "Region"],
-            "{labels:?}"
-        );
-        assert!(labels.contains(&amount.to_owned()), "{labels:?}");
+    // The stub issues its orders relative to now, so the time is only checked for its shape.
+    for (order, rest) in [
+        (
+            5001,
+            " \u{b7} Alice Alpha \u{b7} Jita IV - Moon 4 - Caldari Navy Assembly Plant \u{b7} The Forge",
+        ),
+        (
+            5003,
+            " \u{b7} Alice Alpha \u{b7} Alpha Keepstar \u{b7} The Forge",
+        ),
+    ] {
+        let text = details_text(&html, order);
+        let (issued, tail) = text.split_at(16);
+        let shape: String = issued
+            .chars()
+            .map(|c| if c.is_ascii_digit() { '9' } else { c })
+            .collect();
+        assert_eq!(shape, "9999-99-99 99:99", "{text}");
+        assert_eq!(tail, rest);
     }
-    let sell = cell_texts(row(&html, 5001));
-    assert_eq!(
-        sell[sell.len() - 2],
-        "Jita IV - Moon 4 - Caldari Navy Assembly Plant"
-    );
-    assert_eq!(sell[sell.len() - 1], "The Forge");
-    let buy = cell_texts(row(&html, 5003));
-    assert_eq!(buy[buy.len() - 2], "Alpha Keepstar");
-    assert_eq!(buy[buy.len() - 1], "The Forge");
-    assert_eq!(sell.len(), header_labels(sell_table(&html)).len());
+    // The details row spans every column of its table.
+    for (table, order) in [(sell_table(&html), 5001), (buy_table(&html), 5003)] {
+        let columns = header_labels(table).len();
+        assert!(
+            row(table, order).contains(&format!(r#"colspan="{columns}""#)),
+            "{columns}"
+        );
+    }
+    // Both tables put each order in its own body, figures row first.
+    assert!(html.contains(r#"<tbody id="order-5001" class="order">"#));
 }
 
 // ---- standing and gap ----
@@ -459,8 +501,8 @@ async fn a_top_order_reads_top_in_the_success_style_and_has_no_gap(pool: PgPool)
 
     assert!(r.contains(r#"<mark class="badge top">Top</mark>"#), "{r}");
     let cells = cell_texts(r);
-    assert_eq!(cells[3], "Top");
-    assert_eq!(cells[4], "", "no gap for a top order");
+    assert_eq!(cells[2], "Top");
+    assert_eq!(cells[3], "", "no gap for a top order");
 }
 
 #[sqlx::test]
@@ -494,8 +536,8 @@ async fn an_order_without_market_data_shows_a_dash_for_standing_and_gap(pool: Pg
     let html = get(&app, &browser, "/orders").await;
     let cells = cell_texts(row(&html, 5001));
 
+    assert_eq!(cells[2], "\u{2014}");
     assert_eq!(cells[3], "\u{2014}");
-    assert_eq!(cells[4], "\u{2014}");
     assert!(!row(&html, 5001).contains("badge top"));
 }
 
@@ -511,7 +553,6 @@ async fn the_standing_and_gap_columns_follow_the_price_in_both_tables(pool: PgPo
         (buy_table(&html), vec!["Escrow"]),
     ] {
         let mut expected = vec![
-            "Character",
             "Item",
             "Price",
             "Standing",
@@ -520,7 +561,7 @@ async fn the_standing_and_gap_columns_follow_the_price_in_both_tables(pool: PgPo
             "Volume",
         ];
         expected.extend(amount_columns);
-        expected.extend(["Issued", "Time left", "Location", "Region"]);
+        expected.extend(["Time left"]);
         assert_eq!(header_labels(table), expected);
     }
 }
@@ -559,8 +600,8 @@ async fn the_undercut_volume_is_a_whole_number_with_separators_and_empty_for_a_t
 
     let html = get(&app, &browser, "/orders").await;
 
-    assert_eq!(cell_texts(row(&html, 1))[5], "1,250");
-    assert_eq!(cell_texts(row(&html, 2))[5], "", "a top order has none");
+    assert_eq!(cell_texts(row(&html, 1))[4], "1,250");
+    assert_eq!(cell_texts(row(&html, 2))[4], "", "a top order has none");
 }
 
 #[sqlx::test]
@@ -584,7 +625,7 @@ async fn a_buy_orders_undercut_volume_sums_the_reaching_orders(pool: PgPool) {
 
     let html = get(&app, &browser, "/orders").await;
 
-    assert_eq!(cell_texts(row(buy_table(&html), 1))[5], "1,300");
+    assert_eq!(cell_texts(row(buy_table(&html), 1))[4], "1,300");
 }
 
 #[sqlx::test]
@@ -593,7 +634,7 @@ async fn an_order_without_market_data_shows_a_dash_for_the_undercut_volume(pool:
 
     let html = get(&app, &browser, "/orders").await;
 
-    assert_eq!(cell_texts(row(&html, 5001))[5], "\u{2014}");
+    assert_eq!(cell_texts(row(&html, 5001))[4], "\u{2014}");
 }
 
 #[sqlx::test]
@@ -796,7 +837,11 @@ async fn the_sell_table_has_a_margin_column_after_the_value_and_the_buy_table_ha
     assert!(!header_labels(buy_table(&html)).contains(&"Margin".to_owned()));
     // The cells follow the headers.
     let cells = cell_texts(row(sell_table(&html), 5001));
-    assert_eq!(cells.len(), sell.len());
+    assert_eq!(
+        cells.len(),
+        sell.len() + 1,
+        "the figures, then the details line"
+    );
 }
 
 #[sqlx::test]
@@ -848,4 +893,19 @@ async fn sorting_by_margin_puts_orders_without_one_last_in_both_directions(pool:
     let asc = get(&app, &browser, "/orders?sort=margin&dir=asc").await;
     assert_eq!(order_of_rows(&asc, &[1, 2, 3]), [2, 1, 3]);
     assert!(unescaped(&asc).contains("sort=margin&dir=desc"));
+}
+
+#[sqlx::test]
+async fn every_scrolling_panel_carries_a_stable_scroll_key(pool: PgPool) {
+    let (app, browser) = with_polled_fixture(pool).await;
+
+    let key = |name: &str| format!(r#"data-scroll-key="{name}""#);
+    let page = get(&app, &browser, "/orders").await;
+    for name in ["sell-orders", "buy-orders", "freshness"] {
+        assert_eq!(page.matches(&key(name)).count(), 1, "{name}");
+    }
+    let tables = get(&app, &browser, "/orders/tables").await;
+    assert!(tables.contains(&key("sell-orders")) && tables.contains(&key("buy-orders")));
+    let freshness = get(&app, &browser, "/orders/freshness").await;
+    assert!(freshness.contains(&key("freshness")));
 }

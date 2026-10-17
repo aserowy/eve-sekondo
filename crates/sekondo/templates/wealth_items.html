@@ -1,9 +1,9 @@
-<h2>Inventory</h2>
+<h2 class="panel-title">Inventory</h2>
 {% if view.items.rows.is_empty() %}
 <p>No items.</p>
 {% else %}
 <p class="inventory-total">Total value: <strong title="{{ view.items.total_exact }}">{{ view.items.total }}</strong>{% if view.items.unpriced > 0 %} · {{ view.items.unpriced }} unpriced{% endif %}</p>
-<div class="table-wrap">
+<div class="scroll" data-scroll-key="inventory">
 <table class="orders" id="inventory">
   <thead>
     <tr>

@@ -38,6 +38,39 @@ document.addEventListener('htmx:configRequest', (event) => {
   event.detail.path = query.length > 0 ? `${path}?${query.join('&')}` : path;
 });
 
+// ---- scroll positions ----
+// Live refreshes replace panels that scroll on their own (`[data-scroll-key]`), which would send
+// them back to the top. For swaps caused by a stream signal or a reconnect, the positions are
+// recorded per request before the swap and put back by key after it; the browser clamps a position
+// beyond the new content to its end. Changes the user makes (filter, sorting, range) are triggered
+// by clicks and changes, so they keep showing the new view from the top.
+const scrollPositions = new WeakMap();
+
+function isLiveRefresh(detail) {
+  const type = detail.requestConfig?.triggeringEvent?.type ?? '';
+  return type.startsWith('sse:') || type === 'htmx:sseOpen';
+}
+
+document.addEventListener('htmx:beforeSwap', (event) => {
+  const { target, xhr } = event.detail;
+  if (!(target instanceof Element) || !isLiveRefresh(event.detail)) return;
+  const positions = new Map();
+  for (const el of target.querySelectorAll('[data-scroll-key]')) {
+    positions.set(el.dataset.scrollKey, [el.scrollTop, el.scrollLeft]);
+  }
+  if (positions.size > 0) scrollPositions.set(xhr, positions);
+});
+
+document.addEventListener('htmx:afterSwap', (event) => {
+  const positions = scrollPositions.get(event.detail.xhr);
+  if (!positions) return;
+  scrollPositions.delete(event.detail.xhr);
+  for (const el of document.querySelectorAll('[data-scroll-key]')) {
+    const position = positions.get(el.dataset.scrollKey);
+    if (position) [el.scrollTop, el.scrollLeft] = position;
+  }
+});
+
 // ---- charts ----
 // Chart.js 4.5.1, vendored as static/chart.umd.min.js (MIT, see chart.js.LICENSE.md),
 // SHA-256 48444a82d4edcb5bec0f1965faacdde18d9c17db3063d042abada2f705c9f54a.
@@ -52,9 +85,16 @@ const BUY_COLOR = '#d95926';
 const WALLET_COLOR = '#199e70';
 const INVENTORY_COLOR = '#c98500';
 const TOTAL_COLOR = '#ebeadf';
-const SURFACE = '#1a1a19';
-const INK = '#c3c2b7';
-const GRID = '#2c2c2a';
+// Surface, ink and grid follow the theme in app.css (--panel, --ink-dim): small and dim, so the
+// figures carry the picture.
+const SURFACE = '#161b21';
+const INK = '#8793a2';
+const GRID = '#232a33';
+
+if (typeof Chart !== 'undefined') {
+  Chart.defaults.font.size = 11;
+  Chart.defaults.color = INK;
+}
 
 // ISK shortened to at most four significant digits (1.235b), as format::isk_short does for text.
 function iskShort(cents) {
@@ -112,12 +152,13 @@ function externalTooltip(context) {
 }
 
 const AXIS_TEXT = { color: INK };
+const LEGEND_LABELS = { color: INK, boxWidth: 8, boxHeight: 8, padding: 6 };
 const GRID_LINES = { color: GRID };
 
 function moneyAxis() {
   return {
     beginAtZero: true,
-    ticks: { ...AXIS_TEXT, callback: (value) => iskShort(value) },
+    ticks: { ...AXIS_TEXT, maxTicksLimit: 6, callback: (value) => iskShort(value) },
     grid: GRID_LINES,
   };
 }
@@ -129,7 +170,7 @@ function baseOptions(extra) {
     maintainAspectRatio: false,
     interaction: { mode: 'nearest', intersect: true },
     plugins: {
-      legend: { display: true, labels: { color: INK } },
+      legend: { display: true, labels: LEGEND_LABELS },
       tooltip: { external: externalTooltip },
     },
     ...extra,
@@ -163,7 +204,7 @@ function splitConfig(data) {
       })),
     },
     options: baseOptions({
-      scales: { x: { ticks: AXIS_TEXT, grid: { display: false } }, y: moneyAxis() },
+      scales: { x: { ticks: { ...AXIS_TEXT, maxTicksLimit: 8 }, grid: { display: false } }, y: moneyAxis() },
     }),
   };
 }
@@ -225,7 +266,7 @@ function lineConfig(data, yAxis) {
     options: baseOptions({
       interaction: { mode: 'nearest', axis: 'x', intersect: false },
       plugins: {
-        legend: { display: true, labels: { color: INK } },
+        legend: { display: true, labels: LEGEND_LABELS },
         tooltip: {
           external: externalTooltip,
           callbacks: { title: (items) => `${data.labels[items[0].dataIndex]} EVE time` },
@@ -236,7 +277,7 @@ function lineConfig(data, yAxis) {
           type: 'linear',
           min: data.times[0],
           max: data.times[data.times.length - 1],
-          ticks: { ...AXIS_TEXT, maxTicksLimit: 8, callback: (value) => eveTick(value) },
+          ticks: { ...AXIS_TEXT, maxTicksLimit: 6, callback: (value) => eveTick(value) },
           grid: GRID_LINES,
         },
         y: yAxis,
@@ -269,7 +310,7 @@ function stackConfig(data) {
       totals: data.totals,
       interaction: { mode: 'index', axis: 'x', intersect: false },
       plugins: {
-        legend: { display: true, labels: { color: INK } },
+        legend: { display: true, labels: LEGEND_LABELS },
         tooltip: {
           external: externalTooltip,
           callbacks: { title: (items) => `${data.labels[items[0].dataIndex]} EVE time` },
@@ -280,7 +321,7 @@ function stackConfig(data) {
           type: 'linear',
           min: data.times[0],
           max: data.times[data.times.length - 1],
-          ticks: { ...AXIS_TEXT, maxTicksLimit: 8, callback: (value) => eveTick(value) },
+          ticks: { ...AXIS_TEXT, maxTicksLimit: 6, callback: (value) => eveTick(value) },
           grid: GRID_LINES,
         },
         y: { ...moneyAxis(), stacked: true },
@@ -294,7 +335,7 @@ const wealthHistoryConfig = valueHistoryConfig;
 const countHistoryConfig = (data) =>
   lineConfig(data, {
     beginAtZero: true,
-    ticks: { ...AXIS_TEXT, precision: 0 },
+    ticks: { ...AXIS_TEXT, maxTicksLimit: 6, precision: 0 },
     grid: GRID_LINES,
   });
 

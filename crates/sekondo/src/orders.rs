@@ -30,10 +30,7 @@ pub enum Side {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortKey {
-    Character,
     Item,
-    Location,
-    Region,
     Price,
     /// "Top" first, then the number of undercutting orders; no market data last.
     Standing,
@@ -47,16 +44,12 @@ pub enum SortKey {
     Amount,
     /// The margin of a sell order; orders without one last.
     Margin,
-    Issued,
     TimeLeft,
 }
 
 impl SortKey {
-    const ALL: [Self; 13] = [
-        Self::Character,
+    const ALL: [Self; 9] = [
         Self::Item,
-        Self::Location,
-        Self::Region,
         Self::Price,
         Self::Standing,
         Self::Gap,
@@ -64,17 +57,13 @@ impl SortKey {
         Self::Volume,
         Self::Amount,
         Self::Margin,
-        Self::Issued,
         Self::TimeLeft,
     ];
 
     /// The name used in `sort` and `bsort`.
     pub fn name(self) -> &'static str {
         match self {
-            Self::Character => "character",
             Self::Item => "item",
-            Self::Location => "location",
-            Self::Region => "region",
             Self::Price => "price",
             Self::Standing => "standing",
             Self::Gap => "gap",
@@ -82,7 +71,6 @@ impl SortKey {
             Self::Volume => "volume",
             Self::Amount => "amount",
             Self::Margin => "margin",
-            Self::Issued => "issued",
             Self::TimeLeft => "left",
         }
     }
@@ -112,16 +100,12 @@ impl SortKey {
 
     fn expression(self) -> &'static str {
         match self {
-            Self::Character => "lower(c.name)",
             Self::Item => "lower(COALESCE(tn.name, '#' || o.type_id))",
-            Self::Location => "lower(COALESCE(ln.name, '#' || o.location_id))",
-            Self::Region => "lower(COALESCE(rn.name, '#' || o.region_id))",
             Self::Price => "o.price",
             Self::Volume => "o.volume_remain",
             Self::Amount => {
                 "CASE WHEN o.is_buy_order THEN COALESCE(o.escrow, 0) ELSE o.price * o.volume_remain END"
             }
-            Self::Issued => "o.issued",
             Self::TimeLeft => "o.issued + o.duration * interval '1 day'",
             Self::Standing | Self::Gap | Self::UndercutVolume | Self::Margin => {
                 unreachable!("ordered by `order_by`")
@@ -471,7 +455,6 @@ fn headers(state: &ViewState, side: Side) -> Vec<HeaderView> {
         "Escrow"
     };
     let mut columns = vec![
-        ("Character", SortKey::Character),
         ("Item", SortKey::Item),
         ("Price", SortKey::Price),
         ("Standing", SortKey::Standing),
@@ -479,13 +462,10 @@ fn headers(state: &ViewState, side: Side) -> Vec<HeaderView> {
         ("Undercut volume", SortKey::UndercutVolume),
         ("Volume", SortKey::Volume),
         (amount, SortKey::Amount),
-        ("Issued", SortKey::Issued),
         ("Time left", SortKey::TimeLeft),
-        ("Location", SortKey::Location),
-        ("Region", SortKey::Region),
     ];
     if side == Side::Sell {
-        columns.insert(8, ("Margin", SortKey::Margin));
+        columns.insert(7, ("Margin", SortKey::Margin));
     }
     columns
         .into_iter()

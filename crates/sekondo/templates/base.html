@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="{{ csrf_token }}">
   <title>{% block title %}Sekondo{% endblock %}</title>
-  <link rel="stylesheet" href="/static/pico.min.css">
   <link rel="stylesheet" href="/static/app.css">
   <script src="/static/htmx.min.js"></script>
   <script src="/static/htmx-ext-sse.min.js"></script>
@@ -14,9 +13,19 @@
 </head>
 <body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
   {% if let Some(nav) = nav %}
-  {% include "nav.html" %}
+  <nav class="main-nav" id="main-nav">
+    <strong class="brand">Sekondo</strong>
+    <ul class="links">
+      <li><a href="{{ nav.dashboard_href() }}"{% if nav.dashboard_current() %} aria-current="page"{% endif %}>Dashboard</a></li>
+      <li><a href="{{ nav.orders_href() }}"{% if nav.orders_current() %} aria-current="page"{% endif %}>Orders</a></li>
+      <li><a href="{{ nav.wealth_href() }}"{% if nav.wealth_current() %} aria-current="page"{% endif %}>Wealth</a></li>
+    </ul>
+    <div class="controls">{% block controls %}{% endblock %}</div>
+    <a class="icon-control" href="{{ nav.characters_href() }}" aria-label="Characters" title="Characters"{% if nav.characters_current() %} aria-current="page"{% endif %}>{% include "icons/users.html" %}</a>
+    <button class="icon-control" hx-post="/auth/logout" aria-label="Sign out" title="Sign out">{% include "icons/log-out.html" %}</button>
+  </nav>
   {% endif %}
-  <main class="container">
+  <main>
     {% block content %}{% endblock %}
   </main>
 </body>

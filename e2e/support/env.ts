@@ -5,8 +5,8 @@ import path from 'node:path';
 export const root = path.resolve(__dirname, '..', '..');
 export const certs = path.join(root, 'certs');
 
-export const APP_PORT = 8443;
-export const STUB_PORT = 9443;
+export const APP_PORT = Number(process.env.E2E_APP_PORT ?? 8443);
+export const STUB_PORT = Number(process.env.E2E_STUB_PORT ?? 9443);
 export const APP_URL = `https://localhost:${APP_PORT}`;
 export const STUB_URL = `https://localhost:${STUB_PORT}`;
 

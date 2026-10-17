@@ -103,7 +103,7 @@ test('a trained skill updates the sales tax without a reload and re-fetches the 
   const tax = row(page, JITA).locator('[data-fee="sales-tax"]');
   // 7.5 x (1 - 0.11 x 4)
   await expect(tax).toHaveText('4.20%');
-  await expect(page.locator('#sell-orders tbody tr')).toHaveCount(2);
+  await expect(page.locator('#sell-orders tbody.order')).toHaveCount(2);
 
   const fetched: string[] = [];
   page.on('request', (request) => {

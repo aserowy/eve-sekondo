@@ -237,7 +237,16 @@ export const test = base.extend<{ cspGuard: void; cleanSlate: void }>({
   ],
   cleanSlate: [
     async ({ page }, use) => {
-      await withDatabase((c) => c.query('TRUNCATE accounts, sessions, market_orders, market_sync, item_prices, price_sync, station_owners CASCADE'));
+      // The app may still be writing for the previous test (a poll, a price refresh); Postgres then
+      // aborts one side with a deadlock, and the truncate is simply tried again.
+      for (let attempt = 1; ; attempt++) {
+        try {
+          await withDatabase((c) => c.query('TRUNCATE accounts, sessions, market_orders, market_sync, item_prices, price_sync, station_owners CASCADE'));
+          break;
+        } catch (e) {
+          if ((e as { code?: string }).code !== '40P01' || attempt >= 5) throw e;
+        }
+      }
       await stubControl('reset');
       await page.route('https://images.evetech.net/**', (route) =>
         route.fulfill({ status: 200, contentType: 'image/png', body: PIXEL }),

@@ -26,27 +26,35 @@ A signed-in user SHALL be able to open an orders page that shows the current ord
 - **THEN** they are redirected to the landing page
 
 ### Requirement: Order columns
-Each row SHALL show the character, the item, the price, the standing, the gap to the best price, the undercut volume, the remaining and total volume, the date issued, the time left until the order expires, and finally the location and its region. Sell rows SHALL show the order value (price multiplied by remaining volume), followed by the margin. Buy rows SHALL show the escrow. Orders placed on behalf of the corporation SHALL carry a "Corp" marker. Dates and times SHALL be shown in EVE time (UTC). The standing SHALL read "Top" for a top order, styled with the success style of the page's CSS framework, and "Undercut N" for an undercut order, with N the number of undercutting orders, styled with its error style. The gap SHALL be empty for a top order and otherwise show the per-unit price difference to the best price followed by its percentage in brackets, with the difference shortened as described below and its exact value on hover. The undercut volume SHALL be empty for a top order and otherwise show the undercut volume, as described by the market-position capability, as a whole number with thousands separators. The gap and the undercut volume SHALL read "—" while the order has no standing, as described by the market-position capability. The margin SHALL show the margin of the sell order, as described by the trade-margin capability, shortened as described below. Hovering it SHALL show its exact value and the average purchase cost per unit. A negative margin SHALL be styled with the error style. The margin SHALL read "—" while the order has no margin. When the reason is that the purchase cost is not fully known, hovering it SHALL show how many of the order's units have a known cost.
+Each order SHALL be shown on two lines. The first line SHALL show, under the table's column headers, the item, the price, the standing, the gap to the best price ("Behind by"), the undercut volume, the remaining and total volume, and the order amount: for sell orders the order value (price multiplied by remaining volume) followed by the margin, for buy orders the escrow; and finally the time left until the order expires. The second line SHALL be a single dimmed line spanning the whole table width, without a header, showing the date issued, the character, a "Corp" marker for orders placed on behalf of the corporation, the location and its region, in that order. Hovering either line SHALL highlight both lines of the order. Dates and times SHALL be shown in EVE time (UTC). The standing SHALL read "Top" for a top order, styled with the page's success style, and "Undercut N" for an undercut order, with N the number of undercutting orders, styled with its error style. The gap SHALL be empty for a top order and otherwise show the per-unit price difference to the best price followed by its percentage in brackets, with the difference shortened as described below and its exact value on hover. The undercut volume SHALL be empty for a top order and otherwise show the undercut volume, as described by the market-position capability, as a whole number with thousands separators. The gap and the undercut volume SHALL read "—" while the order has no standing, as described by the market-position capability. The margin SHALL show the margin of the sell order, as described by the trade-margin capability, shortened as described below. Hovering it SHALL show its exact value and the average purchase cost per unit. A negative margin SHALL be styled with the error style. The margin SHALL read "—" while the order has no margin. When the reason is that the purchase cost is not fully known, hovering it SHALL show how many of the order's units have a known cost.
 
 #### Scenario: Sell row
 - **WHEN** a sell order of 10 remaining out of 20 units at 1,500,000.00 ISK is shown
-- **THEN** its row shows volume "10 / 20" and value 15,000,000.00 ISK (shortened as described below)
+- **THEN** its first line shows volume "10 / 20" and value 15,000,000.00 ISK (shortened as described below)
 
 #### Scenario: Buy row
 - **WHEN** a buy order with 2,500,000.00 ISK in escrow is shown
-- **THEN** its row shows the escrow of 2,500,000.00 ISK (shortened as described below)
+- **THEN** its first line shows the escrow of 2,500,000.00 ISK (shortened as described below)
 
 #### Scenario: Time left
 - **WHEN** an order issued 80 days and 2 hours ago with a 90-day duration is shown
 - **THEN** its time left reads 9 days 22 hours (rounded down to whole hours)
 
-#### Scenario: Corporation order
-- **WHEN** an order placed on behalf of the corporation is shown
-- **THEN** its row carries a "Corp" marker
+#### Scenario: Column headers
+- **WHEN** the sell table is shown
+- **THEN** its headers are Item, Price, Standing, Behind by, Undercut volume, Volume, Value, Margin and Time left, in that order
+
+#### Scenario: Buy column headers
+- **WHEN** the buy table is shown
+- **THEN** its headers are Item, Price, Standing, Behind by, Undercut volume, Volume, Escrow and Time left, in that order
 
 #### Scenario: Location and region come last
-- **WHEN** either table is shown
-- **THEN** its last two columns are the location and the region, after the time left
+- **WHEN** a sell order of Alice Alpha issued on 2026-10-01 12:00 at "Jita IV - Moon 4 - Caldari Navy Assembly Plant" in The Forge is shown
+- **THEN** its second line reads the issue date and time, "Alice Alpha", "Jita IV - Moon 4 - Caldari Navy Assembly Plant" and "The Forge", in that order, with location and region last
+
+#### Scenario: Corporation order
+- **WHEN** an order placed on behalf of the corporation is shown
+- **THEN** its second line carries a "Corp" marker next to the character
 
 #### Scenario: Top order
 - **WHEN** a sell order that is the lowest price at its station is shown
@@ -81,7 +89,7 @@ Each row SHALL show the character, the item, the price, the standing, the gap to
 - **THEN** it has no margin column
 
 ### Requirement: Sorting
-Each table SHALL be sortable by any of its columns in ascending and descending order by activating the column header. The sort column and direction SHALL be kept in the URL. By default the tables SHALL be sorted by item name ascending. The standing column SHALL sort by its text, with the number of an "Undercut N" read as a number: "Top" first, then "Undercut 1", "Undercut 2" and so on up, in ascending order. The gap column SHALL sort by its price difference, a top order counting as no difference. The undercut volume column SHALL sort by its number, a top order counting as 0. Orders without a standing SHALL come last in both directions of the standing, gap and undercut volume columns. The margin column SHALL sort by the margin, and orders without a margin SHALL come last in both directions.
+Each table SHALL be sortable by any of its column headers in ascending and descending order by activating the header. The values of the details line (issued, character, location, region) SHALL NOT be sortable. The sort column and direction SHALL be kept in the URL. By default the tables SHALL be sorted by item name ascending. A URL that names an unknown sort column, including one of the details line's values, SHALL sort by the default. The standing column SHALL sort by its text, with the number of an "Undercut N" read as a number: "Top" first, then "Undercut 1", "Undercut 2" and so on up, in ascending order. The gap column SHALL sort by its price difference, a top order counting as no difference. The undercut volume column SHALL sort by its number, a top order counting as 0. Orders without a standing SHALL come last in both directions of the standing, gap and undercut volume columns. The margin column SHALL sort by the margin, and orders without a margin SHALL come last in both directions.
 
 #### Scenario: Sort by price
 - **WHEN** a user activates the price header of the sell table
@@ -90,6 +98,10 @@ Each table SHALL be sortable by any of its columns in ascending and descending o
 #### Scenario: Default sorting
 - **WHEN** a user opens the orders page without sorting parameters
 - **THEN** both tables are sorted by item name ascending
+
+#### Scenario: Former sort column in the URL
+- **WHEN** a user opens the orders page with `sort=location&dir=desc`
+- **THEN** the sell table is sorted by item name ascending
 
 #### Scenario: Sort by standing
 - **WHEN** a table holds orders that are top, undercut 3 times, undercut 12 times, undercut once, and without market data, and its standing header is activated

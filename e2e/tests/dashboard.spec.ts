@@ -201,7 +201,7 @@ test('narrowing the selection keeps the range, and the selection travels to the 
   await expect(page).toHaveURL(/chars=90000002&range=30d$/);
   await page.getByRole('navigation').getByRole('link', { name: 'Orders' }).click();
   await expect(page).toHaveURL(/\/orders\?chars=90000002$/);
-  await expect(page.locator('#sell-orders tbody tr')).toHaveCount(1);
+  await expect(page.locator('#sell-orders tbody.order')).toHaveCount(1);
   await expect(page.locator('#order-2')).toBeVisible();
 });
 

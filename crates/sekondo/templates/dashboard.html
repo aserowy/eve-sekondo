@@ -6,17 +6,21 @@
 <script src="/static/chart.umd.min.js"></script>
 {% endblock %}
 
-{% block content %}
-<header>
-  <h1>Dashboard</h1>
-</header>
+{% block controls %}
+<form id="character-filter" data-character-filter hx-get="/dashboard" hx-trigger="change" hx-target="#dashboard-view" hx-select="#dashboard-view" hx-select-oob="#main-nav" hx-swap="outerHTML" hx-push-url="true">
+  {% include "character_filter.html" %}
+  <input type="hidden" name="range" value="{{ range_name }}">
+</form>
+<div id="range-control" class="range-control" role="group" aria-label="Time range">
+  {% for r in view.ranges %}
+  <a href="{{ r.href }}" hx-get="{{ r.href }}" hx-target="#dashboard-view" hx-select="#dashboard-view" hx-select-oob="#main-nav" hx-swap="outerHTML" hx-push-url="true"{% if r.current %} aria-current="true"{% endif %}>{{ r.label }}</a>
+  {% endfor %}
+</div>
+{% endblock %}
 
-<div hx-ext="sse" sse-connect="/events">
+{% block content %}
+<div class="fill" hx-ext="sse" sse-connect="/events">
 <div id="dashboard-view">
-  <form id="character-filter" data-character-filter hx-get="/dashboard" hx-trigger="change" hx-target="#dashboard-view" hx-select="#dashboard-view" hx-select-oob="#main-nav" hx-swap="outerHTML" hx-push-url="true">
-    {% include "character_filter.html" %}
-    <input type="hidden" name="range" value="{{ range_name }}">
-  </form>
   <section id="dashboard-summary" hx-get="{{ view.summary_url }}" hx-trigger="sse:orders-updated, sse:wealth-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
     {% include "dashboard_summary.html" %}
   </section>

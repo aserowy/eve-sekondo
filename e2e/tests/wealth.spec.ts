@@ -24,7 +24,7 @@ test('the wealth page opens from the dashboard with the narrowed selection and s
   await page.getByRole('navigation').getByRole('link', { name: 'Wealth' }).click();
 
   await expect(page).toHaveURL(/\/wealth\?chars=90000001$/);
-  await expect(page.getByRole('heading', { name: 'Wealth' })).toBeVisible();
+  await expect(page.locator('#wealth-items')).toBeVisible();
   await expect(page.getByRole('navigation').getByRole('link', { name: 'Wealth' })).toHaveAttribute('aria-current', 'page');
   const freshness = page.locator('#wealth-freshness');
   await expect(freshness).toContainText('Alice Alpha');

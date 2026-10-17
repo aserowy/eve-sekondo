@@ -56,13 +56,13 @@ async fn unauthenticated_requests_are_redirected_to_the_landing_page(pool: PgPoo
 }
 
 #[sqlx::test]
-async fn the_page_shows_the_wealth_heading_the_filter_and_the_wealth_link_as_current(pool: PgPool) {
+async fn the_page_shows_the_filter_and_the_wealth_link_as_current(pool: PgPool) {
     let app = app(pool).await;
     let browser = signed_in(&app).await;
 
     let html = get(&app, &browser, "/wealth").await;
 
-    assert!(html.contains("<h1>Wealth</h1>"));
+    assert!(!html.contains("<h1"), "the navigation names the page");
     assert!(html.contains(r#"data-character-filter"#));
     assert!(html.contains(r#"hx-get="/wealth""#));
     assert!(html.contains("Alice Alpha"));

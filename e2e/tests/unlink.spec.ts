@@ -25,14 +25,14 @@ test('unlink one of two characters, then the last one', async ({ page }) => {
   expect(await query('SELECT character_id FROM characters')).toEqual([{ character_id: '90000001' }]);
 
   await page.locator('#character-90000001').getByRole('button', { name: 'Unlink' }).click();
-  await expect(page).toHaveURL(/localhost:8443\/$/);
+  await expect(page).toHaveURL(/localhost:\d+\/$/);
   await expect(page.getByRole('button', { name: 'Log in with EVE Online' })).toBeVisible();
   expect(await query('SELECT 1 FROM characters')).toEqual([]);
   expect(await query('SELECT 1 FROM accounts')).toEqual([]);
 
   // Signed out: the characters page sends us back.
   await page.goto('/characters');
-  await expect(page).toHaveURL(/localhost:8443\/$/);
+  await expect(page).toHaveURL(/localhost:\d+\/$/);
 });
 
 test('declining the confirmation keeps the character', async ({ page }) => {

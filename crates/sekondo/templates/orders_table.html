@@ -1,4 +1,4 @@
-<div class="table-wrap">
+<div class="scroll" data-scroll-key="{{ scroll_key }}">
 <table class="orders">
   <thead>
     <tr>
@@ -7,10 +7,9 @@
       {% endfor %}
     </tr>
   </thead>
-  <tbody>
-    {% for r in table.rows %}
-    <tr id="order-{{ r.order_id }}">
-      <td>{{ r.character }}{% if r.is_corporation %} <mark class="badge corp">Corp</mark>{% endif %}</td>
+  {% for r in table.rows %}
+  <tbody id="order-{{ r.order_id }}" class="order">
+    <tr>
       <td>{{ r.item }}</td>
       <td class="num" title="{{ r.price_exact }}">{{ r.price }}</td>
       <td>{% if r.standing_class.is_empty() %}{{ r.standing }}{% else %}<mark class="badge {{ r.standing_class }}">{{ r.standing }}</mark>{% endif %}</td>
@@ -21,12 +20,12 @@
       {% if table.has_margin %}
       <td class="num"{% if !r.margin_title.is_empty() %} title="{{ r.margin_title }}"{% endif %}>{% if r.margin_negative %}<mark class="badge loss">{{ r.margin }}</mark>{% else %}{{ r.margin }}{% endif %}</td>
       {% endif %}
-      <td>{{ r.issued }}</td>
       <td>{{ r.left }}</td>
-      <td>{{ r.location }}</td>
-      <td>{{ r.region }}</td>
     </tr>
-    {% endfor %}
+    <tr class="details">
+      <td colspan="{{ table.headers.len() }}">{{ r.issued }} · {{ r.character }}{% if r.is_corporation %} <mark class="badge corp">Corp</mark>{% endif %} · {{ r.location }} · {{ r.region }}</td>
+    </tr>
   </tbody>
+  {% endfor %}
 </table>
 </div>

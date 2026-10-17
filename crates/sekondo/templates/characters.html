@@ -3,36 +3,27 @@
 {% block title %}Characters · Sekondo{% endblock %}
 
 {% block content %}
-<header>
-  <hgroup>
-    <h1>Your characters</h1>
-    <p>Everything Sekondo knows is read through these characters.</p>
-  </hgroup>
-</header>
-
 {% if let Some(message) = flash %}
-<article role="alert" id="flash">{{ message }}</article>
+<div class="alert" role="alert" id="flash">{{ message }}</div>
 {% endif %}
 
-<section id="characters">
+<section id="characters" class="panel">
+  <h2 class="panel-title">Characters</h2>
   {% for c in characters %}
-  <article class="character" id="character-{{ c.id }}">
-    <img src="https://images.evetech.net/characters/{{ c.id }}/portrait?size=64" width="64" height="64" alt="Portrait of {{ c.name }}">
-    <div>
-      <strong>{{ c.name }}</strong>
-      {% if c.needs_relogin %}
-      <mark class="badge">Needs re-login</mark>
-      <a href="/auth/add">Log in again</a>
-      {% endif %}
-    </div>
-    <button class="secondary outline" hx-post="/characters/{{ c.id }}/unlink"
+  <div class="character" id="character-{{ c.id }}">
+    <img src="https://images.evetech.net/characters/{{ c.id }}/portrait?size=64" width="32" height="32" alt="Portrait of {{ c.name }}">
+    <strong>{{ c.name }}</strong>
+    {% if c.needs_relogin %}
+    <mark class="badge stale">Needs re-login</mark>
+    <a class="relogin" href="/auth/add">{% include "icons/log-in.html" %}Log in again</a>
+    {% endif %}
+    <button class="unlink" hx-post="/characters/{{ c.id }}/unlink"
             hx-confirm="Unlink {{ c.name }}? Its tokens and all data stored for it will be deleted."
-            hx-target="#character-{{ c.id }}" hx-swap="outerHTML">Unlink</button>
-  </article>
+            hx-target="#character-{{ c.id }}" hx-swap="outerHTML">{% include "icons/unlink.html" %}Unlink</button>
+  </div>
   {% endfor %}
+  <div class="actions">
+    <a class="button" role="button" href="/auth/add">{% include "icons/user-plus.html" %}Add character</a>
+  </div>
 </section>
-
-<p>
-  <a role="button" href="/auth/add">Add character</a>
-</p>
 {% endblock %}

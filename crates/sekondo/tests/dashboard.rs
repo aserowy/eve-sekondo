@@ -1300,10 +1300,21 @@ async fn each_range_marks_itself_and_sets_the_bucket_width(pool: PgPool) {
 async fn the_range_links_keep_the_selection_and_omit_the_default_range(pool: PgPool) {
     let (app, browser) = polled_app(pool, &[BOB]).await;
 
-    let html = page(
+    let summary = page(
         &app,
         &browser,
         &format!("/dashboard/summary?chars={ALICE}&range=30d"),
+    )
+    .await;
+    assert!(
+        !summary.contains("range-control"),
+        "the control is in the top bar, outside the refreshed summary"
+    );
+
+    let html = page(
+        &app,
+        &browser,
+        &format!("/dashboard?chars={ALICE}&range=30d"),
     )
     .await;
 

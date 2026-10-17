@@ -27,7 +27,10 @@ fn current_links(html: &str) -> Vec<String> {
         .skip(1)
         .filter_map(|tag| tag.split_once('>'))
         .filter(|(attrs, _)| attrs.contains(r#"aria-current="page""#))
-        .map(|(_, rest)| rest.split('<').next().unwrap().trim().to_owned())
+        .map(|(attrs, rest)| match attrs.split_once(r#"aria-label=""#) {
+            Some((_, label)) => label.split('"').next().unwrap().to_owned(),
+            None => rest.split('<').next().unwrap().trim().to_owned(),
+        })
         .collect()
 }
 
@@ -161,5 +164,35 @@ async fn navigation_links_stay_plain_without_a_filter_or_with_every_character(po
         let html = page(&app, &browser, &path).await;
         assert!(html.contains(r#"href="/orders""#), "{path}");
         assert!(!html.contains("chars="), "{path}");
+    }
+}
+
+#[sqlx::test]
+async fn characters_and_sign_out_are_icon_only_controls_that_keep_their_names(pool: PgPool) {
+    let app = app(pool).await;
+    let browser = signed_in(&app).await;
+
+    for path in ["/dashboard", "/orders", "/wealth", "/characters"] {
+        let html = page(&app, &browser, path).await;
+        let nav = html
+            .split_once(r#"id="main-nav""#)
+            .and_then(|(_, rest)| rest.split_once("</nav>"))
+            .unwrap_or_else(|| panic!("{path} has no navigation"))
+            .0;
+        for name in ["Characters", "Sign out"] {
+            let control = nav
+                .split(['<'])
+                .find(|tag| {
+                    (tag.starts_with("a ") || tag.starts_with("button "))
+                        && tag.contains(&format!(r#"aria-label="{name}""#))
+                })
+                .unwrap_or_else(|| panic!("{path}: no control labelled {name}"));
+            assert!(
+                control.contains(&format!(r#"title="{name}""#)),
+                "{path}: {control}"
+            );
+        }
+        assert!(nav.matches("<svg").count() >= 2, "{path}: icons in the bar");
+        assert!(!html.contains("<h1"), "{path} has a page heading");
     }
 }
