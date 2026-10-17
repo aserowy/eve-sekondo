@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::{
     account::CurrentAccount,
     app::AppState,
-    csrf, format,
+    csrf, fees, format,
     freshness::{FreshnessView, freshness_view, list_freshness},
     pages::{self, Nav, Page},
     selection::{CharacterSelection, ViewQuery},
@@ -545,6 +545,8 @@ async fn build_view(
     )
     .await?;
     let freshness = list_freshness(&state.pool, account_id, &selection).await?;
+    let mut fee_locations =
+        fees::locations_by_character(&state.pool, account_id, selection.ids()).await?;
 
     let page_query = view_state.query();
     let view = OrdersView {
@@ -576,7 +578,10 @@ async fn build_view(
         },
         freshness: freshness
             .iter()
-            .map(|r| freshness_view(r, now, interval))
+            .map(|r| FreshnessView {
+                locations: fee_locations.remove(&r.character_id).unwrap_or_default(),
+                ..freshness_view(r, now, interval)
+            })
             .collect(),
     };
     Ok(Some((view, selection)))

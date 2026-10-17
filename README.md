@@ -21,7 +21,7 @@ Without Nix you need the same tools installed yourself. Below, `podman-compose` 
 At <https://developers.eveonline.com/> create an application with:
 
 - **Callback URL:** `https://localhost:8443/auth/callback`
-- **Scopes:** `esi-markets.read_character_orders.v1`, `esi-universe.read_structures.v1`, `esi-wallet.read_character_wallet.v1` and `esi-assets.read_assets.v1` (characters linked with fewer scopes are asked to log in again)
+- **Scopes:** `esi-markets.read_character_orders.v1`, `esi-universe.read_structures.v1`, `esi-wallet.read_character_wallet.v1`, `esi-assets.read_assets.v1`, `esi-skills.read_skills.v1` and `esi-characters.read_standings.v1`. All six are required: tick every one of them on the application, or EVE's login answers `invalid_scope`. Characters linked with fewer scopes (every character linked before the skills and standings scopes were added) show "Needs re-login" until they log in once more.
 
 Keep the client ID and the secret for `.env` below.
 
@@ -78,9 +78,31 @@ need a re-login:
 - Item, region, station and structure names are looked up through ESI once and cached in the database.
   A structure ESI will not describe shows as "Unknown structure (id)" and is tried again after a day.
 
+## Market fees
+
+For every linked character the app also polls its skills and its NPC standings, each at most once an hour
+and never before ESI's cache expiry, and shows what the market charges it on the orders page: under each
+character, one row per station or structure where it has orders, with the sales tax, the broker fee and the
+minimum margin of a station trade (hover a figure for the exact rate and its inputs).
+
+- Sales tax: 7.5% × (1 − 0.11 × Accounting level). Broker fee at an NPC station: 3% − 0.3% × Broker
+  Relations − 0.03% × faction standing − 0.02% × corporation standing, with the standings towards the
+  station owner's faction and the owner corporation as ESI reports them. In a player structure the fee is
+  "0.5% + owner fee": the owner's part is not exposed by ESI. The minimum margin is the markup on a buy
+  price at which a buy order resold through a sell order breaks even.
+- The owner corporation of an NPC station comes from ESI once per station. ESI does not report the faction of
+  an NPC corporation, so the app keeps a table from CCP's static data export,
+  `crates/sekondo/data/npc_corporation_factions.csv` (its header names the SDE build). A migration loads it
+  into the database. To update it, run `scripts/npc-corporation-factions.sh` (needs `curl`, `unzip` and
+  `python3`; pass a downloaded SDE zip to skip the download), then write a new migration with the changed
+  rows. A corporation missing from the table counts as having no faction.
+- The sources of the formulas, and what was checked in game, are in
+  `openspec/changes/show-market-fees/design.md`.
+
 The orders page (`/orders`) takes `?chars=<id>,<id>` to select characters and `sort`/`dir` (sell table)
 and `bsort`/`bdir` (buy table) for the sorting; the URL can be bookmarked. Open pages are told about new
-data over a server-sent event stream (`/events`) and re-fetch the affected tables themselves.
+data over a server-sent event stream (`/events`) and re-fetch the affected tables themselves. A skills or
+standings poll that changes a fee only re-fetches the fee rows, not the order tables.
 
 ## 4. Run with Compose
 
@@ -127,10 +149,10 @@ cargo test --workspace --features sekondo/test-hooks   # unit and integration te
 cd e2e && npm install && npx playwright test           # browser tests
 ```
 
-The `test-hooks` feature adds `POST /_test/refresh/{id}` and `POST /_test/poll/{id}` (a signed-in
+The `test-hooks` feature adds `POST /_test/refresh/{id}`, `POST /_test/poll/{id}` and `POST /_test/fee-poll` (a signed-in
 account's own characters only; CSRF-protected like any other POST). The first forces a token refresh, the
 second runs one order poll right away, ignoring the schedule but not ESI's limits, so browser tests do not
-have to wait for the scheduler. Both are compiled out of everything else. The Playwright setup builds with
+have to wait for the scheduler. The third polls the skills and standings of all the account's characters and looks up its station owners. All are compiled out of everything else. The Playwright setup builds with
 the feature and sets `ORDER_POLL_INTERVAL_MINUTES=1440` so the background scheduler stays out of the way.
 Without the feature, `cargo test` skips the tests of the hooks.
 
@@ -163,8 +185,9 @@ git add crates/esi-contract/verified-stub.json
 
 Preconditions of `esi-verify`:
 
-- A dedicated **verification character** with at least one sell order and one buy order. It needs a browser
-  and a person, so it cannot run headless.
+- A dedicated **verification character** with at least one sell order, one buy order, one asset and one NPC
+  corporation or faction standing. It needs a browser and a person, so it cannot run headless. The application
+  needs all six scopes.
 - `ESI_VERIFY_STRUCTURE_ID` (a structure the character can open; any public one from
   `GET https://esi.evetech.net/universe/structures/?filter=market` works) and
   `ESI_VERIFY_FORBIDDEN_STRUCTURE_ID` (one it cannot, an unknown ID answers 403 too) in `.env`, plus
@@ -202,12 +225,16 @@ restores everything) change how the stub behaves:
 | `structure-access` | `{"structure_id", "allowed"}` | allows or refuses (403) a structure lookup |
 | `esi-fail-next` | `{"status", "count"?, "route"?, "headers"?}` | the next calls (of one route, or any) answer 5xx, 420 or 429 with the given headers |
 | `esi-delay` | `{"millis"}` | the orders route answers slowly |
+| `skills` | `{"character_id", "skills": [...]}` | replaces the skills ESI returns for a character (ESI's objects with `skill_id`, `active_skill_level`, ...) |
+| `standings` | `{"character_id", "standings": [...]}` | replaces the standings (`from_id`, `from_type`, `standing`) |
+| `stations` | `{"station_id", "owner"}` | sets the owner corporation of an NPC station |
 | `revoke`, `scopes`, `owner-hash`, `fail-next-token`, `rotate-key` | | SSO behaviour, see `crates/eve-stub` |
 | `stats` | (GET) | call counters per route |
 
 ESI routes served: `GET /characters/{id}/orders` (needs a stub-issued token of that character with the
 orders scope), `POST /universe/names` (a fixture table; one unknown ID fails the whole request with 404)
-and `GET /universe/structures/{id}` (needs the structures scope).
+`GET /universe/structures/{id}` (needs the structures scope), `GET /characters/{id}/skills` and
+`GET /characters/{id}/standings` (each needs its scope) and `GET /universe/stations/{id}` (public).
 
 ## Database queries
 

@@ -41,7 +41,7 @@ async fn the_market_poll_hook_is_absent(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn the_wealth_hooks_are_absent(pool: PgPool) {
+async fn the_wealth_and_fee_hooks_are_absent(pool: PgPool) {
     let app = AppBuilder::new(pool).with_stub().spawn().await;
     let browser = app.browser();
     browser.sso_round_trip(&app, "/auth/login", ALICE).await;
@@ -62,6 +62,7 @@ async fn the_wealth_hooks_are_absent(pool: PgPool) {
     for path in [
         format!("/_test/wealth-poll/{ALICE}/wallet"),
         "/_test/price-refresh".to_owned(),
+        "/_test/fee-poll".to_owned(),
     ] {
         let res = browser
             .send(

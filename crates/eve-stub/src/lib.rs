@@ -140,6 +140,11 @@ impl Stub {
         self.shared.lock().unwrap().names_requests.clone()
     }
 
+    /// The IDs of every station lookup so far.
+    pub fn station_requests(&self) -> Vec<i64> {
+        self.shared.lock().unwrap().station_requests.clone()
+    }
+
     /// How many times `/v2/oauth/token` was called (including failed calls).
     pub fn token_calls(&self) -> u64 {
         self.shared.lock().unwrap().token_calls

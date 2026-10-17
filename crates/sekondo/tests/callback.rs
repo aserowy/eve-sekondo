@@ -140,7 +140,7 @@ async fn brand_new_character_creates_an_account_and_signs_in(pool: PgPool) {
     assert_eq!(characters[0].character_id, ALICE);
     assert_eq!(characters[0].name, "Alice Alpha");
     assert_eq!(characters[0].owner_hash, "owner-hash-90000001");
-    assert_eq!(characters[0].scopes.len(), 4);
+    assert_eq!(characters[0].scopes.len(), 6);
     assert_eq!(e.count("accounts").await, 1);
 
     let tokens = e.repo.load_tokens(ALICE).await.unwrap().unwrap();
@@ -388,6 +388,31 @@ async fn a_transferred_character_leaves_the_old_account_and_starts_a_new_one(poo
         .collect();
     assert_eq!(new, [ALICE]);
     assert_eq!(e.owner_hash_of(ALICE).await, "owner-hash-90000001");
+}
+
+#[sqlx::test]
+async fn a_transferred_character_leaves_no_fee_data_with_the_new_owner(pool: PgPool) {
+    let e = env(pool).await;
+    let old_account = e.repo.create_account().await.unwrap();
+    e.seed(old_account, ALICE, "the-previous-owner").await;
+    for statement in [
+        "INSERT INTO character_skills (character_id, skill_id, active_level) VALUES ($1, 16622, 4)",
+        "INSERT INTO character_standings (character_id, from_id, from_type, standing) \
+         VALUES ($1, 1000035, 'npc_corp', 1.5)",
+        "INSERT INTO fee_sync (character_id, kind, next_poll_at) VALUES ($1, 'skills', now())",
+    ] {
+        sqlx::query(statement)
+            .bind(ALICE)
+            .execute(&e.pool)
+            .await
+            .unwrap();
+    }
+
+    e.login(&e.app.browser(), ALICE).await;
+
+    for table in ["character_skills", "character_standings", "fee_sync"] {
+        assert_eq!(e.count(table).await, 0, "{table}");
+    }
 }
 
 #[sqlx::test]

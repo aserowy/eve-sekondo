@@ -59,6 +59,9 @@ eve_routes! {
     ("GET", "/characters/{id}/wallet", character_wallet),
     ("GET", "/characters/{id}/assets", character_assets),
     ("GET", "/markets/prices", market_prices),
+    ("GET", "/characters/{id}/skills", character_skills),
+    ("GET", "/characters/{id}/standings", character_standings),
+    ("GET", "/universe/stations/{id}", universe_station),
 }
 
 pub fn router(shared: Shared) -> Router {
@@ -72,6 +75,9 @@ pub fn router(shared: Shared) -> Router {
         .route("/wallet", post(set_wallet))
         .route("/assets", post(set_assets))
         .route("/prices", post(set_prices))
+        .route("/skills", post(set_skills))
+        .route("/standings", post(set_standings))
+        .route("/stations", post(set_station_owner))
         .route("/esi-expires", post(set_esi_expires))
         .route("/structure-access", post(set_structure_access))
         .route("/esi-fail-next", post(esi_fail_next))
@@ -432,6 +438,9 @@ async fn stats(State(shared): State<Shared>) -> Json<Value> {
         "wallet_calls": calls("wallet"),
         "assets_calls": calls("assets"),
         "prices_calls": calls("prices"),
+        "skills_calls": calls("skills"),
+        "standings_calls": calls("standings"),
+        "stations_calls": calls("stations"),
     }))
 }
 
@@ -451,6 +460,8 @@ const ORDERS_SCOPE: &str = "esi-markets.read_character_orders.v1";
 const STRUCTURES_SCOPE: &str = "esi-universe.read_structures.v1";
 const WALLET_SCOPE: &str = "esi-wallet.read_character_wallet.v1";
 const ASSETS_SCOPE: &str = "esi-assets.read_assets.v1";
+const SKILLS_SCOPE: &str = "esi-skills.read_skills.v1";
+const STANDINGS_SCOPE: &str = "esi-characters.read_standings.v1";
 
 /// Counts the call and, while a failure is armed, answers it instead of the route.
 fn begin_esi_call(
@@ -931,5 +942,140 @@ struct PricesBody {
 /// Replaces what ESI returns as the market prices.
 async fn set_prices(State(shared): State<Shared>, Json(body): Json<PricesBody>) -> StatusCode {
     shared.lock().unwrap().prices = body.prices;
+    StatusCode::NO_CONTENT
+}
+
+/// The skills of a character, wrapped like ESI's answer.
+async fn character_skills(
+    State(shared): State<Shared>,
+    Path(character_id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let mut inner = shared.lock().unwrap();
+    if let Some(response) = begin_esi_call(&mut inner, "skills", &headers) {
+        return response;
+    }
+    let response_headers = char_route_headers(&inner, "char-detail", "600/15m");
+    if let Err(response) = authorize_character(
+        &inner,
+        &headers,
+        character_id,
+        SKILLS_SCOPE,
+        response_headers.clone(),
+    ) {
+        return response;
+    }
+    let skills = inner.skills.get(&character_id).cloned().unwrap_or_default();
+    (
+        response_headers,
+        Json(json!({"skills": skills, "total_sp": 0, "unallocated_sp": 0})),
+    )
+        .into_response()
+}
+
+/// The standings of a character.
+async fn character_standings(
+    State(shared): State<Shared>,
+    Path(character_id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let mut inner = shared.lock().unwrap();
+    if let Some(response) = begin_esi_call(&mut inner, "standings", &headers) {
+        return response;
+    }
+    let response_headers = char_route_headers(&inner, "char-social", "600/15m");
+    if let Err(response) = authorize_character(
+        &inner,
+        &headers,
+        character_id,
+        STANDINGS_SCOPE,
+        response_headers.clone(),
+    ) {
+        return response;
+    }
+    let standings = inner
+        .standings
+        .get(&character_id)
+        .cloned()
+        .unwrap_or_default();
+    (response_headers, Json(standings)).into_response()
+}
+
+/// An NPC station. Needs no token; an unknown station is a 404.
+async fn universe_station(
+    State(shared): State<Shared>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let mut inner = shared.lock().unwrap();
+    if let Some(response) = begin_esi_call(&mut inner, "stations", &headers) {
+        return response;
+    }
+    inner.station_requests.push(id);
+    let Some(owner) = inner.station_owners.get(&id).copied() else {
+        return esi_error(&inner, StatusCode::NOT_FOUND, "Station not found");
+    };
+    let name = NAMES
+        .iter()
+        .find(|(known, _, _)| *known == id)
+        .map_or("Station", |(_, _, name)| name);
+    (
+        esi_headers(&inner),
+        Json(json!({"station_id": id, "name": name, "owner": owner, "system_id": 30000142, "type_id": 52678})),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct SkillsBody {
+    character_id: i64,
+    skills: Vec<Value>,
+}
+
+/// Replaces what ESI returns as a character's skills.
+async fn set_skills(State(shared): State<Shared>, Json(body): Json<SkillsBody>) -> StatusCode {
+    shared
+        .lock()
+        .unwrap()
+        .skills
+        .insert(body.character_id, body.skills);
+    StatusCode::NO_CONTENT
+}
+
+#[derive(Deserialize)]
+struct StandingsBody {
+    character_id: i64,
+    standings: Vec<Value>,
+}
+
+/// Replaces what ESI returns as a character's standings.
+async fn set_standings(
+    State(shared): State<Shared>,
+    Json(body): Json<StandingsBody>,
+) -> StatusCode {
+    shared
+        .lock()
+        .unwrap()
+        .standings
+        .insert(body.character_id, body.standings);
+    StatusCode::NO_CONTENT
+}
+
+#[derive(Deserialize)]
+struct StationBody {
+    station_id: i64,
+    owner: i64,
+}
+
+/// Sets the owner corporation of a station; makes the station known.
+async fn set_station_owner(
+    State(shared): State<Shared>,
+    Json(body): Json<StationBody>,
+) -> StatusCode {
+    shared
+        .lock()
+        .unwrap()
+        .station_owners
+        .insert(body.station_id, body.owner);
     StatusCode::NO_CONTENT
 }

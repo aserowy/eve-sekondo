@@ -7,11 +7,11 @@ Lets a player sign in to Sekondo with EVE Online SSO, link several characters to
 ## Requirements
 
 ### Requirement: Sign in with EVE SSO
-The system SHALL let an unauthenticated user start a login that redirects to EVE SSO. The request SHALL ask for exactly the scopes `esi-markets.read_character_orders.v1`, `esi-universe.read_structures.v1`, `esi-wallet.read_character_wallet.v1` and `esi-assets.read_assets.v1`, and SHALL be protected by a single-use `state` value and PKCE. All four scopes SHALL be required: a character whose granted scopes lack any of them, including a character linked before the wallet and assets scopes were introduced, SHALL be marked "needs re-login" under the needs re-login rule.
+The system SHALL let an unauthenticated user start a login that redirects to EVE SSO. The request SHALL ask for exactly the scopes `esi-markets.read_character_orders.v1`, `esi-universe.read_structures.v1`, `esi-wallet.read_character_wallet.v1`, `esi-assets.read_assets.v1`, `esi-skills.read_skills.v1` and `esi-characters.read_standings.v1`, and SHALL be protected by a single-use `state` value and PKCE. All six scopes SHALL be required: a character whose granted scopes lack any of them, including a character linked before the skills and standings scopes were introduced, SHALL be marked "needs re-login" under the needs re-login rule.
 
 #### Scenario: Start login
 - **WHEN** an unauthenticated user clicks "Log in with EVE Online"
-- **THEN** the browser is redirected to the configured SSO authorize URL with the client ID, the callback URL, exactly the four required scopes, a `state` value and a PKCE code challenge
+- **THEN** the browser is redirected to the configured SSO authorize URL with the client ID, the callback URL, exactly the six required scopes, a `state` value and a PKCE code challenge
 
 #### Scenario: Callback with mismatched state
 - **WHEN** the SSO callback arrives with a `state` value that does not match the one issued for this browser session
@@ -26,8 +26,8 @@ The system SHALL let an unauthenticated user start a login that redirects to EVE
 - **THEN** the login is rejected and no character data is stored
 
 #### Scenario: Character linked before the new scopes
-- **WHEN** a character linked with only the orders and structures scopes has its token refreshed
-- **THEN** it is marked "needs re-login", and logging in again with all four scopes clears the mark
+- **WHEN** a character linked with only the orders, structures, wallet and assets scopes has its token refreshed
+- **THEN** it is marked "needs re-login", and logging in again with all six scopes clears the mark
 
 ### Requirement: First login creates an account
 When a character that is not linked to any account completes login and no one is signed in, the system SHALL create a new account, link the character to it, and start a signed-in session for that account.

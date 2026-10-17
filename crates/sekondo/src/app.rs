@@ -19,6 +19,7 @@ use crate::{
     csrf, dashboard,
     esi::EsiClient,
     events::{EventBus, InProcessBus},
+    fee_poller::FeePoller,
     headers,
     market::{MARKET_INTERVAL, MarketPoller},
     orders, pages,
@@ -46,6 +47,7 @@ pub struct AppState {
     pub poller: Arc<Poller>,
     pub market: Arc<MarketPoller>,
     pub wealth: Arc<WealthPoller>,
+    pub fees: Arc<FeePoller>,
     pub prices: Arc<PricePoller>,
     pub events: Arc<dyn EventBus>,
     pub sse_tick: std::time::Duration,
@@ -143,6 +145,13 @@ impl App {
             clock.clone(),
             config.order_poll_interval,
         ));
+        let fees = Arc::new(FeePoller::new(
+            pool.clone(),
+            tokens.clone(),
+            esi.clone(),
+            events.clone(),
+            clock.clone(),
+        ));
         let prices = Arc::new(PricePoller::new(
             pool.clone(),
             esi.clone(),
@@ -161,6 +170,7 @@ impl App {
             poller,
             market,
             wealth,
+            fees,
             prices,
             events,
             sse_tick: options.sse_tick,
@@ -205,7 +215,7 @@ pub fn router(state: AppState, extra_routes: Router<AppState>) -> Router {
     #[cfg(feature = "test-hooks")]
     let routes = {
         tracing::warn!(
-            "built with the test-hooks feature: POST /_test/refresh/{{id}}, POST /_test/poll/{{id}} and POST /_test/market-poll, POST /_test/wealth-poll/{{id}}/{{kind}} and POST /_test/price-refresh are enabled"
+            "built with the test-hooks feature: POST /_test/refresh/{{id}}, POST /_test/poll/{{id}} and POST /_test/market-poll, POST /_test/wealth-poll/{{id}}/{{kind}} and POST /_test/price-refresh and POST /_test/fee-poll are enabled"
         );
         routes
             .route("/_test/refresh/{id}", post(crate::test_hooks::refresh))
@@ -219,6 +229,7 @@ pub fn router(state: AppState, extra_routes: Router<AppState>) -> Router {
                 "/_test/price-refresh",
                 post(crate::test_hooks::price_refresh),
             )
+            .route("/_test/fee-poll", post(crate::test_hooks::fee_poll))
     };
 
     let router = routes

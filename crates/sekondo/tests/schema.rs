@@ -492,3 +492,129 @@ async fn wealth_sync_only_knows_wallet_and_assets(pool: PgPool) {
     .await;
     assert!(twice.is_err(), "one row per character and kind");
 }
+
+#[sqlx::test]
+async fn the_fee_tables_exist_and_the_public_ones_have_no_owner(pool: PgPool) {
+    for table in [
+        "character_skills",
+        "character_standings",
+        "station_owners",
+        "fee_sync",
+    ] {
+        assert_eq!(count(&pool, table).await, 0, "{table}");
+    }
+    let owned: Vec<String> = sqlx::query_scalar(
+        "SELECT table_name::text FROM information_schema.columns \
+         WHERE table_name IN ('station_owners', 'npc_corporation_factions') \
+           AND column_name IN ('account_id', 'character_id')",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(owned.is_empty(), "{owned:?}");
+}
+
+#[sqlx::test]
+async fn the_faction_table_is_loaded_from_the_checked_in_csv(pool: PgPool) {
+    let csv = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/data/npc_corporation_factions.csv"
+    ))
+    .unwrap();
+    let mut expected: Vec<(i64, i64)> = csv
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.starts_with("corporation_id"))
+        .map(|l| {
+            let (corp, faction) = l.split_once(',').unwrap();
+            (corp.parse().unwrap(), faction.parse().unwrap())
+        })
+        .collect();
+    expected.sort_unstable();
+    let loaded: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT corporation_id, faction_id FROM npc_corporation_factions ORDER BY corporation_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(loaded, expected);
+    assert!(
+        loaded.contains(&(1000035, 500001)),
+        "Caldari Navy belongs to Caldari State"
+    );
+}
+
+#[sqlx::test]
+async fn fee_sync_only_knows_skills_and_standings(pool: PgPool) {
+    let account = insert_account(&pool).await;
+    insert_character(&pool, account, 1).await;
+    let bad = sqlx::query(
+        "INSERT INTO fee_sync (character_id, kind, next_poll_at) VALUES (1, 'wallet', now())",
+    )
+    .execute(&pool)
+    .await;
+    assert!(bad.is_err());
+    for kind in ["skills", "standings"] {
+        sqlx::query(
+            "INSERT INTO fee_sync (character_id, kind, next_poll_at) VALUES (1, $1, now())",
+        )
+        .bind(kind)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let twice = sqlx::query(
+        "INSERT INTO fee_sync (character_id, kind, next_poll_at) VALUES (1, 'skills', now())",
+    )
+    .execute(&pool)
+    .await;
+    assert!(twice.is_err(), "one row per character and kind");
+}
+
+#[sqlx::test]
+async fn standings_keep_every_digit_and_only_know_npc_corporations_and_factions(pool: PgPool) {
+    let account = insert_account(&pool).await;
+    insert_character(&pool, account, 1).await;
+    sqlx::query(
+        "INSERT INTO character_standings (character_id, from_id, from_type, standing) \
+         VALUES (1, 1000035, 'npc_corp', '0.07999999821186066'::numeric)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let text: String = sqlx::query_scalar("SELECT standing::text FROM character_standings")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(text, "0.07999999821186066");
+    let agent = sqlx::query(
+        "INSERT INTO character_standings (character_id, from_id, from_type, standing) \
+         VALUES (1, 3009841, 'agent', 3.2)",
+    )
+    .execute(&pool)
+    .await;
+    assert!(agent.is_err());
+}
+
+#[sqlx::test]
+async fn deleting_a_character_removes_its_fee_data_and_keeps_the_public_tables(pool: PgPool) {
+    let account = insert_account(&pool).await;
+    insert_character(&pool, account, 1).await;
+    for statement in [
+        "INSERT INTO character_skills (character_id, skill_id, active_level) VALUES (1, 16622, 4)",
+        "INSERT INTO character_standings (character_id, from_id, from_type, standing) VALUES (1, 500001, 'faction', 2)",
+        "INSERT INTO fee_sync (character_id, kind, next_poll_at) VALUES (1, 'skills', now())",
+        "INSERT INTO station_owners (station_id, owner_id, resolved_at) VALUES (60003760, 1000035, now())",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+
+    sqlx::query("DELETE FROM characters WHERE character_id = 1")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    for table in ["character_skills", "character_standings", "fee_sync"] {
+        assert_eq!(count(&pool, table).await, 0, "{table}");
+    }
+    assert_eq!(count(&pool, "station_owners").await, 1);
+}

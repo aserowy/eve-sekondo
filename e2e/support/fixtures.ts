@@ -143,6 +143,23 @@ export async function wealthPoll(page: Page, characterId: number, kind: 'wallet'
   );
 }
 
+/** Polls the skills and standings of the page's account and looks up its station owners now through the test-only hook. */
+export async function feePoll(page: Page): Promise<string> {
+  return page.evaluate(async () => {
+    const token = document.querySelector('meta[name="csrf-token"]')!.getAttribute('content')!;
+    const res = await fetch('/_test/fee-poll', { method: 'POST', headers: { 'X-CSRF-Token': token } });
+    return `${res.status} ${await res.text()}`;
+  });
+}
+
+/** What the stub serves as a character's skills: Accounting and Broker Relations at the given active levels. */
+export function stubTradeSkills(accounting: number, brokerRelations: number) {
+  return [
+    { skill_id: 16622, active_skill_level: accounting, trained_skill_level: accounting },
+    { skill_id: 3446, active_skill_level: brokerRelations, trained_skill_level: brokerRelations },
+  ];
+}
+
 /** Refreshes ESI's market prices now through the test-only hook. */
 export async function priceRefresh(page: Page): Promise<string> {
   return page.evaluate(async () => {
@@ -201,7 +218,7 @@ export const test = base.extend<{ cspGuard: void; cleanSlate: void }>({
   ],
   cleanSlate: [
     async ({ page }, use) => {
-      await withDatabase((c) => c.query('TRUNCATE accounts, sessions, market_orders, market_sync, item_prices, price_sync CASCADE'));
+      await withDatabase((c) => c.query('TRUNCATE accounts, sessions, market_orders, market_sync, item_prices, price_sync, station_owners CASCADE'));
       await stubControl('reset');
       await page.route('https://images.evetech.net/**', (route) =>
         route.fulfill({ status: 200, contentType: 'image/png', body: PIXEL }),

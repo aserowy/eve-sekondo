@@ -7,8 +7,8 @@ use reqwest::header::{HeaderMap, USER_AGENT};
 use secrecy::{ExposeSecret, SecretString};
 use sekondo::{
     esi::{
-        COMPATIBILITY_DATE, EsiAsset, EsiMarketOrder, EsiName, EsiOrder, EsiPrice, EsiStructure,
-        user_agent,
+        COMPATIBILITY_DATE, EsiAsset, EsiMarketOrder, EsiName, EsiOrder, EsiPrice, EsiSkills,
+        EsiStanding, EsiStation, EsiStructure, user_agent,
     },
     oauth::{Intent, PendingFlow},
     poller::STRUCTURE_ID_MIN,
@@ -509,7 +509,8 @@ async fn verify_esi(
         }
     }
 
-    verify_wealth(settings, run, http, token, me).await
+    verify_wealth(settings, run, http, token, me).await?;
+    verify_fees(settings, run, http, token, me, &orders).await
 }
 
 /// The wallet, the assets and the market prices. Nothing of the answers is printed: not a
@@ -570,6 +571,83 @@ async fn verify_wealth(
     let answer = esi_request(settings, http.get(esi("markets/prices")?), "prices").await?;
     run.check("prices", "list", &answer);
     let _: Option<Vec<EsiPrice>> = decode(run, "prices", &answer);
+    Ok(())
+}
+
+/// A station well known to be NPC-owned, for characters whose orders are all in structures.
+const FALLBACK_STATION_ID: i64 = 60_003_760;
+
+/// The skills, the standings and the station of an NPC order. Neither a skill level nor a standing
+/// is printed.
+async fn verify_fees(
+    settings: &Settings,
+    run: &mut Run<'_>,
+    http: &reqwest::Client,
+    token: &SecretString,
+    me: i64,
+    orders: &[EsiOrder],
+) -> Result<()> {
+    let esi = |path: &str| {
+        settings
+            .esi_base_url
+            .join(path)
+            .map_err(|e| VerifyError(e.to_string()))
+    };
+
+    let answer = esi_request(
+        settings,
+        http.get(esi(&format!("characters/{me}/skills"))?)
+            .bearer_auth(token.expose_secret()),
+        "skills",
+    )
+    .await?;
+    run.check("skills", "levels", &answer);
+    let _: Option<EsiSkills> = decode(run, "skills", &answer);
+
+    let answer = esi_request(
+        settings,
+        http.get(esi(&format!("characters/{me}/standings"))?)
+            .bearer_auth(token.expose_secret()),
+        "standings",
+    )
+    .await?;
+    run.check("standings", "list", &answer);
+    if let Some(standings) = decode::<Vec<EsiStanding>>(run, "standings", &answer)
+        && !standings
+            .iter()
+            .any(|s| matches!(s.from_type.as_str(), "npc_corp" | "faction"))
+    {
+        run.problem(
+            "standings/list: a standing is needed: the verification character has no NPC corporation or faction standing, so the answer cannot be checked".to_owned(),
+        );
+    }
+
+    // Another character's data is refused whatever the scopes are.
+    let stranger = me + 1;
+    for call in ["skills", "standings"] {
+        let answer = esi_request(
+            settings,
+            http.get(esi(&format!("characters/{stranger}/{call}"))?)
+                .bearer_auth(token.expose_secret()),
+            call,
+        )
+        .await?;
+        run.check(call, "forbidden", &answer);
+    }
+
+    let station_id = orders
+        .iter()
+        .map(|o| o.location_id)
+        .find(|id| *id < STRUCTURE_ID_MIN)
+        .unwrap_or(FALLBACK_STATION_ID);
+    let answer = esi_request(
+        settings,
+        http.get(esi(&format!("universe/stations/{station_id}"))?),
+        "stations",
+    )
+    .await?;
+    run.check("stations", "station", &answer);
+    let _: Option<EsiStation> = decode(run, "stations", &answer);
     Ok(())
 }
 

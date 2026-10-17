@@ -391,6 +391,8 @@ async fn injected_failures_conform_on_every_esi_route() {
     let market = "/markets/10000002/orders?order_type=all&type_id=34";
     let wallet = format!("/characters/{ALICE}/wallet");
     let assets = format!("/characters/{ALICE}/assets");
+    let skills = format!("/characters/{ALICE}/skills");
+    let standings = format!("/characters/{ALICE}/standings");
 
     let failures: [(u16, &str, Value); 3] = [
         (
@@ -414,6 +416,9 @@ async fn injected_failures_conform_on_every_esi_route() {
             ("wallet", "wallet"),
             ("assets", "assets"),
             ("prices", "prices"),
+            ("skills", "skills"),
+            ("standings", "standings"),
+            ("stations", "stations"),
         ] {
             control(
                 &f,
@@ -428,6 +433,9 @@ async fn injected_failures_conform_on_every_esi_route() {
                 "wallet" => get(&f, &wallet, Some(&token)).await,
                 "assets" => get(&f, &assets, Some(&token)).await,
                 "prices" => get(&f, "/markets/prices", None).await,
+                "skills" => get(&f, &skills, Some(&token)).await,
+                "standings" => get(&f, &standings, Some(&token)).await,
+                "stations" => get(&f, &format!("/universe/stations/{STATION}"), None).await,
                 _ => get(&f, &structure, Some(&token)).await,
             };
             assert_eq!(answer.status, status, "{route}");
@@ -525,5 +533,78 @@ async fn the_market_prices_conform_with_and_without_an_average() {
             .iter()
             .any(|p| p.get("average_price").is_none()),
         "the fixture has an item without an average"
+    );
+}
+
+fn narrow_token(f: &Fixture, character: i64) -> String {
+    f.stub
+        .issue_token(
+            character,
+            &eve_stub::TokenOptions {
+                scopes: Some(vec!["esi-universe.read_structures.v1".to_owned()]),
+                ..eve_stub::TokenOptions::default()
+            },
+        )
+        .unwrap()
+}
+
+#[tokio::test]
+async fn the_skill_answers_conform_with_and_without_the_scope() {
+    let f = common::start_unverified().await;
+    let token = f.stub.issue_access_token(ALICE).unwrap();
+    let path = format!("/characters/{ALICE}/skills");
+    conforms("skills", "levels", &get(&f, &path, Some(&token)).await);
+
+    let forbidden = get(&f, &path, Some(&narrow_token(&f, ALICE))).await;
+    assert_eq!(forbidden.status, 403);
+    conforms("skills", "forbidden", &forbidden);
+}
+
+#[tokio::test]
+async fn a_skills_fixture_without_the_active_level_fails_the_conformance_check() {
+    let f = common::start_unverified().await;
+    control(
+        &f,
+        "skills",
+        json!({"character_id": ALICE, "skills": [{"skill_id": 16622, "trained_skill_level": 5}]}),
+    )
+    .await;
+    let token = f.stub.issue_access_token(ALICE).unwrap();
+    let answer = get(&f, &format!("/characters/{ALICE}/skills"), Some(&token)).await;
+
+    let violations = esi_contract::check(
+        &contract("skills"),
+        "levels",
+        Some(answer.status),
+        &answer.headers,
+        answer.body.as_ref(),
+    );
+    assert_eq!(violations.len(), 1);
+    assert!(
+        violations[0].to_string().contains("active_skill_level"),
+        "{}",
+        violations[0]
+    );
+}
+
+#[tokio::test]
+async fn the_standing_answers_conform_with_and_without_the_scope() {
+    let f = common::start_unverified().await;
+    let token = f.stub.issue_access_token(ALICE).unwrap();
+    let path = format!("/characters/{ALICE}/standings");
+    conforms("standings", "list", &get(&f, &path, Some(&token)).await);
+
+    let forbidden = get(&f, &path, Some(&narrow_token(&f, ALICE))).await;
+    assert_eq!(forbidden.status, 403);
+    conforms("standings", "forbidden", &forbidden);
+}
+
+#[tokio::test]
+async fn a_station_conforms() {
+    let f = common::start_unverified().await;
+    conforms(
+        "stations",
+        "station",
+        &get(&f, &format!("/universe/stations/{STATION}"), None).await,
     );
 }

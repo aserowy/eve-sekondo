@@ -65,7 +65,9 @@ async fn a_valid_token_yields_the_character() {
             "esi-markets.read_character_orders.v1",
             "esi-universe.read_structures.v1",
             "esi-wallet.read_character_wallet.v1",
-            "esi-assets.read_assets.v1"
+            "esi-assets.read_assets.v1",
+            "esi-skills.read_skills.v1",
+            "esi-characters.read_standings.v1"
         ]
     );
     assert!(verified.missing_scopes().is_empty());
@@ -91,7 +93,9 @@ async fn scp_is_read_as_a_string_an_array_or_absent() {
         [
             "esi-markets.read_character_orders.v1",
             "esi-wallet.read_character_wallet.v1",
-            "esi-assets.read_assets.v1"
+            "esi-assets.read_assets.v1",
+            "esi-skills.read_skills.v1",
+            "esi-characters.read_standings.v1"
         ]
     );
 
@@ -105,7 +109,7 @@ async fn scp_is_read_as_a_string_an_array_or_absent() {
         .await
         .unwrap();
     assert!(verified.scopes.is_empty());
-    assert_eq!(verified.missing_scopes().len(), 4);
+    assert_eq!(verified.missing_scopes().len(), 6);
 }
 
 #[tokio::test]

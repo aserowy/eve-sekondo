@@ -15,6 +15,9 @@ pub enum Event {
     /// A wallet or assets poll, or a price refresh, changed what a character is worth. The wealth
     /// views listen to it and to `OrdersUpdated`, which is also what a lagging subscriber gets.
     WealthUpdated,
+    /// A skills or standings poll, or the lookup of a station owner, changed a fee of a
+    /// character. Only the orders page's character entries listen to it.
+    FeesUpdated,
 }
 
 impl Event {
@@ -24,6 +27,7 @@ impl Event {
             Self::OrdersUpdated => "orders-updated",
             Self::MarketUpdated => "market-updated",
             Self::WealthUpdated => "wealth-updated",
+            Self::FeesUpdated => "fees-updated",
         }
     }
 }

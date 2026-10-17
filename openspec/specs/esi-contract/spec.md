@@ -17,7 +17,8 @@ the token request (authorization code grant and refresh grant), the JWKS documen
 access token JWT, the character orders route, the names lookup (success, and the 404 that one unknown
 ID causes), the structure lookup (success and 403), the public market orders of a region for one item
 (with the `X-Pages` header), the character wallet balance, the character assets (with the `X-Pages`
-header) and the market prices. A variant that cannot be provoked against the
+header), the market prices, the character skills, the character standings and the station lookup. A
+variant that cannot be provoked against the
 real services without harm (420, 429, 5xx) SHALL be marked as not verifiable against EVE, with a
 reason.
 
@@ -35,6 +36,11 @@ reason.
 #### Scenario: Wealth calls are contracted
 
 - **WHEN** the stub serves the wallet, assets or market prices route
+- **THEN** the contract coverage test finds a contract for it
+
+#### Scenario: Fee calls are contracted
+
+- **WHEN** the stub serves the skills, standings or station route
 - **THEN** the contract coverage test finds a contract for it
 
 ### Requirement: The stub conforms to the contracts
@@ -58,9 +64,12 @@ verifiable variant's request to real SSO and ESI with the same `User-Agent` and
 decode with the app's own response handling. The character's orders SHALL contain at least one sell
 order and at least one buy order, otherwise the verification fails and says which side is missing.
 The character's assets SHALL contain at least one asset, otherwise the verification fails and says
-that an asset is needed.
+that an asset is needed. The character's standings SHALL contain at least one NPC corporation or
+faction standing, otherwise the verification fails and says that a standing is needed.
 The market orders call SHALL be verified for an item and region taken from the character's own orders,
-so that sell and buy orders of the real market are checked.
+so that sell and buy orders of the real market are checked. The station lookup SHALL be verified for
+an NPC station taken from the character's own orders, or for a fixed well-known NPC station when all
+of its orders are in structures.
 
 #### Scenario: Real ESI omits a field the contract requires
 
@@ -81,6 +90,11 @@ so that sell and buy orders of the real market are checked.
 
 - **WHEN** the verification character has no assets
 - **THEN** the verification fails and says that an asset is needed
+
+#### Scenario: No standing to verify
+
+- **WHEN** the verification character has no NPC standings
+- **THEN** the verification fails and says that a standing is needed
 
 #### Scenario: A login answer with a wrong state
 
@@ -188,4 +202,21 @@ SHALL need no token.
 #### Scenario: Token without the wallet scope
 
 - **WHEN** the stub receives a wallet request with a token that lacks the wallet scope
+- **THEN** it answers 403
+
+### Requirement: The stub serves the fee calls
+
+The stub SHALL serve the character skills, the character standings and the station lookup, with
+controls to set the skills and the standings per character and the owner per station, and every
+answer SHALL satisfy its contract variant. The skills and standings calls SHALL require a token with
+the matching scope and SHALL answer 403 otherwise. The station call SHALL need no token.
+
+#### Scenario: Skills fixture drifts from the contract
+
+- **WHEN** a skills fixture of the stub omits a field the contract marks as always present
+- **THEN** the stub conformance test fails and names the fixture and the field
+
+#### Scenario: Token without the standings scope
+
+- **WHEN** the stub receives a standings request with a token that lacks the standings scope
 - **THEN** it answers 403

@@ -36,6 +36,8 @@ pub fn default_characters() -> Vec<Character> {
         "esi-universe.read_structures.v1",
         "esi-wallet.read_character_wallet.v1",
         "esi-assets.read_assets.v1",
+        "esi-skills.read_skills.v1",
+        "esi-characters.read_standings.v1",
     ]
     .map(str::to_owned)
     .into();
@@ -104,7 +106,7 @@ pub const ESI_EXPIRES_SECONDS: u64 = 1200;
 #[derive(Clone, Debug)]
 pub struct EsiFailure {
     /// Only calls to this route fail (`orders`, `names`, `structures`, `market`, `wallet`,
-    /// `assets`, `prices`); `None`: any route.
+    /// `assets`, `prices`, `skills`, `standings`, `stations`); `None`: any route.
     pub route: Option<String>,
     pub remaining: u32,
     pub status: u16,
@@ -165,6 +167,12 @@ pub struct Inner {
     pub wallets: HashMap<i64, f64>,
     /// Fixture assets per character, as ESI's JSON.
     pub assets: HashMap<i64, MarketFixture>,
+    /// Fixture skill list per character, as ESI's JSON objects.
+    pub skills: HashMap<i64, Vec<Value>>,
+    /// Fixture standings per character, as ESI's JSON objects.
+    pub standings: HashMap<i64, Vec<Value>>,
+    /// Owner corporation per NPC station.
+    pub station_owners: HashMap<i64, i64>,
     /// Fixture market prices, as ESI's JSON.
     pub prices: Vec<Value>,
     /// Seconds ahead that ESI's `Expires` header points.
@@ -173,6 +181,8 @@ pub struct Inner {
     pub esi_calls: HashMap<&'static str, u64>,
     /// The IDs of every `/universe/names` request, in order.
     pub names_requests: Vec<Vec<i64>>,
+    /// The ID of every `/universe/stations/{id}` request, in order.
+    pub station_requests: Vec<i64>,
     pub esi_requests: Vec<EsiRequestRecord>,
     pub structures_denied: HashSet<i64>,
     pub esi_failure: Option<EsiFailure>,
@@ -274,10 +284,14 @@ impl Inner {
             market_orders: HashMap::new(),
             wallets: default_wallets(),
             assets: default_assets(),
+            skills: default_skills(),
+            standings: default_standings(),
+            station_owners: default_station_owners(),
             prices: default_prices(),
             esi_expires_secs: ESI_EXPIRES_SECONDS,
             esi_calls: HashMap::new(),
             names_requests: Vec::new(),
+            station_requests: Vec::new(),
             esi_requests: Vec::new(),
             structures_denied: HashSet::new(),
             esi_failure: None,
@@ -404,10 +418,14 @@ impl Inner {
         self.market_orders.clear();
         self.wallets = default_wallets();
         self.assets = default_assets();
+        self.skills = default_skills();
+        self.standings = default_standings();
+        self.station_owners = default_station_owners();
         self.prices = default_prices();
         self.esi_expires_secs = ESI_EXPIRES_SECONDS;
         self.esi_calls.clear();
         self.names_requests.clear();
+        self.station_requests.clear();
         self.esi_requests.clear();
         self.structures_denied.clear();
         self.esi_failure = None;
@@ -534,4 +552,54 @@ fn default_prices() -> Vec<Value> {
         json!({"type_id": 35, "average_price": 10.25, "adjusted_price": 9.9}),
         json!({"type_id": 36, "adjusted_price": 70.0}),
     ]
+}
+
+fn skill(skill_id: i64, active: i64, trained: i64) -> Value {
+    json!({
+        "skill_id": skill_id, "active_skill_level": active, "trained_skill_level": trained,
+        "skillpoints_in_skill": 256000,
+    })
+}
+
+/// Accounting (16622) and Broker Relations (3446), with Connections (3359) as one that is not
+/// read. Alice: Accounting trained to 5 but active 4, Broker Relations 5. Bob: Accounting 3,
+/// Broker Relations 2. Carol: nothing.
+fn default_skills() -> HashMap<i64, Vec<Value>> {
+    HashMap::from([
+        (
+            90000001,
+            vec![skill(16622, 4, 5), skill(3446, 5, 5), skill(3359, 3, 3)],
+        ),
+        (90000002, vec![skill(16622, 3, 3), skill(3446, 2, 2)]),
+        (90000003, vec![]),
+    ])
+}
+
+fn standing(from_id: i64, from_type: &str, standing: f64) -> Value {
+    json!({"from_id": from_id, "from_type": from_type, "standing": standing})
+}
+
+/// Alice: Caldari Navy (1000035) 1.5, Caldari State (500001) 2.0 and an agent. The others none.
+fn default_standings() -> HashMap<i64, Vec<Value>> {
+    HashMap::from([
+        (
+            90000001,
+            vec![
+                standing(3009841, "agent", 3.2),
+                standing(1000035, "npc_corp", 1.5),
+                standing(500001, "faction", 2.0),
+            ],
+        ),
+        (90000002, vec![]),
+        (90000003, vec![]),
+    ])
+}
+
+/// The owners of the stations in `NAMES`, as the static data export lists them.
+fn default_station_owners() -> HashMap<i64, i64> {
+    HashMap::from([
+        (60003760, 1000035),
+        (60008494, 1000086),
+        (60011866, 1000120),
+    ])
 }

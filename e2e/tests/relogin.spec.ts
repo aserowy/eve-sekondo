@@ -59,7 +59,7 @@ test('reduced scopes at refresh show the badge', async ({ page }) => {
   await expect(page.locator('#character-90000001').getByText('Needs re-login')).toBeVisible();
 });
 
-test('a character linked with the old two scopes shows the badge until it logs in with four', async ({ page }) => {
+test('a character linked with the old two scopes shows the badge until it logs in with six', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
   await openCharacters(page);
   const alice = page.locator('#character-90000001');
@@ -80,6 +80,8 @@ test('a character linked with the old two scopes shows the badge until it logs i
       'esi-universe.read_structures.v1',
       'esi-wallet.read_character_wallet.v1',
       'esi-assets.read_assets.v1',
+      'esi-skills.read_skills.v1',
+      'esi-characters.read_standings.v1',
     ],
   });
   await alice.getByRole('link', { name: 'Log in again' }).click();

@@ -267,6 +267,11 @@ async fn a_passing_verification_records_the_fingerprint_and_the_variants() {
         "assets/items",
         "assets/forbidden",
         "prices/list",
+        "skills/levels",
+        "skills/forbidden",
+        "standings/list",
+        "standings/forbidden",
+        "stations/station",
     ] {
         assert!(record.variants.iter().any(|v| v == variant), "{variant}");
     }
@@ -632,4 +637,76 @@ async fn the_wallet_assets_and_prices_are_each_asked_once_and_the_foreign_ones_a
         "own first page, foreign refused"
     );
     assert_eq!(w.stub.esi_calls("prices"), 1);
+}
+
+#[tokio::test]
+async fn a_character_without_an_npc_standing_is_told_so_and_the_record_stays() {
+    let w = world(Person::LogsIn).await;
+    let old = w.write_old_record();
+    w.control(
+        "standings",
+        json!({"character_id": ALICE, "standings": [
+            {"from_id": 3009841, "from_type": "agent", "standing": 3.2},
+        ]}),
+    )
+    .await;
+
+    let (result, output) = w.verify().await;
+
+    assert!(result.is_err());
+    assert!(output.contains("a standing is needed"), "{output}");
+    assert_eq!(w.record(), Some(old));
+}
+
+#[tokio::test]
+async fn the_station_of_an_npc_order_is_looked_up_and_jita_is_the_fallback() {
+    let w = world(Person::LogsIn).await;
+    w.control(
+        "orders",
+        json!({"character_id": ALICE, "orders": [
+            order_at(8001, false, STRUCTURE),
+            order_at(8002, true, 60008494),
+        ]}),
+    )
+    .await;
+    let (result, output) = w.verify().await;
+    result.unwrap_or_else(|e| panic!("{e}\n{output}"));
+    assert_eq!(w.stub.esi_calls("stations"), 1);
+    assert_eq!(w.stub.station_requests(), [60008494]);
+
+    let w = world(Person::LogsIn).await;
+    w.control(
+        "orders",
+        json!({"character_id": ALICE, "orders": [
+            order_at(8001, false, STRUCTURE),
+            order_at(8002, true, STRUCTURE),
+        ]}),
+    )
+    .await;
+    let (result, output) = w.verify().await;
+    result.unwrap_or_else(|e| panic!("{e}\n{output}"));
+    assert_eq!(w.stub.station_requests(), [60003760], "the fallback");
+}
+
+#[tokio::test]
+async fn no_skill_level_or_standing_is_printed() {
+    let w = world(Person::LogsIn).await;
+    w.control(
+        "standings",
+        json!({"character_id": ALICE, "standings": [
+            {"from_id": 1000035, "from_type": "npc_corp", "standing": 7.7654321},
+        ]}),
+    )
+    .await;
+
+    let (result, output) = w.verify().await;
+
+    result.unwrap_or_else(|e| panic!("{e}\n{output}"));
+    assert!(!output.contains("7.7654321"), "{output}");
+}
+
+fn order_at(id: i64, buy: bool, location: i64) -> Value {
+    let mut o = order(id, buy);
+    o["location_id"] = json!(location);
+    o
 }

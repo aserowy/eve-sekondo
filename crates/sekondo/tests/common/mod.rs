@@ -407,6 +407,7 @@ pub struct PollEnv {
     pub poller: Arc<sekondo::poller::Poller>,
     pub market: Arc<sekondo::market::MarketPoller>,
     pub wealth: Arc<sekondo::wealth_poller::WealthPoller>,
+    pub fees: Arc<sekondo::fee_poller::FeePoller>,
     pub prices: Arc<sekondo::prices::PricePoller>,
     pub events: Arc<sekondo::events::InProcessBus>,
     sso: Arc<sekondo::sso::SsoClient>,
@@ -482,6 +483,13 @@ impl PollEnv {
             clock.clone(),
             interval,
         ));
+        let fees = Arc::new(sekondo::fee_poller::FeePoller::new(
+            pool.clone(),
+            tokens.clone(),
+            esi.clone(),
+            events.clone(),
+            clock.clone(),
+        ));
         let prices = Arc::new(sekondo::prices::PricePoller::new(
             pool.clone(),
             esi.clone(),
@@ -498,6 +506,7 @@ impl PollEnv {
             poller,
             market,
             wealth,
+            fees,
             prices,
             events,
             sso,

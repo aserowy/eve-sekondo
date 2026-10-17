@@ -12,6 +12,8 @@ pub mod dashboard;
 pub mod decision;
 pub mod esi;
 pub mod events;
+pub mod fee_poller;
+pub mod fees;
 pub mod format;
 pub mod freshness;
 pub mod headers;

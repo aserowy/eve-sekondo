@@ -1,6 +1,6 @@
 {
-  "fingerprint": "704071bc1737a92f840a5f32a9720675566cfff7fa29be2a26546146d3317d62",
-  "verified_at": "2026-10-17T04:53:39.622253002Z",
+  "fingerprint": "aeb15c58333f2899806cf2b3efa451ccf6eb5df1aaa9be9faabdc60377f8aefc",
+  "verified_at": "2026-10-17T09:33:48.261663064Z",
   "variants": [
     "assets/forbidden",
     "assets/items",
@@ -13,6 +13,11 @@
     "orders/buy-orders",
     "orders/sell-orders",
     "prices/list",
+    "skills/forbidden",
+    "skills/levels",
+    "standings/forbidden",
+    "standings/list",
+    "stations/station",
     "structures/forbidden",
     "structures/found",
     "token/access-token-claims",

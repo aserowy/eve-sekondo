@@ -228,7 +228,7 @@ async fn unlink_with_a_foreign_origin_or_another_sessions_token_is_forbidden(poo
 }
 
 #[sqlx::test]
-async fn unlinking_a_character_removes_its_wealth_data_and_keeps_the_others(pool: PgPool) {
+async fn unlinking_a_character_removes_its_wealth_and_fee_data_and_keeps_the_others(pool: PgPool) {
     let e = env(pool).await;
     let (browser, _) = e.alice_and_bob().await;
     for character in [ALICE, BOB] {
@@ -240,6 +240,10 @@ async fn unlinking_a_character_removes_its_wealth_data_and_keeps_the_others(pool
              VALUES ($1, $1, 34, 60003760, 'station', 'Hangar', 1, false, false)",
             "INSERT INTO wealth_sync (character_id, kind, next_poll_at) VALUES ($1, 'wallet', now())",
             "INSERT INTO wealth_sync (character_id, kind, next_poll_at) VALUES ($1, 'assets', now())",
+            "INSERT INTO character_skills (character_id, skill_id, active_level) VALUES ($1, 16622, 4)",
+            "INSERT INTO character_standings (character_id, from_id, from_type, standing) \
+             VALUES ($1, 1000035, 'npc_corp', 1.5)",
+            "INSERT INTO fee_sync (character_id, kind, next_poll_at) VALUES ($1, 'skills', now())",
         ] {
             sqlx::query(statement)
                 .bind(character)
@@ -257,6 +261,9 @@ async fn unlinking_a_character_removes_its_wealth_data_and_keeps_the_others(pool
         ("inventory_values", 1),
         ("current_assets", 1),
         ("wealth_sync", 2),
+        ("character_skills", 1),
+        ("character_standings", 1),
+        ("fee_sync", 1),
     ] {
         assert_eq!(e.count(table).await, expected, "{table}");
         let gone: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(

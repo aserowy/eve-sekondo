@@ -516,3 +516,88 @@ async fn a_429_on_the_wallet_pauses_the_wallet_group_and_a_420_pauses_everything
         Err(EsiError::Deferred { .. })
     ));
 }
+
+#[tokio::test]
+async fn skills_carry_the_active_level_and_their_expiry() {
+    let h = common::esi_harness().await;
+    let token = h.token(90000001);
+    h.control("esi-expires", json!({"seconds": 300})).await;
+
+    let response = h.client.skills(90000001, &token).await.unwrap();
+
+    let level = |id| {
+        response
+            .body
+            .skills
+            .iter()
+            .find(|s| s.skill_id == id)
+            .map(|s| s.active_skill_level)
+    };
+    assert_eq!(level(16622), Some(4), "active 4 of trained 5");
+    assert_eq!(level(3446), Some(5));
+    assert_eq!(level(99999), None);
+    let ahead = response.expires_at.unwrap() - h.clock.now();
+    assert!(ahead >= Duration::seconds(299), "{ahead}");
+}
+
+#[tokio::test]
+async fn a_standing_is_kept_as_the_decimal_text_with_every_digit() {
+    let h = common::esi_harness().await;
+    let token = h.token(90000001);
+    h.control(
+        "standings",
+        json!({"character_id": 90000001, "standings": [
+            {"from_id": 1000035, "from_type": "npc_corp", "standing": 0.07999999821186066},
+            {"from_id": 500001, "from_type": "faction", "standing": -5.0},
+            {"from_id": 500002, "from_type": "faction", "standing": 2.0},
+        ]}),
+    )
+    .await;
+
+    let response = h.client.standings(90000001, &token).await.unwrap();
+
+    let texts: Vec<&str> = response.body.iter().map(|s| s.standing.as_str()).collect();
+    assert_eq!(texts, ["0.07999999821186066", "-5", "2"]);
+    assert_eq!(response.body[0].from_type, "npc_corp");
+    assert_eq!(response.body[0].from_id, 1000035);
+    assert!(response.expires_at.is_some());
+}
+
+#[tokio::test]
+async fn a_station_names_its_owner_without_a_token() {
+    let h = common::esi_harness().await;
+    assert_eq!(h.client.station(60003760).await.unwrap().owner, 1000035);
+    assert!(matches!(
+        h.client.station(60000001).await,
+        Err(EsiError::NotFound)
+    ));
+}
+
+#[tokio::test]
+async fn the_fee_calls_map_errors_like_the_orders_call() {
+    let h = common::esi_harness().await;
+    let foreign = h.token(90000002);
+    assert!(matches!(
+        h.client.skills(90000001, &foreign).await,
+        Err(EsiError::Forbidden)
+    ));
+    assert!(matches!(
+        h.client.standings(90000001, &foreign).await,
+        Err(EsiError::Forbidden)
+    ));
+
+    let token = h.token(90000001);
+    for route in ["skills", "standings", "stations"] {
+        h.control("esi-fail-next", json!({"route": route, "status": 503}))
+            .await;
+        let broken = match route {
+            "skills" => h.client.skills(90000001, &token).await.map(|_| ()),
+            "standings" => h.client.standings(90000001, &token).await.map(|_| ()),
+            _ => h.client.station(60003760).await.map(|_| ()),
+        };
+        assert!(
+            matches!(broken, Err(EsiError::Temporary(_))),
+            "{route}: {broken:?}"
+        );
+    }
+}

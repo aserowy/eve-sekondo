@@ -485,6 +485,90 @@ pub fn assets() -> Call {
     }
 }
 
+/// The skills of a character. Only the active level is read: it is the one that applies.
+pub fn skills() -> Call {
+    let mut variants = vec![
+        variant(
+            "levels",
+            StatusSpec::Exact(200),
+            char_route_headers(true),
+            json_object(vec![field(
+                "skills",
+                Ty::array_of(Ty::Object(vec![
+                    field("skill_id", Ty::Int, Always),
+                    field("active_skill_level", Ty::Int, Always),
+                ])),
+                Always,
+            )]),
+        ),
+        variant(
+            "forbidden",
+            StatusSpec::Exact(403),
+            char_route_headers(false),
+            error_body(),
+        ),
+    ];
+    variants.extend(esi_failure_variants());
+    Call {
+        name: "skills",
+        routes: vec![Route {
+            method: "GET",
+            path: "/characters/{id}/skills",
+        }],
+        variants,
+    }
+}
+
+/// The standings of a character towards agents, NPC corporations and factions.
+pub fn standings() -> Call {
+    let mut variants = vec![
+        variant(
+            "list",
+            StatusSpec::Exact(200),
+            char_route_headers(true),
+            BodySpec::Json(Ty::array_of(Ty::Object(vec![
+                field("from_id", Ty::Int, Always),
+                field("from_type", Ty::Str, Always),
+                field("standing", Ty::Number, Always),
+            ]))),
+        ),
+        variant(
+            "forbidden",
+            StatusSpec::Exact(403),
+            char_route_headers(false),
+            error_body(),
+        ),
+    ];
+    variants.extend(esi_failure_variants());
+    Call {
+        name: "standings",
+        routes: vec![Route {
+            method: "GET",
+            path: "/characters/{id}/standings",
+        }],
+        variants,
+    }
+}
+
+/// An NPC station. Public; only its owner corporation is read.
+pub fn stations() -> Call {
+    let mut variants = vec![variant(
+        "station",
+        StatusSpec::Exact(200),
+        esi_success_headers(),
+        json_object(vec![field("owner", Ty::Int, Always)]),
+    )];
+    variants.extend(esi_failure_variants());
+    Call {
+        name: "stations",
+        routes: vec![Route {
+            method: "GET",
+            path: "/universe/stations/{id}",
+        }],
+        variants,
+    }
+}
+
 /// ESI's market prices for every item. Public; an item may have no average.
 pub fn prices() -> Call {
     let mut variants = vec![variant(
@@ -521,6 +605,9 @@ pub fn contracts() -> Vec<Call> {
         wallet(),
         assets(),
         prices(),
+        skills(),
+        standings(),
+        stations(),
     ]
 }
 
@@ -658,6 +745,9 @@ mod tests {
             wallet(),
             assets(),
             prices(),
+            skills(),
+            standings(),
+            stations(),
         ] {
             for name in ["error-limited", "rate-limited", "server-error"] {
                 let v = call.variant(name).unwrap();
@@ -1184,6 +1274,92 @@ mod tests {
     }
 
     #[test]
+    fn skills_carry_the_active_level() {
+        let call = skills();
+        let body = json!({"skills": [
+            {"skill_id": 16622, "active_skill_level": 4, "trained_skill_level": 5, "skillpoints_in_skill": 1},
+        ], "total_sp": 1});
+        assert!(
+            problems(
+                &call,
+                "levels",
+                Some(200),
+                &char_ok("char-skills"),
+                Some(body)
+            )
+            .is_empty()
+        );
+        let broken = json!({"skills": [{"skill_id": 16622, "trained_skill_level": 5}]});
+        assert_eq!(
+            problems(
+                &call,
+                "levels",
+                Some(200),
+                &char_ok("char-skills"),
+                Some(broken)
+            ),
+            ["$.skills[0].active_skill_level is missing but always present"]
+        );
+        assert!(
+            problems(
+                &call,
+                "forbidden",
+                Some(403),
+                &char_forbidden("char-skills"),
+                Some(json!({"error": "forbidden"}))
+            )
+            .is_empty()
+        );
+        assert_eq!(call.routes[0].path, "/characters/{id}/skills");
+    }
+
+    #[test]
+    fn standings_carry_kind_and_value() {
+        let call = standings();
+        let body = json!([{"from_id": 1000035, "from_type": "npc_corp", "standing": 1.5}]);
+        assert!(
+            problems(
+                &call,
+                "list",
+                Some(200),
+                &char_ok("char-standings"),
+                Some(body)
+            )
+            .is_empty()
+        );
+        let broken = json!([{"from_id": 1000035, "from_type": "npc_corp"}]);
+        assert_eq!(
+            problems(
+                &call,
+                "list",
+                Some(200),
+                &char_ok("char-standings"),
+                Some(broken)
+            ),
+            ["$[0].standing is missing but always present"]
+        );
+        assert_eq!(call.routes[0].path, "/characters/{id}/standings");
+    }
+
+    #[test]
+    fn a_station_needs_its_owner() {
+        let call = stations();
+        let body = json!({"station_id": 60003760, "name": "Jita", "owner": 1000035});
+        assert!(problems(&call, "station", Some(200), &esi_ok(), Some(body)).is_empty());
+        assert_eq!(
+            problems(
+                &call,
+                "station",
+                Some(200),
+                &esi_ok(),
+                Some(json!({"name": "x"}))
+            ),
+            ["$.owner is missing but always present"]
+        );
+        assert_eq!(call.routes[0].path, "/universe/stations/{id}");
+    }
+
+    #[test]
     fn prices_may_lack_an_average_and_need_no_token() {
         let call = prices();
         let body = json!([
@@ -1325,7 +1501,7 @@ mod tests {
         assert!(problems(&call, "server-error", Some(502), &HeaderMap::new(), None).is_empty());
     }
 
-    const ALL_ROUTES: [(&str, &str); 11] = [
+    const ALL_ROUTES: [(&str, &str); 14] = [
         ("GET", "/oauth/jwks"),
         ("GET", "/v2/oauth/authorize"),
         ("GET", "/v2/oauth/authorize/select"),
@@ -1336,6 +1512,9 @@ mod tests {
         ("GET", "/markets/{region_id}/orders"),
         ("GET", "/characters/{id}/wallet"),
         ("GET", "/characters/{id}/assets"),
+        ("GET", "/characters/{id}/skills"),
+        ("GET", "/characters/{id}/standings"),
+        ("GET", "/universe/stations/{id}"),
         ("GET", "/markets/prices"),
     ];
 

@@ -248,3 +248,69 @@ async fn the_stream_closes_when_the_session_outlives_its_lifetime(pool: PgPool) 
     let (_, ended) = read_for(&mut stream, Duration::from_secs(3)).await;
     assert!(ended);
 }
+
+#[sqlx::test]
+async fn a_skills_poll_that_changes_a_fee_sends_fees_updated_without_any_data(pool: PgPool) {
+    let app = app(pool).await;
+    let alice = signed_in(&app, ALICE).await;
+    app.state.poller.poll_character(ALICE).await;
+    let mut stream = open_stream(&app, &alice).await;
+
+    app.state
+        .fees
+        .poll(ALICE, sekondo::fee_poller::Kind::Skills)
+        .await;
+
+    let (text, _) = read_for(&mut stream, Duration::from_millis(600)).await;
+    assert!(
+        text.contains("event: fees-updated\ndata: fees-updated\n"),
+        "{text:?}"
+    );
+    for secret in ["16622", "accounting", "3.375", "standing"] {
+        assert!(
+            !text.to_lowercase().contains(secret),
+            "{secret} in {text:?}"
+        );
+    }
+}
+
+#[sqlx::test]
+async fn a_skills_poll_that_changes_nothing_sends_no_fees_updated(pool: PgPool) {
+    let app = app(pool).await;
+    let alice = signed_in(&app, ALICE).await;
+    app.state.poller.poll_character(ALICE).await;
+    app.state
+        .fees
+        .poll(ALICE, sekondo::fee_poller::Kind::Skills)
+        .await;
+    let mut stream = open_stream(&app, &alice).await;
+
+    app.state
+        .fees
+        .poll(ALICE, sekondo::fee_poller::Kind::Skills)
+        .await;
+
+    let (text, _) = read_for(&mut stream, Duration::from_millis(600)).await;
+    assert!(!text.contains("fees-updated"), "{text:?}");
+}
+
+#[sqlx::test]
+async fn fees_updated_stays_within_the_account(pool: PgPool) {
+    let app = app(pool).await;
+    let alice = signed_in(&app, ALICE).await;
+    let bob = signed_in(&app, BOB).await;
+    app.state.poller.poll_character(ALICE).await;
+    app.state.poller.poll_character(BOB).await;
+    let mut alice_stream = open_stream(&app, &alice).await;
+    let mut bob_stream = open_stream(&app, &bob).await;
+
+    app.state
+        .fees
+        .poll(ALICE, sekondo::fee_poller::Kind::Skills)
+        .await;
+
+    let (alice_text, _) = read_for(&mut alice_stream, Duration::from_millis(600)).await;
+    let (bob_text, _) = read_for(&mut bob_stream, Duration::from_millis(600)).await;
+    assert!(alice_text.contains("event: fees-updated"), "{alice_text:?}");
+    assert!(!bob_text.contains("fees-updated"), "{bob_text:?}");
+}

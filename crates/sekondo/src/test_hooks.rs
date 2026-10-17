@@ -98,3 +98,12 @@ pub async fn market_poll(State(state): State<AppState>, account: CurrentAccount)
         Err(e) => pages::internal_error(e),
     }
 }
+
+/// Polls the skills and the standings of every character of the signed-in account right now and
+/// looks up the owners of its stations, whatever the schedule says (but not the ESI gate).
+pub async fn fee_poll(State(state): State<AppState>, account: CurrentAccount) -> Response {
+    match state.fees.refresh_account(account.id).await {
+        Ok(()) => "ok".into_response(),
+        Err(e) => pages::internal_error(e),
+    }
+}

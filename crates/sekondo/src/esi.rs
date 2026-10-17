@@ -32,6 +32,9 @@ pub const ROUTE_MARKET: &str = "market";
 pub const ROUTE_WALLET: &str = "wallet";
 pub const ROUTE_ASSETS: &str = "assets";
 pub const ROUTE_PRICES: &str = "prices";
+pub const ROUTE_SKILLS: &str = "skills";
+pub const ROUTE_STANDINGS: &str = "standings";
+pub const ROUTE_STATIONS: &str = "stations";
 
 #[derive(Debug, thiserror::Error)]
 pub enum EsiError {
@@ -110,6 +113,44 @@ pub struct EsiPrice {
     /// ISK in cents, as for orders.
     #[serde(rename = "average_price", default, deserialize_with = "optional_cents")]
     pub average_price_cents: Option<i64>,
+}
+
+/// The skills of a character. ESI also sends totals, which are not read.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct EsiSkills {
+    pub skills: Vec<EsiSkill>,
+}
+
+/// One trained skill. The active level is the one that applies: it differs from the trained level
+/// for Alpha clones and under skill limits.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct EsiSkill {
+    pub skill_id: i64,
+    pub active_skill_level: i16,
+}
+
+/// A standing of a character towards an agent, an NPC corporation or a faction.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct EsiStanding {
+    pub from_id: i64,
+    /// `agent`, `npc_corp` or `faction`.
+    pub from_type: String,
+    /// The decimal text of the reported number: it goes to a `numeric` column as it is, so no
+    /// `f64` arithmetic touches it.
+    #[serde(deserialize_with = "decimal_text")]
+    pub standing: String,
+}
+
+/// An NPC station, with only its owner corporation.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct EsiStation {
+    pub owner: i64,
+}
+
+fn decimal_text<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    // `Display` of an `f64` is the shortest text that reads back as the same number, and never
+    // uses an exponent.
+    Ok(f64::deserialize(d)?.to_string())
 }
 
 fn no_minimum() -> i64 {
@@ -221,6 +262,40 @@ impl EsiClient {
             body: assets,
             expires_at: first.expires_at,
         })
+    }
+
+    /// The skills of a character.
+    pub async fn skills(
+        &self,
+        character_id: i64,
+        token: &SecretString,
+    ) -> Result<EsiResponse<EsiSkills>, EsiError> {
+        let request = self
+            .http
+            .get(self.url(&format!("characters/{character_id}/skills")))
+            .bearer_auth(token.expose_secret());
+        self.fetch(ROUTE_SKILLS, request).await
+    }
+
+    /// The standings of a character towards agents, NPC corporations and factions.
+    pub async fn standings(
+        &self,
+        character_id: i64,
+        token: &SecretString,
+    ) -> Result<EsiResponse<Vec<EsiStanding>>, EsiError> {
+        let request = self
+            .http
+            .get(self.url(&format!("characters/{character_id}/standings")))
+            .bearer_auth(token.expose_secret());
+        self.fetch(ROUTE_STANDINGS, request).await
+    }
+
+    /// An NPC station. Public.
+    pub async fn station(&self, station_id: i64) -> Result<EsiStation, EsiError> {
+        let request = self
+            .http
+            .get(self.url(&format!("universe/stations/{station_id}")));
+        Ok(self.fetch(ROUTE_STATIONS, request).await?.body)
     }
 
     /// ESI's market price of every item. Public.
