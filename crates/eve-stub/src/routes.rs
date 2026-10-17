@@ -21,9 +21,9 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::state::{
-    ACCESS_TOKEN_SECONDS, ASSETS_PAGE_SIZE, EsiFailure, Inner, MARKET_PAGE_SIZE, MarketFixture,
-    NAMES, PendingCode, RefreshRecord, STRUCTURES, Shared, TRANSACTIONS_PAGE_SIZE, now_secs,
-    random_token,
+    ACCESS_TOKEN_SECONDS, ASSETS_PAGE_SIZE, EsiFailure, Inner, MARKET_PAGE_SIZE, MarketFailure,
+    MarketFixture, NAMES, PendingCode, RefreshRecord, STRUCTURES, Shared, TRANSACTIONS_PAGE_SIZE,
+    now_secs, random_token,
 };
 
 macro_rules! method_router {
@@ -60,6 +60,7 @@ eve_routes! {
     ("GET", "/characters/{id}/wallet", character_wallet),
     ("GET", "/characters/{id}/wallet/transactions", character_transactions),
     ("GET", "/characters/{id}/assets", character_assets),
+    ("GET", "/markets/{region_id}/history", market_history),
     ("GET", "/markets/prices", market_prices),
     ("GET", "/characters/{id}/skills", character_skills),
     ("GET", "/characters/{id}/standings", character_standings),
@@ -74,6 +75,8 @@ pub fn router(shared: Shared) -> Router {
         .route("/fail-next-token", post(fail_next_token))
         .route("/orders", post(set_orders))
         .route("/market-orders", post(set_market_orders))
+        .route("/market-history", post(set_market_history))
+        .route("/market-fail", post(set_market_fail))
         .route("/wallet", post(set_wallet))
         .route("/transactions", post(set_transactions))
         .route("/assets", post(set_assets))
@@ -438,6 +441,7 @@ async fn stats(State(shared): State<Shared>) -> Json<Value> {
         "names_calls": calls("names"),
         "structures_calls": calls("structures"),
         "market_calls": calls("market"),
+        "history_calls": calls("history"),
         "wallet_calls": calls("wallet"),
         "assets_calls": calls("assets"),
         "transactions_calls": calls("transactions"),
@@ -744,6 +748,21 @@ async fn market_orders(
         .collect();
     let pages = wanted.len().div_ceil(page_size).max(1);
     let page = query.page.unwrap_or(1).max(1);
+    if let Some(status) = inner
+        .market_failures
+        .iter()
+        .find(|f| f.region_id == region_id && f.type_id.is_none() && f.page == Some(page))
+        .map(|f| f.status)
+    {
+        return injected(status);
+    }
+    if page > pages {
+        return esi_error(
+            &inner,
+            StatusCode::NOT_FOUND,
+            "Requested page does not exist!",
+        );
+    }
     let slice: Vec<&Value> = wanted
         .into_iter()
         .skip((page - 1) * page_size)
@@ -763,6 +782,104 @@ async fn market_orders(
     }
     response_headers.insert("x-pages", pages.to_string().parse().expect("header value"));
     (response_headers, Json(slice)).into_response()
+}
+
+fn injected(status: u16) -> Response {
+    let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    (status, "stub: injected ESI failure").into_response()
+}
+
+#[derive(Deserialize)]
+struct HistoryQuery {
+    type_id: Option<i64>,
+}
+
+/// The market history of a region for one item. Needs no token. Like real ESI, a type without
+/// history is a 200 with an empty list.
+async fn market_history(
+    State(shared): State<Shared>,
+    Path(region_id): Path<i64>,
+    Query(query): Query<HistoryQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let mut inner = shared.lock().unwrap();
+    if let Some(response) = begin_esi_call(&mut inner, "history", &headers) {
+        return response;
+    }
+    let Some(type_id) = query.type_id else {
+        return esi_error(&inner, StatusCode::BAD_REQUEST, "type_id is required");
+    };
+    inner.history_requests.push((region_id, type_id));
+    if let Some(status) = inner
+        .market_failures
+        .iter()
+        .find(|f| f.region_id == region_id && f.type_id == Some(type_id))
+        .map(|f| f.status)
+    {
+        return injected(status);
+    }
+    let days = inner
+        .market_history
+        .get(&(region_id, type_id))
+        .cloned()
+        .unwrap_or_default();
+    (esi_headers(&inner), Json(days)).into_response()
+}
+
+#[derive(Deserialize)]
+struct MarketHistoryBody {
+    region_id: i64,
+    type_id: i64,
+    days: Vec<Value>,
+}
+
+/// Replaces what ESI returns as the market history of an item in a region.
+async fn set_market_history(
+    State(shared): State<Shared>,
+    Json(body): Json<MarketHistoryBody>,
+) -> StatusCode {
+    shared
+        .lock()
+        .unwrap()
+        .market_history
+        .insert((body.region_id, body.type_id), body.days);
+    StatusCode::NO_CONTENT
+}
+
+#[derive(Deserialize)]
+struct MarketFailBody {
+    #[serde(default)]
+    clear: bool,
+    region_id: Option<i64>,
+    page: Option<usize>,
+    type_id: Option<i64>,
+    status: Option<u16>,
+}
+
+/// Makes one region order page (`page`) or one item's history (`type_id`) fail until cleared
+/// (`{"clear": true}`) or reset.
+async fn set_market_fail(
+    State(shared): State<Shared>,
+    Json(body): Json<MarketFailBody>,
+) -> StatusCode {
+    let mut inner = shared.lock().unwrap();
+    if body.clear {
+        inner.market_failures.clear();
+        return StatusCode::NO_CONTENT;
+    }
+    let Some(region_id) = body.region_id else {
+        return StatusCode::BAD_REQUEST;
+    };
+    if body.page.is_none() == body.type_id.is_none() {
+        return StatusCode::BAD_REQUEST;
+    }
+    inner.market_failures.push(MarketFailure {
+        region_id,
+        page: body.page,
+        type_id: body.type_id,
+        status: body.status.unwrap_or(503),
+    });
+    StatusCode::NO_CONTENT
 }
 
 #[derive(Deserialize)]

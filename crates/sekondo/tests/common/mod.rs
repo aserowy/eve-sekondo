@@ -85,6 +85,7 @@ pub fn test_config(pki: &TestPki, dir: &TempDir, port: u16, sso_base_url: &str) 
         token_encryption_key: SecretKey(ENCRYPTION_KEY),
         static_dir: PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/static")),
         order_poll_interval: time::Duration::minutes(20),
+        station_sync: true,
         esi_contact: Some("tests@example.com".to_owned()),
     }
 }
@@ -406,6 +407,8 @@ pub struct PollEnv {
     pub esi: Arc<sekondo::esi::EsiClient>,
     pub poller: Arc<sekondo::poller::Poller>,
     pub market: Arc<sekondo::market::MarketPoller>,
+    pub station: Arc<sekondo::station_book::StationBookPoller>,
+    pub history: Arc<sekondo::station_history::StationHistoryPoller>,
     pub wealth: Arc<sekondo::wealth_poller::WealthPoller>,
     pub fees: Arc<sekondo::fee_poller::FeePoller>,
     pub prices: Arc<sekondo::prices::PricePoller>,
@@ -475,6 +478,19 @@ impl PollEnv {
             clock.clone(),
             time::Duration::minutes(5),
         ));
+        let station = Arc::new(sekondo::station_book::StationBookPoller::new(
+            pool.clone(),
+            esi.clone(),
+            events.clone(),
+            clock.clone(),
+            time::Duration::minutes(5),
+        ));
+        let history = Arc::new(sekondo::station_history::StationHistoryPoller::new(
+            pool.clone(),
+            esi.clone(),
+            events.clone(),
+            clock.clone(),
+        ));
         let wealth = Arc::new(sekondo::wealth_poller::WealthPoller::new(
             pool.clone(),
             tokens.clone(),
@@ -505,6 +521,8 @@ impl PollEnv {
             esi,
             poller,
             market,
+            station,
+            history,
             wealth,
             fees,
             prices,

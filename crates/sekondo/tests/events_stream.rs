@@ -365,3 +365,112 @@ async fn a_transactions_poll_that_stores_nothing_new_sends_no_signal(pool: PgPoo
     let (text, _) = read_for(&mut stream, Duration::from_millis(600)).await;
     assert!(!text.contains("event:"), "{text:?}");
 }
+
+async fn tradable_book(app: &TestApp) {
+    let order = |id: i64, buy: bool, price: f64| {
+        serde_json::json!({
+            "order_id": id, "type_id": 34, "location_id": 60003760, "system_id": 30000142,
+            "is_buy_order": buy, "price": price, "range": "region", "duration": 90,
+            "issued": "2026-10-11T12:00:00Z", "min_volume": 1, "volume_remain": 5,
+            "volume_total": 5,
+        })
+    };
+    let res = app
+        .stub_control(
+            "market-orders",
+            serde_json::json!({"region_id": 10000002, "orders": [order(1, true, 9.0), order(2, false, 10.0)]}),
+        )
+        .await;
+    assert_eq!(res.status(), 204);
+}
+
+#[sqlx::test]
+async fn a_book_refresh_signals_every_account(pool: PgPool) {
+    let app = app(pool).await;
+    let alice = signed_in(&app, ALICE).await;
+    let bob = signed_in(&app, BOB).await;
+    let mut alice_stream = open_stream(&app, &alice).await;
+    let mut bob_stream = open_stream(&app, &bob).await;
+    tradable_book(&app).await;
+
+    app.state.station_book.refresh().await;
+
+    for stream in [&mut alice_stream, &mut bob_stream] {
+        let (text, _) = read_for(stream, Duration::from_millis(600)).await;
+        assert_eq!(
+            text.matches("event: opportunities-updated").count(),
+            1,
+            "{text:?}"
+        );
+    }
+}
+
+#[sqlx::test]
+async fn a_failed_book_refresh_signals_nobody(pool: PgPool) {
+    let app = app(pool).await;
+    let alice = signed_in(&app, ALICE).await;
+    let mut stream = open_stream(&app, &alice).await;
+    tradable_book(&app).await;
+    app.stub_control(
+        "esi-fail-next",
+        serde_json::json!({"route": "market", "status": 503}),
+    )
+    .await;
+
+    app.state.station_book.refresh().await;
+
+    let (text, _) = read_for(&mut stream, Duration::from_millis(600)).await;
+    assert!(!text.contains("opportunities-updated"), "{text:?}");
+}
+
+async fn tradable_in_the_database(app: &TestApp) {
+    for (id, buy) in [(1, true), (2, false)] {
+        sqlx::query(
+            "INSERT INTO station_orders (region_id, station_id, order_id, type_id, is_buy_order, price, volume_remain)
+             VALUES (10000002, 60003760, $1, 34, $2, 10, 5)",
+        )
+        .bind(id)
+        .bind(buy)
+        .execute(&app.state.pool)
+        .await
+        .unwrap();
+    }
+}
+
+#[sqlx::test]
+async fn a_history_pass_that_stored_rows_signals_once_and_an_empty_one_does_not(pool: PgPool) {
+    let app = app(pool).await;
+    let alice = signed_in(&app, ALICE).await;
+    let mut stream = open_stream(&app, &alice).await;
+    tradable_in_the_database(&app).await;
+
+    // No history for item 34: the pass stores nothing.
+    app.state.station_history.tick().await;
+    let (text, _) = read_for(&mut stream, Duration::from_millis(400)).await;
+    assert!(!text.contains("opportunities-updated"), "{text:?}");
+
+    // The next day ESI has history for it.
+    let today = time::OffsetDateTime::now_utc().date();
+    let day = |back: i64| {
+        serde_json::json!({"date": (today - time::Duration::days(back)).to_string(),
+            "average": 5.0, "highest": 6.0, "lowest": 4.0, "order_count": 3, "volume": 100})
+    };
+    app.stub_control(
+        "market-history",
+        serde_json::json!({"region_id": 10000002, "type_id": 34, "days": [day(2), day(1)]}),
+    )
+    .await;
+    sqlx::query("UPDATE history_sync SET next_poll_at = now() - interval '1 minute'")
+        .execute(&app.state.pool)
+        .await
+        .unwrap();
+
+    app.state.station_history.tick().await;
+
+    let (text, _) = read_for(&mut stream, Duration::from_millis(600)).await;
+    assert_eq!(
+        text.matches("event: opportunities-updated").count(),
+        1,
+        "{text:?}"
+    );
+}

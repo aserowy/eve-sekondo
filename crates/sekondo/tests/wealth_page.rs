@@ -518,7 +518,10 @@ async fn stale_assets_alone_count_as_a_warning(pool: PgPool) {
 
     let html = get(&app, &browser, "/wealth/freshness").await;
 
-    assert!(html.contains(&format!("{WARNINGS_BADGE}1</mark>")), "{html}");
+    assert!(
+        html.contains(&format!("{WARNINGS_BADGE}1</mark>")),
+        "{html}"
+    );
 }
 
 #[sqlx::test]

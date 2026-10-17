@@ -80,6 +80,41 @@ pub async fn resolve(
     }
 }
 
+/// Caches the names of public `ids` (item types, say) that are not known yet. Needs no token:
+/// nothing here is a structure. Anything ESI cannot give right now is left for the next call.
+pub async fn resolve_public_names(
+    pool: &PgPool,
+    esi: &EsiClient,
+    ids: impl IntoIterator<Item = i64>,
+    now: OffsetDateTime,
+) {
+    let wanted: BTreeSet<i64> = ids.into_iter().collect();
+    let wanted: Vec<i64> = wanted.into_iter().collect();
+    let known: Vec<i64> = match sqlx::query_scalar(
+        "SELECT id FROM names WHERE id = ANY($1) AND (name IS NOT NULL OR retry_after > $2)",
+    )
+    .bind(&wanted)
+    .bind(now)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(known) => known,
+        Err(e) => {
+            tracing::error!("cannot read the name cache: {e}");
+            return;
+        }
+    };
+    let unknown: Vec<i64> = wanted
+        .into_iter()
+        .filter(|id| !known.contains(id))
+        .collect();
+    for batch in unknown.chunks(NAMES_BATCH) {
+        if !resolve_public(pool, esi, batch, now).await {
+            return;
+        }
+    }
+}
+
 /// Resolves public IDs. ESI fails a whole request for one unknown ID, so a failing batch is
 /// split in halves until the bad IDs stand alone. Returns false when ESI is not available.
 async fn resolve_public(pool: &PgPool, esi: &EsiClient, ids: &[i64], now: OffsetDateTime) -> bool {

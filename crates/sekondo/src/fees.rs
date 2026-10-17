@@ -9,16 +9,41 @@
 use std::collections::HashMap;
 
 use sqlx::{PgExecutor, PgPool};
+use time::OffsetDateTime;
 use uuid::Uuid;
+
+use crate::esi::{EsiClient, EsiError};
 
 /// ESI's skill IDs of the two skills that matter.
 pub const ACCOUNTING: i64 = 16622;
 pub const BROKER_RELATIONS: i64 = 3446;
 
-/// The rates query as one literal, so that [`FEES_SQL`] can be built from it with `concat!`.
-macro_rules! fee_rates_sql {
+/// The locations of the current orders, one row per (character, location). `$1` is the character
+/// IDs and `$2` the account the characters must belong to (`NULL`: any).
+macro_rules! order_locations_sql {
     () => {
-        "
+        "SELECT DISTINCT o.character_id, o.location_id
+            FROM current_orders o
+            JOIN characters c ON c.character_id = o.character_id
+            WHERE o.character_id = ANY($1) AND ($2::uuid IS NULL OR c.account_id = $2)"
+    };
+}
+
+/// One fixed location (`$3`) for every character of `$1` that belongs to the account `$2`.
+macro_rules! fixed_location_sql {
+    () => {
+        "SELECT c.character_id, $3::bigint AS location_id
+            FROM characters c
+            WHERE c.character_id = ANY($1) AND ($2::uuid IS NULL OR c.account_id = $2)"
+    };
+}
+
+/// The rates query as one literal, so that [`FEES_SQL`] can be built from it with `concat!`. It
+/// works out the rates for the (character, location) rows of `$locations`.
+macro_rules! fee_rates_sql {
+    ($locations:expr) => {
+        concat!(
+            "
         SELECT l.character_id, l.location_id, l.is_structure,
                l.accounting, l.broker_relations, l.faction_standing, l.corp_standing,
                CASE WHEN l.accounting IS NOT NULL THEN 7.5 * (1 - 0.11 * l.accounting) END AS sales_tax,
@@ -47,10 +72,9 @@ macro_rules! fee_rates_sql {
                              AND so.owner_id IS NOT NULL
                         THEN COALESCE(cs.standing, 0)
                    END AS corp_standing
-            FROM (SELECT DISTINCT o.character_id, o.location_id
-                  FROM current_orders o
-                  JOIN characters c ON c.character_id = o.character_id
-                  WHERE o.character_id = ANY($1) AND ($2::uuid IS NULL OR c.account_id = $2)) loc
+            FROM (",
+            $locations,
+            ") loc
             LEFT JOIN fee_sync skills_sync
                    ON skills_sync.character_id = loc.character_id AND skills_sync.kind = 'skills'
             LEFT JOIN fee_sync standings_sync
@@ -69,6 +93,7 @@ macro_rules! fee_rates_sql {
                   AND cs.from_id = so.owner_id
         ) l
 "
+        )
     };
 }
 
@@ -94,15 +119,32 @@ pub const FEES_SQL: &str = concat!(
                (((1 + f.broker_fee / 100) / (1 - f.broker_fee / 100 - f.sales_tax / 100) - 1) * 100)::text
            END AS min_margin
     FROM (",
-    fee_rates_sql!(),
+    fee_rates_sql!(order_locations_sql!()),
     ") f
     ORDER BY f.character_id, f.location_id"
+);
+
+/// Like [`FEES_SQL`], for one fixed location (`$3`) instead of the locations of the current
+/// orders: what the characters pay there whether or not they have an order there.
+const LOCATION_FEES_SQL: &str = concat!(
+    "
+    SELECT f.character_id, f.location_id, f.is_structure,
+           f.accounting, f.broker_relations,
+           f.faction_standing::text AS faction_standing, f.corp_standing::text AS corp_standing,
+           f.sales_tax::text AS sales_tax, f.broker_fee::text AS broker_fee,
+           CASE WHEN f.broker_fee IS NOT NULL AND f.sales_tax IS NOT NULL THEN
+               (((1 + f.broker_fee / 100) / (1 - f.broker_fee / 100 - f.sales_tax / 100) - 1) * 100)::text
+           END AS min_margin
+    FROM (",
+    fee_rates_sql!(fixed_location_sql!()),
+    ") f
+    ORDER BY f.character_id"
 );
 
 /// The rates part of [`FEES_SQL`], with its `$1` and `$2`: one row per (character, location) of the
 /// current orders with `sales_tax` and `broker_fee` as `numeric` percent (and the inputs they are
 /// worked out from). The orders listing joins it to work out the margin.
-pub const FEE_RATES_SQL: &str = fee_rates_sql!();
+pub const FEE_RATES_SQL: &str = fee_rates_sql!(order_locations_sql!());
 
 /// The fee figures of one character at one location, as decimal text in percent.
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
@@ -143,6 +185,54 @@ pub async fn for_account(
         .bind(account_id)
         .fetch_all(pool)
         .await
+}
+
+/// The fees of these characters at one location, whether or not they have an order there. Only
+/// characters of the account count, so a selection can never reach another account's data.
+pub async fn at_location(
+    pool: &PgPool,
+    account_id: Uuid,
+    character_ids: &[i64],
+    location_id: i64,
+) -> Result<Vec<FeeRow>, sqlx::Error> {
+    sqlx::query_as(LOCATION_FEES_SQL)
+        .bind(character_ids)
+        .bind(account_id)
+        .bind(location_id)
+        .fetch_all(pool)
+        .await
+}
+
+/// Makes sure the owner of an NPC station is known: asks ESI once when it is not, and stores it
+/// for every account. Answers whether the owner was learned just now.
+pub async fn ensure_station_owner(
+    pool: &PgPool,
+    esi: &EsiClient,
+    station_id: i64,
+    now: OffsetDateTime,
+) -> Result<bool, EsiError> {
+    let database = |e: sqlx::Error| EsiError::Temporary(format!("database error: {e}"));
+    let known: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM station_owners WHERE station_id = $1)")
+            .bind(station_id)
+            .fetch_one(pool)
+            .await
+            .map_err(database)?;
+    if known {
+        return Ok(false);
+    }
+    let station = esi.station(station_id).await?;
+    sqlx::query(
+        "INSERT INTO station_owners (station_id, owner_id, resolved_at) VALUES ($1, $2, $3)
+         ON CONFLICT (station_id) DO NOTHING",
+    )
+    .bind(station_id)
+    .bind(station.owner)
+    .bind(now)
+    .execute(pool)
+    .await
+    .map_err(database)?;
+    Ok(true)
 }
 
 // ---- what the orders page shows ----

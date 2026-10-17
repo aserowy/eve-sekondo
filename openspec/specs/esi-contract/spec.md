@@ -16,7 +16,9 @@ whether it may be missing or null. The covered calls are: the authorization requ
 the token request (authorization code grant and refresh grant), the JWKS document, the claims of the
 access token JWT, the character orders route, the names lookup (success, and the 404 that one unknown
 ID causes), the structure lookup (success and 403), the public market orders of a region for one item
-(with the `X-Pages` header and each order's remaining volume), the character wallet balance, the
+(with the `X-Pages` header and each order's remaining volume), the public market orders of a region
+for all items (with the `X-Pages` header and each order's type, location and remaining volume), the
+market history of a region for one item, the character wallet balance, the
 character wallet transactions (the newest ones, and older ones from a given transaction ID), the
 character assets (with the `X-Pages` header), the market prices, the character skills, the character
 standings and the station lookup. A variant that cannot be provoked against the
@@ -49,6 +51,11 @@ reason.
 - **WHEN** the stub serves the wallet transactions route
 - **THEN** the contract coverage test finds a contract for it
 
+#### Scenario: Station market calls are contracted
+
+- **WHEN** the stub serves the region-wide market orders or the market history route
+- **THEN** the contract coverage test finds a contract for each
+
 ### Requirement: The stub conforms to the contracts
 
 Every answer the stub can give for a contracted call SHALL satisfy the matching contract variant,
@@ -73,7 +80,9 @@ The character's assets SHALL contain at least one asset, otherwise the verificat
 that an asset is needed. The character's standings SHALL contain at least one NPC corporation or
 faction standing, otherwise the verification fails and says that a standing is needed.
 The market orders call SHALL be verified for an item and region taken from the character's own orders,
-so that sell and buy orders of the real market are checked. The station lookup SHALL be verified for
+so that sell and buy orders of the real market are checked. The region-wide market orders call SHALL
+be verified with the first page of The Forge, and the market history call for The Forge and the item
+of the market orders check. The station lookup SHALL be verified for
 an NPC station taken from the character's own orders, or for a fixed well-known NPC station when all
 of its orders are in structures.
 
@@ -115,6 +124,12 @@ of its orders are in structures.
 #### Scenario: Real market answer lacks a field the contract requires
 
 - **WHEN** a real market orders answer lacks a field (such as `system_id`) that its contract variant
+  marks as always present
+- **THEN** the verification fails and names the call, the variant and the field
+
+#### Scenario: Real history answer lacks a field the contract requires
+
+- **WHEN** a real market history answer lacks a field (such as `volume`) that its contract variant
   marks as always present
 - **THEN** the verification fails and names the call, the variant and the field
 
@@ -256,3 +271,19 @@ that a purchase is needed when the answer contains no purchase.
 
 - **WHEN** the verification character has no purchase in its wallet transactions
 - **THEN** the verification fails and says that a purchase is needed
+
+### Requirement: The stub serves the station market calls
+
+The stub SHALL serve the public market orders of a region for all items (with the `X-Pages` header and
+pages as real ESI does) and the market history of a region for one item. It SHALL have controls to set
+the region's orders and the history per item, and to make a chosen page or a chosen item's history
+fail. Every answer SHALL satisfy its contract variant. Neither call SHALL need a token.
+
+#### Scenario: Region-wide orders over several pages
+- **WHEN** the stub holds more orders for a region than fit on one page and the app reads the
+  region-wide order book
+- **THEN** the stub answers with `X-Pages` and splits the orders over the pages as real ESI does
+
+#### Scenario: History fixture drifts from the contract
+- **WHEN** a history fixture of the stub omits a field the contract marks as always present
+- **THEN** the stub conformance test fails and names the fixture and the field

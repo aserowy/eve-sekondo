@@ -7,8 +7,8 @@ use reqwest::header::{HeaderMap, USER_AGENT};
 use secrecy::{ExposeSecret, SecretString};
 use sekondo::{
     esi::{
-        COMPATIBILITY_DATE, EsiAsset, EsiMarketOrder, EsiName, EsiOrder, EsiPrice, EsiSkills,
-        EsiStanding, EsiStation, EsiStructure, EsiTransaction, user_agent,
+        COMPATIBILITY_DATE, EsiAsset, EsiHistoryDay, EsiMarketOrder, EsiName, EsiOrder, EsiPrice,
+        EsiSkills, EsiStanding, EsiStation, EsiStructure, EsiTransaction, user_agent,
     },
     oauth::{Intent, PendingFlow},
     poller::STRUCTURE_ID_MIN,
@@ -379,6 +379,9 @@ async fn verify_sso(
     Ok(token_set(&answer, "refresh").ok().map(|t| t.access_token))
 }
 
+/// The region of the whole-book and history checks: The Forge, home of Jita 4-4.
+const FORGE: i64 = 10000002;
+
 async fn esi_request(
     settings: &Settings,
     request: reqwest::RequestBuilder,
@@ -507,6 +510,22 @@ async fn verify_esi(
                 "market-orders/orders: the answer has no orders, but the character's own order for the item is on the market".to_owned(),
             );
         }
+    }
+
+    // The first page of The Forge's whole book, and the history of the item of the market check.
+    let mut url = esi(&format!("markets/{FORGE}/orders"))?;
+    url.query_pairs_mut().append_pair("page", "1");
+    let answer = esi_request(settings, http.get(url), "region-orders").await?;
+    run.check("region-orders", "orders", &answer);
+    decode::<Vec<EsiMarketOrder>>(run, "region-orders", &answer);
+
+    if let Some(own) = orders.iter().find(|o| !o.is_buy_order) {
+        let mut url = esi(&format!("markets/{FORGE}/history"))?;
+        url.query_pairs_mut()
+            .append_pair("type_id", &own.type_id.to_string());
+        let answer = esi_request(settings, http.get(url), "market-history").await?;
+        run.check("market-history", "history", &answer);
+        decode::<Vec<EsiHistoryDay>>(run, "market-history", &answer);
     }
 
     verify_wealth(settings, run, http, token, me).await?;

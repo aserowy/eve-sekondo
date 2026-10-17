@@ -92,10 +92,17 @@ async fn every_signed_in_page_has_the_navigation_with_its_own_entry_marked(pool:
     for (path, current) in [
         ("/dashboard", "Dashboard"),
         ("/wealth", "Wealth"),
+        ("/opportunities", "Opportunities"),
         ("/characters", "Characters"),
     ] {
         let html = page(&app, &browser, path).await;
-        for link in ["/dashboard", "/orders", "/wealth", "/characters"] {
+        for link in [
+            "/dashboard",
+            "/orders",
+            "/wealth",
+            "/opportunities",
+            "/characters",
+        ] {
             assert!(
                 html.contains(&format!(r#"href="{link}""#)),
                 "{path} lacks {link}"
@@ -140,9 +147,16 @@ async fn navigation_links_carry_a_narrowed_selection(pool: PgPool) {
         format!("/dashboard?chars={BOB}"),
         format!("/characters?chars={BOB}"),
         format!("/orders?chars={BOB}"),
+        format!("/opportunities?chars={BOB}"),
     ] {
         let html = unescaped(&page(&app, &browser, &path).await);
-        for link in ["/dashboard", "/orders", "/wealth", "/characters"] {
+        for link in [
+            "/dashboard",
+            "/orders",
+            "/wealth",
+            "/opportunities",
+            "/characters",
+        ] {
             assert!(
                 html.contains(&format!(r#"href="{link}?chars={BOB}""#)),
                 "{path}: {link} lacks the selection"
@@ -172,7 +186,13 @@ async fn characters_and_sign_out_are_icon_only_controls_that_keep_their_names(po
     let app = app(pool).await;
     let browser = signed_in(&app).await;
 
-    for path in ["/dashboard", "/orders", "/wealth", "/characters"] {
+    for path in [
+        "/dashboard",
+        "/orders",
+        "/wealth",
+        "/opportunities",
+        "/characters",
+    ] {
         let html = page(&app, &browser, path).await;
         let nav = html
             .split_once(r#"id="main-nav""#)

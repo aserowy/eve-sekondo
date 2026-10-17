@@ -512,3 +512,76 @@ async fn a_station_owner_that_completes_a_fee_signals_only_the_affected_accounts
     assert_eq!(signals(&mut mine).await, [Event::FeesUpdated]);
     assert_eq!(signals(&mut theirs).await, Vec::<Event>::new());
 }
+
+// ---- the built-in station ----
+
+#[sqlx::test]
+async fn the_owner_of_jita_44_is_looked_up_once_without_any_order_there(pool: PgPool) {
+    let env = linked(pool).await;
+
+    env.fees.tick().await;
+
+    assert_eq!(env.stub.station_requests(), [JITA]);
+    let owner: i64 =
+        sqlx::query_scalar("SELECT owner_id FROM station_owners WHERE station_id = $1")
+            .bind(JITA)
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+    assert_eq!(owner, 1000035);
+
+    env.clock.advance(Duration::hours(3));
+    env.fees.tick().await;
+    assert_eq!(
+        env.stub.station_requests(),
+        [JITA],
+        "known, so not asked again"
+    );
+}
+
+#[sqlx::test]
+async fn an_owner_learned_from_orders_is_not_asked_for_again_as_the_built_in_station(pool: PgPool) {
+    let env = with_orders(pool).await;
+
+    env.fees.tick().await;
+
+    assert_eq!(
+        env.stub.station_requests(),
+        [JITA],
+        "Jita 4-4 once, and not the structure"
+    );
+}
+
+#[sqlx::test]
+async fn a_failed_built_in_lookup_is_retried_on_a_later_tick(pool: PgPool) {
+    let env = linked(pool).await;
+    env.control("esi-fail-next", json!({"route": "stations", "status": 503}))
+        .await;
+
+    env.fees.tick().await;
+    env.fees.tick().await;
+    assert_eq!(env.stub.esi_calls("stations"), 1, "not at once again");
+
+    env.clock.advance(Duration::minutes(2));
+    env.fees.tick().await;
+    assert_eq!(env.stub.esi_calls("stations"), 2);
+    let known: i64 = sqlx::query_scalar("SELECT count(*) FROM station_owners")
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+    assert_eq!(known, 1);
+}
+
+#[sqlx::test]
+async fn learning_the_built_in_owner_signals_every_account(pool: PgPool) {
+    let env = linked(pool).await;
+    let other = env.new_account().await;
+    env.link(other, BOB).await;
+    let mut alice = env.events.subscribe(account_of(&env, ALICE).await);
+    let mut bob = env.events.subscribe(account_of(&env, BOB).await);
+
+    env.fees.tick().await;
+
+    assert!(signals(&mut alice).await.contains(&Event::FeesUpdated));
+    assert!(signals(&mut bob).await.contains(&Event::FeesUpdated));
+}

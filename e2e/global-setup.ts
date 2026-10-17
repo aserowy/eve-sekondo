@@ -109,6 +109,8 @@ export default async function globalSetup() {
     TOKEN_ENCRYPTION_KEY,
     // The background scheduler stays out of the way; tests poll through the test hook.
     ORDER_POLL_INTERVAL_MINUTES: '1440',
+    // Same for the trading station: tests drive its sync through the /_test/station-* hooks.
+    STATION_SYNC: 'off',
   });
 
   try {

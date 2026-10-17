@@ -111,6 +111,29 @@ pub fn percent_of(part_cents: i64, whole_cents: i64) -> String {
     format!("{}.{}", tenths / 10, tenths % 10)
 }
 
+/// A fraction as a percentage with two decimals: `0.1287` is `12.87%`. Not finite shows a dash.
+pub fn percent(fraction: f64) -> String {
+    if !fraction.is_finite() {
+        return "\u{2014}".to_owned();
+    }
+    format!("{:.2}%", fraction * 100.0)
+}
+
+/// A number of days with one or two decimals, whichever is shorter and still exact enough:
+/// `3` days is `3.0 d`, `0.0388` is `0.04 d`. Not finite shows a dash.
+pub fn days(days: f64) -> String {
+    if !days.is_finite() {
+        return "\u{2014}".to_owned();
+    }
+    if days >= 10.0 {
+        format!("{days:.0} d")
+    } else if days >= 1.0 {
+        format!("{days:.1} d")
+    } else {
+        format!("{days:.2} d")
+    }
+}
+
 /// A moment in EVE time (UTC): `2026-10-01 12:00`.
 pub fn eve_time(moment: OffsetDateTime) -> String {
     let moment = moment.to_offset(time::UtcOffset::UTC);
@@ -129,6 +152,24 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
+
+    #[test]
+    fn a_fraction_is_a_percentage_with_two_decimals() {
+        assert_eq!(percent(0.1287), "12.87%");
+        assert_eq!(percent(0.05), "5.00%");
+        assert_eq!(percent(-0.0049), "-0.49%");
+        assert_eq!(percent(f64::INFINITY), "\u{2014}");
+        assert_eq!(percent(f64::NAN), "\u{2014}");
+    }
+
+    #[test]
+    fn days_get_fewer_decimals_the_longer_they_are() {
+        assert_eq!(days(0.0388), "0.04 d");
+        assert_eq!(days(3.0), "3.0 d");
+        assert_eq!(days(5.916), "5.9 d");
+        assert_eq!(days(12.4), "12 d");
+        assert_eq!(days(f64::INFINITY), "\u{2014}");
+    }
 
     /// ISK to cents, for readable cases.
     fn isk(whole: i64, cents: i64) -> i64 {

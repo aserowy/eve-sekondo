@@ -33,9 +33,31 @@ document.addEventListener('htmx:configRequest', (event) => {
   if (value('range') && value('range') !== '7d') {
     query.push(`range=${encodeURIComponent(value('range'))}`);
   }
+  // The Opportunities page sorts each of its four tables on its own; every one defaults to ISK/day.
+  if (form.hasAttribute('data-opportunity-sorts')) {
+    for (const [sort, dir] of [['xs', 'xd'], ['cs', 'cd'], ['ms', 'md'], ['ts', 'td']]) {
+      if (value(sort) && !(value(sort) === 'isk-day' && value(dir) === 'desc')) {
+        query.push(`${sort}=${encodeURIComponent(value(sort))}`, `${dir}=${encodeURIComponent(value(dir))}`);
+      }
+    }
+  }
 
   for (const key of Object.keys(event.detail.parameters)) delete event.detail.parameters[key];
   event.detail.path = query.length > 0 ? `${path}?${query.join('&')}` : path;
+});
+
+// A form that is rejected with 422 names where its answer goes (`data-invalid-target`): the form
+// itself, which comes back with the reason. htmx does not swap error answers on its own.
+document.addEventListener('htmx:beforeSwap', (event) => {
+  const { xhr, requestConfig } = event.detail;
+  if (xhr.status !== 422) return;
+  const selector = requestConfig?.elt?.dataset?.invalidTarget;
+  const target = selector && document.querySelector(selector);
+  if (!target) return;
+  event.detail.shouldSwap = true;
+  event.detail.isError = false;
+  event.detail.target = target;
+  event.detail.swapOverride = 'outerHTML';
 });
 
 // ---- scroll positions ----
@@ -214,7 +236,27 @@ const COLORS = {
   Inventory: INVENTORY_COLOR,
   // The total is not a component: a neutral line that stands out from every component colour.
   Wealth: TOTAL_COLOR,
+  // The opportunity detail window.
+  'Best buy': BUY_COLOR,
+  'Best sell': SELL_COLOR,
+  Average: TOTAL_COLOR,
+  'SMA 5': INVENTORY_COLOR,
+  'SMA 20': WALLET_COLOR,
+  'Upper band': INK,
+  'Lower band': INK,
+  'RSI 14': SELL_COLOR,
+  Spread: INVENTORY_COLOR,
+  Volume: SELL_COLOR,
+  'Units within 1%': SELL_COLOR,
+  'Average maximum spread': BUY_COLOR,
+  'Average spread': SELL_COLOR,
+  'Average daily spread': SELL_COLOR,
+  Peak: SELL_COLOR,
+  S: TOTAL_COLOR,
 };
+
+// Bands and reference lines are dashed, so they read as limits and not as data.
+const DASHED = new Set(['Upper band', 'Lower band']);
 
 // One bar per character and series: the per-character split.
 function splitConfig(data) {
@@ -285,10 +327,12 @@ function lineConfig(data, yAxis) {
         borderColor: COLORS[series.name],
         backgroundColor: COLORS[series.name],
         borderWidth: 2,
+        borderDash: DASHED.has(series.name) ? [4, 3] : [],
         pointRadius: 0,
         pointHoverRadius: 5,
         pointHitRadius: 12,
         tension: 0,
+        spanGaps: false,
       })),
     },
     options: baseOptions({
@@ -367,7 +411,65 @@ const countHistoryConfig = (data) =>
     grid: GRID_LINES,
   });
 
+// Prices float: a bar of the average from zero would flatten every move, so these axes do not start at zero.
+function priceAxis() {
+  return { ticks: { ...AXIS_TEXT, maxTicksLimit: 6, callback: (value) => iskShort(value) }, grid: GRID_LINES };
+}
+
+const percentAxis = () => ({
+  beginAtZero: true,
+  ticks: { ...AXIS_TEXT, maxTicksLimit: 6, callback: (value) => `${value}%` },
+  grid: GRID_LINES,
+});
+
+const rsiAxis = () => ({ min: 0, max: 100, ticks: { ...AXIS_TEXT, maxTicksLimit: 6 }, grid: GRID_LINES });
+
+// Bars over categories (hours, weekdays, past occurrences); a series of kind `line` is drawn over
+// them, as S is over the peaks.
+function barsConfig(data, yAxis) {
+  return {
+    type: 'bar',
+    data: {
+      labels: data.labels,
+      datasets: data.series.map((series) => {
+        const line = series.kind === 'line';
+        return {
+          type: line ? 'line' : 'bar',
+          label: series.name,
+          data: series.values,
+          exact: series.exact,
+          backgroundColor: COLORS[series.name],
+          borderColor: COLORS[series.name],
+          borderWidth: line ? 2 : 0,
+          borderRadius: line ? 0 : 3,
+          maxBarThickness: 24,
+          pointRadius: 0,
+          pointHoverRadius: 5,
+          order: line ? 0 : 1,
+        };
+      }),
+    },
+    options: baseOptions({
+      interaction: { mode: 'index', intersect: false },
+      scales: { x: { ticks: { ...AXIS_TEXT, maxTicksLimit: 12 }, grid: { display: false } }, y: yAxis },
+    }),
+  };
+}
+
 const CHART_KINDS = {
+  // The opportunity detail window.
+  'trend-price': (data) => lineConfig(data, priceAxis()),
+  'reversion-price': (data) => lineConfig(data, priceAxis()),
+  'classic-prices': (data) => lineConfig(data, priceAxis()),
+  'classic-spread': (data) => lineConfig(data, percentAxis()),
+  rsi: (data) => lineConfig(data, rsiAxis()),
+  'trend-volume': (data) =>
+    barsConfig(data, { beginAtZero: true, ticks: { ...AXIS_TEXT, maxTicksLimit: 6, callback: (v) => iskShort(v * 100) }, grid: GRID_LINES }),
+  depth: (data) =>
+    barsConfig(data, { beginAtZero: true, ticks: { ...AXIS_TEXT, maxTicksLimit: 6, callback: (v) => iskShort(v * 100) }, grid: GRID_LINES }),
+  'spread-hours': (data) => barsConfig(data, percentAxis()),
+  'spread-weekdays': (data) => barsConfig(data, percentAxis()),
+  peaks: (data) => barsConfig(data, priceAxis()),
   split: splitConfig,
   'top-sell': topItemsConfig,
   'top-buy': topItemsConfig,
@@ -393,4 +495,27 @@ function drawCharts(root) {
 
 document.addEventListener('htmx:load', (event) => {
   if (typeof Chart !== 'undefined' && event.detail.elt instanceof Element) drawCharts(event.detail.elt);
+});
+
+// ---- the opportunity detail window ----
+// One fixed window beside the tables: a row click loads it (htmx), it is shown once it has content,
+// and Escape or its close button empties and hides it. It has no drag handling at all.
+function closeOpportunityDetail() {
+  const window = document.getElementById('opportunity-detail');
+  if (!window) return;
+  window.replaceChildren();
+  window.hidden = true;
+}
+
+document.addEventListener('htmx:afterSwap', (event) => {
+  const target = event.detail.target;
+  if (target instanceof HTMLElement && target.id === 'opportunity-detail') target.hidden = false;
+});
+
+document.addEventListener('click', (event) => {
+  if (event.target instanceof Element && event.target.closest('[data-close-detail]')) closeOpportunityDetail();
+});
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') closeOpportunityDetail();
 });

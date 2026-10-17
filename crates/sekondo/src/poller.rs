@@ -27,7 +27,7 @@ pub(crate) const CLAIM_LEASE: Duration = Duration::minutes(5);
 /// How often the scheduler looks for due characters.
 pub const SCHEDULER_TICK: std::time::Duration = std::time::Duration::from_secs(5);
 /// The first retry after a failure; doubles per consecutive failure, capped at the interval.
-pub(crate) const BACKOFF_START: Duration = Duration::minutes(1);
+pub const BACKOFF_START: Duration = Duration::minutes(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PollOutcome {

@@ -403,6 +403,68 @@ pub fn market_orders() -> Call {
     }
 }
 
+/// The public market orders of a region for all items, one page at a time. Same route and answer as
+/// the one-item call, but the app also reads each order's type, location and remaining volume.
+pub fn region_orders() -> Call {
+    Call {
+        name: "region-orders",
+        ..market_orders()
+    }
+}
+
+/// The market history of a region for one item: one entry per traded day. Real ESI limits this
+/// route by error count (verified), sends no pages, and answers 200 with `[]` for a real type
+/// nobody traded in the region (observed) and 404 for an unknown type.
+pub fn market_history() -> Call {
+    let mut headers = vec![
+        header("date", HttpDate, Always),
+        header("expires", HttpDate, Always),
+    ];
+    headers.extend(error_limit_headers());
+    headers.extend([
+        header("x-ratelimit-group", Token, Absent),
+        header("x-ratelimit-remaining", Integer, Absent),
+    ]);
+    let days = BodySpec::Json(Ty::array_of(Ty::Object(vec![
+        field("date", Ty::Str, Always),
+        field("average", Ty::Number, Always),
+        field("highest", Ty::Number, Always),
+        field("lowest", Ty::Number, Always),
+        field("order_count", Ty::Int, Always),
+        field("volume", Ty::Int, Always),
+    ])));
+    let mut variants = vec![
+        variant(
+            "history",
+            StatusSpec::Exact(200),
+            headers.clone(),
+            days.clone(),
+        ),
+        unverifiable(
+            variant("no-history", StatusSpec::Exact(200), headers, days),
+            "needs a type that has no history in the region, which cannot be picked reliably",
+        ),
+        unverifiable(
+            variant(
+                "unknown-type",
+                StatusSpec::Exact(404),
+                esi_error_headers(),
+                error_body(),
+            ),
+            "provoking it spends the error limit of the verification run",
+        ),
+    ];
+    variants.extend(esi_failure_variants());
+    Call {
+        name: "market-history",
+        routes: vec![Route {
+            method: "GET",
+            path: "/markets/{region_id}/history",
+        }],
+        variants,
+    }
+}
+
 /// What real ESI sends on the character wallet and asset routes (verified): the rate-limit group
 /// of the route and what is left of it, and no error-limit headers. A success is cacheable.
 fn char_route_headers(success: bool) -> Vec<HeaderSpec> {
@@ -649,6 +711,8 @@ pub fn contracts() -> Vec<Call> {
         names(),
         structures(),
         market_orders(),
+        region_orders(),
+        market_history(),
         wallet(),
         wallet_transactions(),
         assets(),
@@ -1172,6 +1236,141 @@ mod tests {
         assert_eq!(call.routes[0].path, "/markets/{region_id}/orders");
     }
 
+    /// What real ESI sends for a region-wide page (verified): like the one-item call.
+    fn region_order() -> Value {
+        json!({
+            "order_id": 7, "type_id": 34, "location_id": 60003760, "system_id": 30000142,
+            "is_buy_order": false, "price": 10.5, "range": "region",
+            "duration": 90, "issued": "2026-10-11T12:00:00Z", "min_volume": 1,
+            "volume_remain": 3, "volume_total": 5,
+        })
+    }
+
+    #[test]
+    fn region_orders_answer_with_pages_and_what_the_app_reads_per_order() {
+        let call = region_orders();
+        let body = json!([region_order()]);
+        assert!(problems(&call, "orders", Some(200), &market_ok(), Some(body.clone())).is_empty());
+        for field in ["type_id", "location_id", "volume_remain"] {
+            let mut order = region_order();
+            order.as_object_mut().unwrap().remove(field);
+            assert_eq!(
+                problems(
+                    &call,
+                    "orders",
+                    Some(200),
+                    &market_ok(),
+                    Some(json!([order]))
+                ),
+                [format!("$[0].{field} is missing but always present")]
+            );
+        }
+        let mut h = market_ok();
+        h.remove("x-pages");
+        assert_eq!(
+            problems(&call, "orders", Some(200), &h, Some(body)),
+            ["header x-pages is missing but always present"]
+        );
+        // A page past the end is a 404 that the app never provokes: it reads X-Pages first.
+        assert_eq!(call.routes[0].path, "/markets/{region_id}/orders");
+    }
+
+    /// What real ESI sends on the history route (verified): the error-limit headers and an expiry,
+    /// no pages and no rate-limit group.
+    fn history_ok() -> HeaderMap {
+        headers(&[
+            ("date", "Sat, 17 Oct 2026 14:33:00 GMT"),
+            ("expires", "Sun, 18 Oct 2026 11:05:00 GMT"),
+            ("x-esi-error-limit-remain", "100"),
+            ("x-esi-error-limit-reset", "60"),
+        ])
+    }
+
+    fn day() -> Value {
+        json!({"average": 3.84, "date": "2025-09-01", "highest": 3.89, "lowest": 3.81,
+               "order_count": 2094, "volume": 4657183484_i64})
+    }
+
+    #[test]
+    fn market_history_answers_with_the_days_the_app_reads() {
+        let call = market_history();
+        assert_eq!(call.routes[0].path, "/markets/{region_id}/history");
+        assert!(
+            problems(
+                &call,
+                "history",
+                Some(200),
+                &history_ok(),
+                Some(json!([day()]))
+            )
+            .is_empty()
+        );
+        for field in [
+            "date",
+            "average",
+            "highest",
+            "lowest",
+            "order_count",
+            "volume",
+        ] {
+            let mut d = day();
+            d.as_object_mut().unwrap().remove(field);
+            assert_eq!(
+                problems(&call, "history", Some(200), &history_ok(), Some(json!([d]))),
+                [format!("$[0].{field} is missing but always present")]
+            );
+        }
+        let mut h = history_ok();
+        h.insert("x-pages", HeaderValue::from_static("1"));
+        assert_eq!(
+            problems(&call, "history", Some(200), &h, Some(json!([day()]))).len(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_type_without_history_is_an_empty_list_and_an_unknown_type_a_404() {
+        let call = market_history();
+        // Real ESI (observed): a real type nobody traded in the region is 200 with [].
+        assert!(
+            problems(
+                &call,
+                "no-history",
+                Some(200),
+                &history_ok(),
+                Some(json!([]))
+            )
+            .is_empty()
+        );
+        let mut h = history_ok();
+        h.remove("expires");
+        assert!(
+            problems(
+                &call,
+                "unknown-type",
+                Some(404),
+                &h,
+                Some(json!({"error": "Type not found!"}))
+            )
+            .is_empty()
+        );
+        for name in [
+            "no-history",
+            "unknown-type",
+            "error-limited",
+            "rate-limited",
+            "server-error",
+        ] {
+            assert!(
+                matches!(
+                    call.variant(name).map(|v| v.verifiable),
+                    Some(Verifiable::No(_))
+                ),
+                "{name}"
+            );
+        }
+    }
+
     fn asset() -> Value {
         json!({
             "item_id": 1000000000001_i64, "type_id": 34, "location_id": 60003760,
@@ -1630,7 +1829,7 @@ mod tests {
         assert!(problems(&call, "server-error", Some(502), &HeaderMap::new(), None).is_empty());
     }
 
-    const ALL_ROUTES: [(&str, &str); 15] = [
+    const ALL_ROUTES: [(&str, &str); 16] = [
         ("GET", "/oauth/jwks"),
         ("GET", "/v2/oauth/authorize"),
         ("GET", "/v2/oauth/authorize/select"),
@@ -1646,6 +1845,7 @@ mod tests {
         ("GET", "/characters/{id}/standings"),
         ("GET", "/universe/stations/{id}"),
         ("GET", "/markets/prices"),
+        ("GET", "/markets/{region_id}/history"),
     ];
 
     #[test]

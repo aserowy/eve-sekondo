@@ -20,6 +20,7 @@ pub mod headers;
 pub mod market;
 pub mod names;
 pub mod oauth;
+pub mod opportunities;
 pub mod orders;
 pub mod pages;
 pub mod poller;
@@ -30,6 +31,8 @@ pub mod selection;
 pub mod session;
 pub mod sse;
 pub mod sso;
+pub mod station_book;
+pub mod station_history;
 #[cfg(feature = "test-hooks")]
 pub mod test_hooks;
 pub mod tls;

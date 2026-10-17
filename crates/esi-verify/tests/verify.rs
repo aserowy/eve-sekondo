@@ -163,6 +163,13 @@ async fn world(person: Person) -> World {
             ]}),
         )
         .await;
+    // The history of the sell order's item in The Forge, with prices that must never be printed.
+    world
+        .control(
+            "market-history",
+            json!({"region_id": 10000002, "type_id": 34, "days": [history_day()]}),
+        )
+        .await;
     // Three transactions, two of them purchases; the page size is two.
     world
         .control(
@@ -236,6 +243,11 @@ fn order(id: i64, buy: bool) -> Value {
     order
 }
 
+fn history_day() -> Value {
+    json!({"date": "2026-10-16", "average": 4242.42, "highest": 4343.43, "lowest": 4141.41,
+           "order_count": 77, "volume": 987654})
+}
+
 fn market_order(id: i64, type_id: i64, buy: bool) -> Value {
     json!({
         "order_id": id, "type_id": type_id, "location_id": 60003760, "system_id": 30000142,
@@ -279,6 +291,8 @@ async fn a_passing_verification_records_the_fingerprint_and_the_variants() {
         "structures/found",
         "structures/forbidden",
         "market-orders/orders",
+        "region-orders/orders",
+        "market-history/history",
         "wallet/balance",
         "wallet/forbidden",
         "wallet-transactions/newest",
@@ -299,7 +313,12 @@ async fn a_passing_verification_records_the_fingerprint_and_the_variants() {
         !record.variants.iter().any(|v| v.contains("rate-limited")),
         "failure variants cannot be verified"
     );
-    assert_eq!(w.stub.esi_calls("market"), 2, "one request per side");
+    assert_eq!(
+        w.stub.esi_calls("market"),
+        3,
+        "one request per side, and the first page of the region-wide book"
+    );
+    assert_eq!(w.stub.esi_calls("history"), 1);
     assert_eq!(w.visitor.opened.load(Ordering::SeqCst), 1);
     assert!(
         output.contains("/v2/oauth/authorize?"),
@@ -333,6 +352,10 @@ async fn nothing_secret_is_printed() {
         "1500000",
         "2500000",
         "7654321",
+        "4242",
+        "4343",
+        "4141",
+        "987654",
         "Alice",
         "Tritanium",
         CLIENT_SECRET,
@@ -540,7 +563,7 @@ async fn the_market_requests_are_built_from_the_first_sell_and_the_first_buy_ord
     let (result, output) = w.verify().await;
 
     result.unwrap_or_else(|e| panic!("{e}\n{output}"));
-    assert_eq!(w.stub.esi_calls("market"), 2);
+    assert_eq!(w.stub.esi_calls("market"), 3);
 }
 
 #[tokio::test]
@@ -771,4 +794,54 @@ async fn without_a_purchase_the_verification_says_a_purchase_is_needed_and_leave
         "{output}"
     );
     assert_eq!(w.record(), Some(old));
+}
+
+#[tokio::test]
+async fn the_history_is_asked_for_the_item_of_the_market_check() {
+    let w = world(Person::LogsIn).await;
+    // The first sell order is for item 34, so only its history exists; an empty answer for any
+    // other item would still pass the contract, so the stub counts what was asked.
+    let (result, output) = w.verify().await;
+
+    result.unwrap_or_else(|e| panic!("{e}\n{output}"));
+    assert_eq!(w.stub.history_requests(), [(10000002, 34)]);
+}
+
+#[tokio::test]
+async fn a_history_answer_without_a_volume_names_the_call_and_the_field() {
+    let w = world(Person::LogsIn).await;
+    let mut day = history_day();
+    day.as_object_mut().unwrap().remove("volume");
+    w.control(
+        "market-history",
+        json!({"region_id": 10000002, "type_id": 34, "days": [day]}),
+    )
+    .await;
+
+    let (result, output) = w.verify().await;
+
+    assert!(result.is_err(), "{output}");
+    assert!(output.contains("market-history/history"), "{output}");
+    assert!(output.contains("volume"), "{output}");
+    assert_eq!(w.record(), None);
+}
+
+#[tokio::test]
+async fn a_history_answer_the_app_cannot_decode_fails_with_the_decoding_error() {
+    let w = world(Person::LogsIn).await;
+    let mut day = history_day();
+    day["volume"] = json!(1.5);
+    w.control(
+        "market-history",
+        json!({"region_id": 10000002, "type_id": 34, "days": [day]}),
+    )
+    .await;
+
+    let (result, output) = w.verify().await;
+
+    assert!(result.is_err(), "{output}");
+    assert!(
+        output.contains("market-history: the app cannot decode"),
+        "{output}"
+    );
 }

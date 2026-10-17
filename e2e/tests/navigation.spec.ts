@@ -4,7 +4,7 @@ test('navigate between the signed-in pages, and sign out from the navigation', a
   await loginWith(page, 'Alice Alpha');
   const nav = page.getByRole('navigation');
 
-  // The dashboard is the landing page and shows the totals; the orders are one navigation link away.
+  // The dashboard is the landing page and shows the totals; the other pages are one navigation link away.
   await expect(page.getByRole('heading', { level: 1 })).toHaveCount(0);
   await expect(page.locator('#tile-sell-value')).toBeVisible();
   await expect(page.locator('#tile-escrow')).toBeVisible();
@@ -14,6 +14,15 @@ test('navigate between the signed-in pages, and sign out from the navigation', a
   await expect(page).toHaveURL(/\/orders$/);
   await expect(nav.getByRole('link', { name: 'Orders' })).toHaveAttribute('aria-current', 'page');
   await expect(nav.getByRole('link', { name: 'Dashboard' })).not.toHaveAttribute('aria-current', 'page');
+
+  await nav.getByRole('link', { name: 'Wealth' }).click();
+  await expect(page).toHaveURL(/\/wealth$/);
+  await expect(nav.getByRole('link', { name: 'Wealth' })).toHaveAttribute('aria-current', 'page');
+
+  await nav.getByRole('link', { name: 'Opportunities' }).click();
+  await expect(page).toHaveURL(/\/opportunities$/);
+  await expect(nav.getByRole('link', { name: 'Opportunities' })).toHaveAttribute('aria-current', 'page');
+  await expect(nav.getByRole('link', { name: 'Wealth' })).not.toHaveAttribute('aria-current', 'page');
 
   await nav.getByRole('link', { name: 'Characters' }).click();
   await expect(page).toHaveURL(/\/characters$/);

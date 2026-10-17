@@ -106,7 +106,7 @@ pub const ESI_EXPIRES_SECONDS: u64 = 1200;
 #[derive(Clone, Debug)]
 pub struct EsiFailure {
     /// Only calls to this route fail (`orders`, `names`, `structures`, `market`, `wallet`,
-    /// `assets`, `prices`, `skills`, `standings`, `stations`); `None`: any route.
+    /// `history`, `assets`, `prices`, `skills`, `standings`, `stations`); `None`: any route.
     pub route: Option<String>,
     pub remaining: u32,
     pub status: u16,
@@ -163,6 +163,10 @@ pub struct Inner {
     pub orders: HashMap<i64, Vec<Value>>,
     /// Fixture public market orders per region, as ESI's JSON.
     pub market_orders: HashMap<i64, MarketFixture>,
+    /// Fixture market history per region and item, as ESI's JSON days.
+    pub market_history: HashMap<(i64, i64), Vec<Value>>,
+    /// Region order pages and item histories that answer with an error until cleared.
+    pub market_failures: Vec<MarketFailure>,
     /// Fixture wallet balance per character.
     pub wallets: HashMap<i64, f64>,
     /// Fixture assets per character, as ESI's JSON.
@@ -185,6 +189,8 @@ pub struct Inner {
     pub names_requests: Vec<Vec<i64>>,
     /// The ID of every `/universe/stations/{id}` request, in order.
     pub station_requests: Vec<i64>,
+    /// The region and item of every market history request, in order.
+    pub history_requests: Vec<(i64, i64)>,
     pub esi_requests: Vec<EsiRequestRecord>,
     pub structures_denied: HashSet<i64>,
     pub esi_failure: Option<EsiFailure>,
@@ -205,6 +211,15 @@ pub struct Inner {
 pub struct MarketFixture {
     pub orders: Vec<Value>,
     pub page_size: usize,
+}
+
+/// A region order page (`page`) or an item's history (`type_id`) that fails with `status`.
+#[derive(Clone, Debug)]
+pub struct MarketFailure {
+    pub region_id: i64,
+    pub page: Option<usize>,
+    pub type_id: Option<i64>,
+    pub status: u16,
 }
 
 /// ESI's page size for the region market.
@@ -287,6 +302,8 @@ impl Inner {
             issued_tokens: HashMap::new(),
             orders: default_orders(),
             market_orders: HashMap::new(),
+            market_history: HashMap::new(),
+            market_failures: Vec::new(),
             wallets: default_wallets(),
             assets: default_assets(),
             transactions: HashMap::new(),
@@ -298,6 +315,7 @@ impl Inner {
             esi_calls: HashMap::new(),
             names_requests: Vec::new(),
             station_requests: Vec::new(),
+            history_requests: Vec::new(),
             esi_requests: Vec::new(),
             structures_denied: HashSet::new(),
             esi_failure: None,
@@ -422,6 +440,8 @@ impl Inner {
         self.token_options = TokenOptions::default();
         self.orders = default_orders();
         self.market_orders.clear();
+        self.market_history.clear();
+        self.market_failures.clear();
         self.wallets = default_wallets();
         self.assets = default_assets();
         self.transactions.clear();
@@ -433,6 +453,7 @@ impl Inner {
         self.esi_calls.clear();
         self.names_requests.clear();
         self.station_requests.clear();
+        self.history_requests.clear();
         self.esi_requests.clear();
         self.structures_denied.clear();
         self.esi_failure = None;

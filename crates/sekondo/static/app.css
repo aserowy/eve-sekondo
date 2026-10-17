@@ -191,3 +191,42 @@ a.relogin { display: inline-flex; align-items: center; gap: 4px; }
 .chart-tooltip-title { font-weight: 600; }
 .range-control { display: flex; gap: 8px; }
 .range-control a[aria-current="true"] { font-weight: 600; text-decoration: none; color: var(--ink); }
+
+/* Opportunities */
+#opportunities-view { display: flex; flex-direction: column; gap: var(--gap); }
+.station-title { padding: 2px 6px; }
+#opportunities-view .freshness { flex-direction: row; flex-wrap: wrap; gap: 4px 18px; }
+#opportunities-view small.error { color: var(--error); }
+.filters { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px 14px; padding: 3px 6px; }
+.filters input[type="text"], .filters input[type="search"] { width: 9rem; }
+.filters input[name="min_margin"] { width: 4rem; }
+.filters .alert { margin: 0; flex: 1 1 100%; }
+.fees-note, .note { padding: 2px 6px; color: var(--ink-dim); }
+
+/* The opportunity detail window: fixed, never dragged, never blocking. */
+#opportunity-detail {
+  position: fixed;
+  top: calc(var(--bar) + 8px);
+  right: 8px;
+  z-index: 20;
+  width: min(40vw, 36rem);
+  max-height: calc(100dvh - var(--bar) - 16px);
+  overflow: auto;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 40%);
+}
+#opportunity-detail[hidden] { display: none; }
+.detail-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-right: 4px; }
+.detail-head .panel-title { flex: 1 1 auto; }
+.figures th { text-align: left; font-weight: 500; }
+.figures td.how { color: var(--ink-dim); font-size: 0.92em; }
+table.opportunities tbody tr.clickable { cursor: pointer; }
+table.opportunities tbody tr.clickable:hover { background: var(--hover); }
+/* While the window is open the page makes room for it, so it never covers a control. */
+body:has(#opportunity-detail:not([hidden])) #opportunities-view { margin-right: calc(min(40vw, 36rem) + 12px); }
+.detail-chart { margin: 0; padding: 2px 6px 6px; }
+.detail-chart figcaption { color: var(--ink-dim); padding: 2px 0; }
+.detail-chart .chart { height: 10rem; }
+.next-occurrences { padding: 2px 6px; }
+.next-occurrences h3 { color: var(--ink-dim); font-weight: 500; }

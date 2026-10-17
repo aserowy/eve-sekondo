@@ -19,6 +19,7 @@ use crate::{
     events::{Event, EventBus},
     fees::{self, ACCOUNTING, BROKER_RELATIONS},
     names::STRUCTURE_ID_MIN,
+    opportunities::STATION_ID,
     poller::{
         BACKOFF_START, CLAIM_LEASE, PollOutcome, SCHEDULER_TICK, is_foreign_key_violation, jitter,
         spread,
@@ -443,6 +444,43 @@ impl FeePoller {
         learned
     }
 
+    /// Learns the owner of the built-in trading station even when no character has an order
+    /// there. A character's fees at the station then follow from its skills and standings, so
+    /// every account is told once.
+    async fn ensure_built_in_owner(&self, now: OffsetDateTime) {
+        let retry_after = self
+            .station_retries
+            .lock()
+            .unwrap()
+            .get(&STATION_ID)
+            .map(|(_, after)| *after);
+        if retry_after.is_some_and(|after| after > now) {
+            return;
+        }
+        match fees::ensure_station_owner(&self.pool, &self.esi, STATION_ID, now).await {
+            Ok(learned) => {
+                self.station_retries.lock().unwrap().remove(&STATION_ID);
+                if learned {
+                    match sqlx::query_scalar::<_, Uuid>(
+                        "SELECT DISTINCT account_id FROM characters",
+                    )
+                    .fetch_all(&self.pool)
+                    .await
+                    {
+                        Ok(accounts) => accounts.into_iter().for_each(|a| self.publish(a)),
+                        Err(e) => tracing::error!("cannot list the accounts to signal: {e}"),
+                    }
+                }
+            }
+            Err(EsiError::Deferred { until }) => {
+                let mut retries = self.station_retries.lock().unwrap();
+                let failures = retries.get(&STATION_ID).map_or(0, |(f, _)| *f);
+                retries.insert(STATION_ID, (failures, until));
+            }
+            Err(e) => self.station_failed(STATION_ID, now, &e.to_string()),
+        }
+    }
+
     fn station_failed(&self, station_id: i64, now: OffsetDateTime, reason: &str) {
         let mut retries = self.station_retries.lock().unwrap();
         let failures = retries.get(&station_id).map_or(0, |(f, _)| *f) + 1;
@@ -538,6 +576,7 @@ impl FeePoller {
             })
             .await;
         self.resolve_stations().await;
+        self.ensure_built_in_owner(now).await;
         polled
     }
 
@@ -557,6 +596,7 @@ impl FeePoller {
         }
         self.station_retries.lock().unwrap().clear();
         self.resolve_stations().await;
+        self.ensure_built_in_owner(self.clock.now()).await;
         Ok(())
     }
 

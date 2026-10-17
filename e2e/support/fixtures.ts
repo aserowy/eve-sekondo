@@ -205,6 +205,68 @@ export function stubAsset(
   };
 }
 
+async function hook(page: Page, name: string, body?: unknown): Promise<string> {
+  return page.evaluate(
+    async ([hookName, payload]) => {
+      const token = document.querySelector('meta[name="csrf-token"]')!.getAttribute('content')!;
+      const headers: Record<string, string> = { 'X-CSRF-Token': token };
+      if (payload !== undefined) headers['Content-Type'] = 'application/json';
+      const res = await fetch(`/_test/${hookName}`, {
+        method: 'POST',
+        headers,
+        body: payload === undefined ? undefined : JSON.stringify(payload),
+      });
+      return `${res.status} ${await res.text()}`;
+    },
+    [name, body] as const,
+  );
+}
+
+/** Refreshes the station book now through the test-only hook (the stub's region book must be set). */
+export function stationBook(page: Page): Promise<string> {
+  return hook(page, 'station-book');
+}
+
+/** Asks for the history of every due station item now through the test-only hook. */
+export function stationHistory(page: Page): Promise<string> {
+  return hook(page, 'station-history');
+}
+
+/** Rolls the station snapshots up into the hourly and daily aggregates now. */
+export function stationRollups(page: Page): Promise<string> {
+  return hook(page, 'station-rollups');
+}
+
+export interface SeedSnapshot {
+  type_id: number;
+  minutes_back: number;
+  best_buy: number;
+  best_sell: number;
+  buy_near_units?: number;
+  buy_near_orders?: number;
+  sell_near_units?: number;
+  sell_near_orders?: number;
+  buy_units?: number;
+  sell_units?: number;
+  buy_taken?: number;
+  sell_taken?: number;
+}
+
+export interface SeedHistory {
+  type_id: number;
+  days_back: number;
+  average: number;
+  highest: number;
+  lowest: number;
+  volume: number;
+  order_count?: number;
+}
+
+/** Inserts synthetic station snapshots and history for past times through the test-only hook. */
+export function stationSeed(page: Page, seed: { snapshots?: SeedSnapshot[]; history?: SeedHistory[] }): Promise<string> {
+  return hook(page, 'station-seed', seed);
+}
+
 /** Log in through the stub's character picker the way a player would. */
 export async function loginWith(page: Page, characterName: string): Promise<void> {
   await page.goto('/');
@@ -248,7 +310,12 @@ export const test = base.extend<{ cspGuard: void; cleanSlate: void }>({
       // aborts one side with a deadlock, and the truncate is simply tried again.
       for (let attempt = 1; ; attempt++) {
         try {
-          await withDatabase((c) => c.query('TRUNCATE accounts, sessions, market_orders, market_sync, item_prices, price_sync, station_owners CASCADE'));
+          await withDatabase(async (c) => {
+            await c.query('TRUNCATE accounts, sessions, market_orders, market_sync, item_prices, price_sync, station_owners, station_sync, station_orders, station_snapshots, market_history, history_sync, station_item_stats CASCADE');
+            // The rollups are materialized apart from the snapshots, so they are emptied too.
+            await c.query('TRUNCATE station_daily');
+            await c.query('TRUNCATE station_hourly');
+          });
           break;
         } catch (e) {
           if ((e as { code?: string }).code !== '40P01' || attempt >= 5) throw e;

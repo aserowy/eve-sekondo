@@ -54,6 +54,9 @@ Then edit `.env`:
 
 - `ORDER_POLL_INTERVAL_MINUTES` (optional, default 20, whole minutes from 1 to 1440): how often each
   character's orders are polled. Any other value refuses to start.
+- `STATION_SYNC` (optional, `on` or `off`, default `on`): whether the background sync of the trading
+  station's market (the order book, its snapshots and ESI's market history) runs. The browser tests turn
+  it off and drive it through the test hooks. Any other value refuses to start.
 - `ESI_CONTACT` (optional): an email address or EVE character name. It is appended to the `User-Agent`
   of every ESI request (`Sekondo/<version> (+<PUBLIC_BASE_URL>; <contact>)`), so CCP can reach you if
   your installation misbehaves.
@@ -135,6 +138,45 @@ the **margin** of each sell order: what its remaining units earn after fees, min
   tell those sales apart.
 - The design and the specifications are in `openspec/changes/order-undercut-volume-and-margin/`.
 
+## Station trading opportunities
+
+The app keeps a public record of one market, Jita IV - Moon 4 - Caldari Navy Assembly Plant in The Forge,
+for every account, and the Opportunities page (`/opportunities`) shows what is worth buying there. The
+sync can be switched off with `STATION_SYNC=off`.
+
+- **Order book.** At most every 5 minutes, and never before ESI's cache expiry, the whole public order
+  book of The Forge is read (a few hundred pages, eight at a time through the same ESI gate as every
+  other call). A read whose pages belong to different cache generations (they must share one `Expires`)
+  is repeated at once, at most twice. A refresh where any page fails keeps the previous book, records
+  nothing and is retried with the usual backoff. The orders at the station replace `station_orders`, and
+  every item that has a buy and a sell order gets one row in the `station_snapshots` hypertable: best
+  prices, spread, units and orders within 1% per side, total units, and the units taken since the last
+  refresh. Snapshots are compressed after a day and deleted after 30.
+- **Rollups.** `station_hourly` and `station_daily` are hierarchical continuous aggregates of the
+  snapshots (only completed periods are read). `station_daily_figures` joins them with ESI's daily market
+  history: a day's low, high and spread come from the own data when it covers at least 20 of 24 hours,
+  otherwise from the history, and every figure says which.
+- **Market history.** Once a day per tradable item, two requests at a time, the last 30 days of ESI's
+  market history of The Forge are stored. A failing item is retried with a growing delay while the others
+  go on; an item without history is asked again the next day.
+- **Per-item statistics** (`station_item_stats`) hold what does not depend on the account: the book
+  figures after every refresh, the indicators (volume, volatility, SMA 5/20, Bollinger %B, RSI 14, the
+  fresh SMA crossing) after a history pass, and the recurring spread window when the hourly rollup
+  advanced. All maths are pure functions in `crates/sekondo/src/opportunities/analysis.rs`.
+- **The page** shows four tables, each at most 50 rows, sorted by ISK/day unless you sort a column (each
+  table keeps its own sorting in the URL: `xs`/`xd`, `cs`/`cd`, `ms`/`md`, `ts`/`td`): recurring spread
+  expansion, classic spread trade, mean reversion and trend. For every row the request works out the cost
+  `c = B (1 + b)`, the revenue `r = S (1 - b - t)`, the margin `m`, the order size, the fill time, the
+  allowed holding time `min(3, (m / 2σ)^2)` days and ISK/day, with the fees of the selected character that
+  has the lowest minimum margin at the station (base rates of 3% and 7.5% while none is known). An item
+  whose fill time exceeds its holding time, whose margin is not positive, or that has fewer than 10 daily
+  returns is in no table. The filter bar (minimum margin, minimum ISK/day, an item name search and the
+  capital per item) is stored per account. A click on a row opens a fixed window with the fees, every
+  figure and how it follows from the others, and the charts of the table.
+- The owner of the station is looked up once, for every account, so a character has fees there whether or
+  not it has an order in Jita.
+- The design and the specifications are in `openspec/changes/station-trading-opportunities/`.
+
 ## 4. Run with Compose
 
 ```sh
@@ -183,8 +225,8 @@ cd e2e && npm install && npx playwright test           # browser tests
 The `test-hooks` feature adds `POST /_test/refresh/{id}`, `POST /_test/poll/{id}`, `POST /_test/wealth-poll/{id}/{kind}` (`wallet`, `assets` or `transactions`) and `POST /_test/fee-poll` (a signed-in
 account's own characters only; CSRF-protected like any other POST). The first forces a token refresh, the
 second runs one order poll right away, ignoring the schedule but not ESI's limits, so browser tests do not
-have to wait for the scheduler. The third polls the skills and standings of all the account's characters and looks up its station owners. All are compiled out of everything else. The Playwright setup builds with
-the feature and sets `ORDER_POLL_INTERVAL_MINUTES=1440` so the background scheduler stays out of the way.
+have to wait for the scheduler. The third polls the skills and standings of all the account's characters and looks up its station owners. `POST /_test/station-book`, `/_test/station-history`, `/_test/station-rollups` and `/_test/station-seed` (a JSON body of synthetic snapshots and history days for past times) drive the trading station's sync. All are compiled out of everything else. The Playwright setup builds with
+the feature and sets `ORDER_POLL_INTERVAL_MINUTES=1440` and `STATION_SYNC=off` so the background schedulers stay out of the way.
 Without the feature, `cargo test` skips the tests of the hooks.
 
 Playwright needs port 8443 for its own app instance, so stop the Compose `app` container first

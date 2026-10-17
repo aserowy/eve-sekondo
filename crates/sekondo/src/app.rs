@@ -22,12 +22,14 @@ use crate::{
     fee_poller::FeePoller,
     headers,
     market::{MARKET_INTERVAL, MarketPoller},
-    orders, pages,
+    opportunities, orders, pages,
     poller::Poller,
     prices::PricePoller,
     repo::Repo,
     session, sse,
     sso::SsoClient,
+    station_book::{BOOK_INTERVAL, StationBookPoller},
+    station_history::StationHistoryPoller,
     tls,
     tokens::TokenService,
     wealth_page,
@@ -46,6 +48,8 @@ pub struct AppState {
     pub esi: Arc<EsiClient>,
     pub poller: Arc<Poller>,
     pub market: Arc<MarketPoller>,
+    pub station_book: Arc<StationBookPoller>,
+    pub station_history: Arc<StationHistoryPoller>,
     pub wealth: Arc<WealthPoller>,
     pub fees: Arc<FeePoller>,
     pub prices: Arc<PricePoller>,
@@ -137,6 +141,19 @@ impl App {
             clock.clone(),
             MARKET_INTERVAL,
         ));
+        let station_book = Arc::new(StationBookPoller::new(
+            pool.clone(),
+            esi.clone(),
+            events.clone(),
+            clock.clone(),
+            BOOK_INTERVAL,
+        ));
+        let station_history = Arc::new(StationHistoryPoller::new(
+            pool.clone(),
+            esi.clone(),
+            events.clone(),
+            clock.clone(),
+        ));
         let wealth = Arc::new(WealthPoller::new(
             pool.clone(),
             tokens.clone(),
@@ -169,6 +186,8 @@ impl App {
             esi,
             poller,
             market,
+            station_book,
+            station_history,
             wealth,
             fees,
             prices,
@@ -202,6 +221,20 @@ pub fn router(state: AppState, extra_routes: Router<AppState>) -> Router {
         .route("/wealth/freshness", get(wealth_page::freshness))
         .route("/wealth/graph", get(wealth_page::graph))
         .route("/wealth/items", get(wealth_page::items))
+        .route("/opportunities", get(opportunities::page::page))
+        .route(
+            "/opportunities/freshness",
+            get(opportunities::page::freshness_fragment),
+        )
+        .route("/opportunities/tables", get(opportunities::page::tables))
+        .route(
+            "/opportunities/detail/{table}/{type_id}",
+            get(opportunities::page::detail),
+        )
+        .route(
+            "/opportunities/settings",
+            post(opportunities::page::save_settings),
+        )
         .route("/characters", get(pages::characters))
         .route("/characters/{id}/unlink", post(characters::unlink))
         .route("/events", get(sse::stream))
@@ -215,7 +248,7 @@ pub fn router(state: AppState, extra_routes: Router<AppState>) -> Router {
     #[cfg(feature = "test-hooks")]
     let routes = {
         tracing::warn!(
-            "built with the test-hooks feature: POST /_test/refresh/{{id}}, POST /_test/poll/{{id}} and POST /_test/market-poll, POST /_test/wealth-poll/{{id}}/{{kind}} and POST /_test/price-refresh and POST /_test/fee-poll are enabled"
+            "built with the test-hooks feature: POST /_test/refresh/{{id}}, POST /_test/poll/{{id}} and POST /_test/market-poll, POST /_test/wealth-poll/{{id}}/{{kind}} and POST /_test/price-refresh and POST /_test/fee-poll and the /_test/station-* hooks are enabled"
         );
         routes
             .route("/_test/refresh/{id}", post(crate::test_hooks::refresh))
@@ -230,6 +263,16 @@ pub fn router(state: AppState, extra_routes: Router<AppState>) -> Router {
                 post(crate::test_hooks::price_refresh),
             )
             .route("/_test/fee-poll", post(crate::test_hooks::fee_poll))
+            .route("/_test/station-book", post(crate::test_hooks::station_book))
+            .route(
+                "/_test/station-history",
+                post(crate::test_hooks::station_history),
+            )
+            .route(
+                "/_test/station-rollups",
+                post(crate::test_hooks::station_rollups),
+            )
+            .route("/_test/station-seed", post(crate::test_hooks::station_seed))
     };
 
     let router = routes

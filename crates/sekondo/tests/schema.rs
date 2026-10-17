@@ -761,3 +761,488 @@ async fn a_transactions_sync_row_is_allowed_and_an_unknown_kind_is_not(pool: PgP
     insert("transactions").execute(&pool).await.unwrap();
     assert!(insert("journal").execute(&pool).await.is_err());
 }
+
+async fn columns_of(pool: &PgPool, table: &str) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT column_name::text FROM information_schema.columns \
+         WHERE table_name = $1 ORDER BY column_name",
+    )
+    .bind(table)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test]
+async fn station_snapshots_is_a_hypertable_compressed_after_a_day_and_kept_thirty(pool: PgPool) {
+    let interval_secs: f64 = sqlx::query_scalar(
+        "SELECT extract(epoch FROM d.time_interval)::float8 FROM timescaledb_information.dimensions d \
+         WHERE d.hypertable_name = 'station_snapshots'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(interval_secs, 86_400.0);
+
+    let segmentby: Vec<String> = sqlx::query_scalar(
+        "SELECT attname::text FROM timescaledb_information.compression_settings \
+         WHERE hypertable_name = 'station_snapshots' AND segmentby_column_index IS NOT NULL",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(segmentby, ["type_id"]);
+
+    let after = |proc: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, f64>(
+                "SELECT extract(epoch FROM coalesce( \
+                     (config->>'compress_after')::interval, (config->>'drop_after')::interval))::float8 \
+                 FROM timescaledb_information.jobs \
+                 WHERE hypertable_name = 'station_snapshots' AND proc_name = $1",
+            )
+            .bind(proc)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(after("policy_compression").await, 86_400.0);
+    assert_eq!(after("policy_retention").await, 30.0 * 86_400.0);
+}
+
+#[sqlx::test]
+async fn the_station_tables_hold_the_book_the_snapshot_and_the_sync_state(pool: PgPool) {
+    assert_eq!(
+        columns_of(&pool, "station_orders").await,
+        [
+            "is_buy_order",
+            "order_id",
+            "price",
+            "region_id",
+            "station_id",
+            "type_id",
+            "volume_remain"
+        ]
+    );
+    assert_eq!(
+        columns_of(&pool, "station_snapshots").await,
+        [
+            "best_buy",
+            "best_sell",
+            "buy_near_orders",
+            "buy_near_units",
+            "buy_taken",
+            "buy_units",
+            "recorded_at",
+            "region_id",
+            "sell_near_orders",
+            "sell_near_units",
+            "sell_taken",
+            "sell_units",
+            "spread",
+            "station_id",
+            "type_id"
+        ]
+    );
+    let order = "INSERT INTO station_orders (region_id, station_id, order_id, type_id, is_buy_order, price, volume_remain) \
+                 VALUES (10000002, 60003760, 1, 34, false, 10.50, 3)";
+    sqlx::query(order).execute(&pool).await.unwrap();
+    assert!(
+        sqlx::query(order).execute(&pool).await.is_err(),
+        "order_id is the key"
+    );
+
+    let sync = "INSERT INTO station_sync (region_id, station_id, kind, next_poll_at) \
+                VALUES (10000002, 60003760, $1, now())";
+    sqlx::query(sync).bind("book").execute(&pool).await.unwrap();
+    sqlx::query(sync)
+        .bind("history")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        sqlx::query(sync).bind("book").execute(&pool).await.is_err(),
+        "one row per kind"
+    );
+    assert!(
+        sqlx::query(sync)
+            .bind("other")
+            .execute(&pool)
+            .await
+            .is_err(),
+        "unknown kind"
+    );
+    let failures: i32 = sqlx::query_scalar("SELECT failures FROM station_sync LIMIT 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(failures, 0);
+}
+
+#[sqlx::test]
+async fn market_history_and_its_sync_state_are_keyed_per_item_and_day(pool: PgPool) {
+    assert_eq!(
+        columns_of(&pool, "market_history").await,
+        [
+            "average",
+            "day",
+            "highest",
+            "lowest",
+            "order_count",
+            "region_id",
+            "type_id",
+            "volume"
+        ]
+    );
+    let day = "INSERT INTO market_history (region_id, type_id, day, average, highest, lowest, volume, order_count) \
+               VALUES (10000002, 34, '2026-10-16', 5.5, 6, 5, 100, 10)";
+    sqlx::query(day).execute(&pool).await.unwrap();
+    assert!(
+        sqlx::query(day).execute(&pool).await.is_err(),
+        "one row per item and day"
+    );
+
+    let sync =
+        "INSERT INTO history_sync (region_id, type_id, next_poll_at) VALUES (10000002, 34, now())";
+    sqlx::query(sync).execute(&pool).await.unwrap();
+    assert!(
+        sqlx::query(sync).execute(&pool).await.is_err(),
+        "one row per item"
+    );
+}
+
+#[sqlx::test]
+async fn item_stats_are_one_row_per_item_and_hold_no_account_data(pool: PgPool) {
+    let columns = columns_of(&pool, "station_item_stats").await;
+    for column in [
+        "region_id",
+        "station_id",
+        "type_id",
+        "book_at",
+        "best_buy",
+        "best_sell",
+        "buy_near_orders",
+        "sell_near_orders",
+        "rho",
+        "volume_7d",
+        "volume_30d",
+        "sigma",
+        "returns",
+        "sma5",
+        "sma20",
+        "cross_day",
+        "percent_b",
+        "rsi14",
+        "indicators_at",
+        "expansion_kind",
+        "expansion_weekday",
+        "expansion_hour",
+        "expansion_sell",
+        "expansion_at",
+    ] {
+        assert!(
+            columns.iter().any(|c| c == column),
+            "{column} in {columns:?}"
+        );
+    }
+    assert!(
+        !columns
+            .iter()
+            .any(|c| c.contains("account") || c.contains("character"))
+    );
+    let insert = "INSERT INTO station_item_stats (region_id, station_id, type_id) VALUES (10000002, 60003760, 34)";
+    sqlx::query(insert).execute(&pool).await.unwrap();
+    assert!(
+        sqlx::query(insert).execute(&pool).await.is_err(),
+        "one row per item"
+    );
+}
+
+#[sqlx::test]
+async fn opportunity_settings_default_and_go_with_the_account(pool: PgPool) {
+    let account = insert_account(&pool).await;
+    let other = insert_account(&pool).await;
+    for id in [account, other] {
+        sqlx::query("INSERT INTO opportunity_settings (account_id) VALUES ($1)")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let row: (String, String, String, String) = sqlx::query_as(
+        "SELECT min_margin::text, min_isk_per_day::text, search, capital::text \
+         FROM opportunity_settings WHERE account_id = $1",
+    )
+    .bind(account)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        row,
+        (
+            "0.05".into(),
+            "5000000".into(),
+            String::new(),
+            "100000000".into()
+        )
+    );
+    assert!(
+        sqlx::query("INSERT INTO opportunity_settings (account_id) VALUES ($1)")
+            .bind(account)
+            .execute(&pool)
+            .await
+            .is_err(),
+        "one row per account"
+    );
+
+    sqlx::query("DELETE FROM accounts WHERE id = $1")
+        .bind(account)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(count(&pool, "opportunity_settings").await, 1);
+}
+
+async fn snapshot_at(
+    pool: &PgPool,
+    at: &str,
+    type_id: i64,
+    buy: f64,
+    sell: f64,
+    taken: (i64, i64),
+) {
+    sqlx::query(
+        "INSERT INTO station_snapshots (recorded_at, region_id, station_id, type_id, best_buy, best_sell, \
+             spread, buy_near_units, buy_near_orders, sell_near_units, sell_near_orders, \
+             buy_units, sell_units, buy_taken, sell_taken) \
+         VALUES ($1::timestamptz, 10000002, 60003760, $2, $3::numeric, $4::numeric, \
+             ($4::numeric - $3::numeric) / $3::numeric, 10, 2, 20, 3, 100, 200, $5, $6)",
+    )
+    .bind(at)
+    .bind(type_id)
+    .bind(buy)
+    .bind(sell)
+    .bind(taken.0)
+    .bind(taken.1)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn history_day(
+    pool: &PgPool,
+    type_id: i64,
+    day: &str,
+    average: f64,
+    highest: f64,
+    lowest: f64,
+    volume: i64,
+) {
+    sqlx::query(
+        "INSERT INTO market_history (region_id, type_id, day, average, highest, lowest, volume, order_count) \
+         VALUES (10000002, $1, $2::date, $3::numeric, $4::numeric, $5::numeric, $6, 10)",
+    )
+    .bind(type_id)
+    .bind(day)
+    .bind(average)
+    .bind(highest)
+    .bind(lowest)
+    .bind(volume)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn roll_up(pool: &PgPool) {
+    for view in ["station_hourly", "station_daily"] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CALL refresh_continuous_aggregate('{view}', '2026-08-01', '2026-10-01')"
+        )))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+}
+
+#[sqlx::test]
+async fn an_hour_keeps_minimum_maximum_and_average_apart(pool: PgPool) {
+    for (at, sell, taken) in [
+        ("2026-09-01 10:05:00+00", 110.0, 1),
+        ("2026-09-01 10:20:00+00", 130.0, 2),
+        ("2026-09-01 10:40:00+00", 120.0, 4),
+    ] {
+        snapshot_at(&pool, at, 34, 100.0, sell, (taken, taken * 10)).await;
+    }
+    roll_up(&pool).await;
+
+    let row: (String, String, String, i64, i64, i64) = sqlx::query_as(
+        "SELECT best_sell_min::text, best_sell_max::text, round(best_sell_avg, 2)::text, \
+                snapshots, buy_taken, sell_taken \
+         FROM station_hourly WHERE bucket = '2026-09-01 10:00:00+00' AND type_id = 34",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        row,
+        ("110.00".into(), "130.00".into(), "120.00".into(), 3, 7, 70)
+    );
+}
+
+#[sqlx::test]
+async fn a_day_averages_over_its_snapshots_not_over_its_hourly_averages(pool: PgPool) {
+    // Hour 0 has three snapshots at 100, hour 1 has one at 200: the day's average is 125, not 150.
+    for at in [
+        "2026-09-01 00:10:00+00",
+        "2026-09-01 00:20:00+00",
+        "2026-09-01 00:30:00+00",
+    ] {
+        snapshot_at(&pool, at, 34, 90.0, 100.0, (1, 1)).await;
+    }
+    snapshot_at(&pool, "2026-09-01 01:10:00+00", 34, 90.0, 200.0, (1, 1)).await;
+    roll_up(&pool).await;
+
+    let row: (String, String, String, i64, i64, i64) = sqlx::query_as(
+        "SELECT best_sell_min::text, best_sell_max::text, round(best_sell_avg, 2)::text, \
+                hours_covered, buy_taken, sell_taken \
+         FROM station_daily WHERE bucket = '2026-09-01 00:00:00+00' AND type_id = 34",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        row,
+        ("100.00".into(), "200.00".into(), "125.00".into(), 2, 4, 4)
+    );
+}
+
+async fn fill_hours(pool: &PgPool, day: &str, hours: std::ops::Range<u32>) {
+    for hour in hours {
+        let at = format!("{day} {hour:02}:30:00+00");
+        snapshot_at(
+            pool,
+            &at,
+            34,
+            100.0 + f64::from(hour),
+            120.0 + f64::from(hour),
+            (0, 0),
+        )
+        .await;
+    }
+}
+
+#[sqlx::test]
+async fn a_covered_day_takes_low_and_high_from_its_own_data(pool: PgPool) {
+    fill_hours(&pool, "2026-09-01", 0..24).await;
+    history_day(&pool, 34, "2026-09-01", 111.5, 500.0, 50.0, 7777).await;
+    roll_up(&pool).await;
+
+    let row: (String, String, String, i64, String, i64) = sqlx::query_as(
+        "SELECT low::text, high::text, source, hours_covered, average::text, volume \
+         FROM station_daily_figures WHERE type_id = 34 AND day = '2026-09-01'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // Lowest best buy of the day is 100 (hour 0), highest best sell is 143 (hour 23).
+    assert_eq!(
+        row,
+        (
+            "100.00".into(),
+            "143.00".into(),
+            "own".into(),
+            24,
+            "111.50".into(),
+            7777
+        )
+    );
+}
+
+#[sqlx::test]
+async fn a_gap_in_own_data_falls_back_to_the_history_and_says_so(pool: PgPool) {
+    fill_hours(&pool, "2026-09-01", 0..5).await;
+    history_day(&pool, 34, "2026-09-01", 111.5, 500.0, 50.0, 7777).await;
+    roll_up(&pool).await;
+
+    let row: (String, String, String, String, String, i64) = sqlx::query_as(
+        "SELECT low::text, high::text, round(spread, 4)::text, source, average::text, volume \
+         FROM station_daily_figures WHERE type_id = 34 AND day = '2026-09-01'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // (500 - 50) / 50 = 9 from the history's highest and lowest.
+    assert_eq!(
+        row,
+        (
+            "50.00".into(),
+            "500.00".into(),
+            "9.0000".into(),
+            "history".into(),
+            "111.50".into(),
+            7777
+        )
+    );
+}
+
+#[sqlx::test]
+async fn a_day_of_exactly_twenty_hours_counts_as_covered_and_nineteen_does_not(pool: PgPool) {
+    fill_hours(&pool, "2026-09-01", 0..20).await;
+    fill_hours(&pool, "2026-09-02", 0..19).await;
+    for day in ["2026-09-01", "2026-09-02"] {
+        history_day(&pool, 34, day, 100.0, 500.0, 50.0, 1).await;
+    }
+    roll_up(&pool).await;
+
+    let sources: Vec<(String, String)> = sqlx::query_as(
+        "SELECT day::text, source FROM station_daily_figures WHERE type_id = 34 ORDER BY day",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        sources,
+        [
+            ("2026-09-01".into(), "own".into()),
+            ("2026-09-02".into(), "history".into())
+        ]
+    );
+}
+
+#[sqlx::test]
+async fn the_rollups_only_read_completed_periods_and_have_policies(pool: PgPool) {
+    for view in ["station_hourly", "station_daily"] {
+        let materialized_only: bool = sqlx::query_scalar(
+            "SELECT materialized_only FROM timescaledb_information.continuous_aggregates \
+             WHERE view_name = $1",
+        )
+        .bind(view)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(materialized_only, "{view}");
+
+        for proc in ["policy_refresh_continuous_aggregate", "policy_retention"] {
+            let jobs: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM timescaledb_information.jobs \
+                 WHERE hypertable_name = (SELECT materialization_hypertable_name \
+                     FROM timescaledb_information.continuous_aggregates WHERE view_name = $1) \
+                 AND proc_name = $2",
+            )
+            .bind(view)
+            .bind(proc)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(jobs, 1, "{view} {proc}");
+        }
+    }
+}

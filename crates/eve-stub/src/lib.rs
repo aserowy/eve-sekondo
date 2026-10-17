@@ -145,6 +145,11 @@ impl Stub {
         self.shared.lock().unwrap().station_requests.clone()
     }
 
+    /// The region and item of every market history request so far.
+    pub fn history_requests(&self) -> Vec<(i64, i64)> {
+        self.shared.lock().unwrap().history_requests.clone()
+    }
+
     /// How many times `/v2/oauth/token` was called (including failed calls).
     pub fn token_calls(&self) -> u64 {
         self.shared.lock().unwrap().token_calls

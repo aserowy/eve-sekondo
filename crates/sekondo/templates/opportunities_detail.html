@@ -1,0 +1,33 @@
+<div id="opportunity-detail-content" data-detail-url="{{ view.refresh_url }}" hx-get="{{ view.refresh_url }}" hx-trigger="sse:opportunities-updated, sse:orders-updated, sse:fees-updated" hx-target="#opportunity-detail" hx-swap="innerHTML">
+  <header class="detail-head">
+    <h2 id="opportunity-detail-title" class="panel-title">{{ view.name }} &middot; {{ view.table_title }}</h2>
+    <button type="button" class="icon-control" data-close-detail aria-label="Close" title="Close">&times;</button>
+  </header>
+  {% if let Some(reason) = view.reason %}
+  <p id="opportunity-detail-unlisted" class="alert">No longer listed in this table. {{ reason }}</p>
+  {% endif %}
+  <p class="fees-note">{{ view.fees_note }}</p>
+  {% if !view.figures.is_empty() %}
+  <table class="figures">
+    <tbody>
+      {% for f in view.figures %}
+      <tr data-figure="{{ f.key }}"><th scope="row">{{ f.label }}</th><td class="num" data-value>{{ f.value }}</td><td class="how">{{ f.how }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  {% if !view.next_occurrences.is_empty() %}
+  <section class="next-occurrences">
+    <h3>Next occurrences (EVE time)</h3>
+    <ul>
+      {% for at in view.next_occurrences %}<li>{{ at }}</li>{% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+  {% for c in view.charts %}
+  <figure class="detail-chart">
+    <figcaption>{{ c.title }}</figcaption>
+    <div class="chart"><canvas data-chart="{{ c.kind }}" data-series="{{ c.json }}" role="img" aria-label="{{ c.title }}"></canvas></div>
+  </figure>
+  {% endfor %}
+</div>

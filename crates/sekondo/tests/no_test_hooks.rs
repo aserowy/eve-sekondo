@@ -77,3 +77,41 @@ async fn the_wealth_and_fee_hooks_are_absent(pool: PgPool) {
         assert_eq!(res.status(), 404, "{path}");
     }
 }
+
+#[sqlx::test]
+async fn the_station_hooks_are_absent(pool: PgPool) {
+    let app = AppBuilder::new(pool).with_stub().spawn().await;
+    let browser = app.browser();
+    browser.sso_round_trip(&app, "/auth/login", ALICE).await;
+    let html = browser
+        .get(&app.url("/characters"))
+        .await
+        .text()
+        .await
+        .unwrap();
+    let token = html
+        .split(r#"<meta name="csrf-token" content=""#)
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+
+    for hook in [
+        "station-book",
+        "station-history",
+        "station-rollups",
+        "station-seed",
+    ] {
+        let res = browser
+            .send(
+                browser
+                    .post(&app.url(&format!("/_test/{hook}")))
+                    .header("origin", &app.base_url)
+                    .header("hx-request", "true")
+                    .header("x-csrf-token", token),
+            )
+            .await;
+        assert_eq!(res.status(), 404, "{hook}");
+    }
+}

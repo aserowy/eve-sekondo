@@ -44,6 +44,9 @@ pub struct Config {
     pub static_dir: PathBuf,
     /// How often each character's orders are polled (1 to 1440 minutes).
     pub order_poll_interval: time::Duration,
+    /// Whether the background sync of the trading station's market runs. Browser tests turn it
+    /// off and drive it through the test hooks instead.
+    pub station_sync: bool,
     /// Appended to the ESI `User-Agent` so CCP can reach the operator.
     pub esi_contact: Option<String>,
 }
@@ -106,6 +109,8 @@ impl Config {
             DEFAULT_POLL_INTERVAL_MINUTES,
         ))?;
 
+        let station_sync = parse_switch("STATION_SYNC", &or_default("STATION_SYNC", "on"))?;
+
         Ok(Self {
             database_url: SecretString::from(database_url),
             bind_addr,
@@ -122,6 +127,7 @@ impl Config {
                 .filter(|v| !v.is_empty())
                 .map_or_else(default_static_dir, PathBuf::from),
             order_poll_interval,
+            station_sync,
             esi_contact: get("ESI_CONTACT")
                 .map(|v| v.trim().to_owned())
                 .filter(|v| !v.is_empty()),
@@ -132,6 +138,14 @@ impl Config {
 /// The vendored assets live next to the crate sources; deployments override with `STATIC_DIR`.
 fn default_static_dir() -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/static"))
+}
+
+fn parse_switch(var: &'static str, value: &str) -> Result<bool, ConfigError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" | "yes" => Ok(true),
+        "off" | "false" | "0" | "no" => Ok(false),
+        other => Err(invalid(var, format!("{other:?} is neither on nor off"))),
+    }
 }
 
 fn parse_poll_interval(value: &str) -> Result<time::Duration, ConfigError> {
@@ -339,6 +353,25 @@ mod tests {
     }
 
     #[test]
+    fn station_sync_is_on_by_default_and_can_be_switched_off() {
+        assert!(Fixture::valid().load().unwrap().station_sync);
+        for value in ["on", "true", "1", "yes", "ON"] {
+            let config = Fixture::valid().set("STATION_SYNC", value).load().unwrap();
+            assert!(config.station_sync, "{value}");
+        }
+        for value in ["off", "false", "0", "no", "Off"] {
+            let config = Fixture::valid().set("STATION_SYNC", value).load().unwrap();
+            assert!(!config.station_sync, "{value}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_station_sync_value_names_the_variable() {
+        let err = Fixture::valid().set("STATION_SYNC", "maybe").error();
+        assert!(err.contains("STATION_SYNC"), "{err}");
+    }
+
+    #[test]
     fn missing_certificate_is_rejected() {
         let err = Fixture::valid()
             .set("TLS_CERT_PATH", "/nonexistent/dev.pem")
@@ -391,6 +424,7 @@ mod env_example_tests {
             "TOKEN_ENCRYPTION_KEY",
             "STATIC_DIR",
             "ORDER_POLL_INTERVAL_MINUTES",
+            "STATION_SYNC",
             "ESI_CONTACT",
         ] {
             assert!(vars.contains_key(name), "{name} missing from .env.example");

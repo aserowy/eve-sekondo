@@ -29,6 +29,11 @@ pub const ROUTE_NAMES: &str = "names";
 pub const ROUTE_STRUCTURES: &str = "structures";
 /// Public market orders, in a rate-limit group of their own.
 pub const ROUTE_MARKET: &str = "market";
+/// The region-wide order book, page by page. Shares the market rate-limit group, which the gate
+/// learns from the answers' headers.
+pub const ROUTE_REGION_BOOK: &str = "region-book";
+/// The market history of one item; error-limited, not rate-limited.
+pub const ROUTE_HISTORY: &str = "history";
 pub const ROUTE_WALLET: &str = "wallet";
 /// Shares the wallet's rate-limit group, which the gate learns from the answers' headers.
 pub const ROUTE_TRANSACTIONS: &str = "transactions";
@@ -92,6 +97,21 @@ pub struct EsiMarketOrder {
     pub price_cents: i64,
     pub range: String,
     pub volume_remain: i64,
+}
+
+/// One day of an item's market history in a region: what the opportunity analysis reads.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct EsiHistoryDay {
+    /// `YYYY-MM-DD`
+    pub date: String,
+    #[serde(rename = "average", deserialize_with = "cents")]
+    pub average_cents: i64,
+    #[serde(rename = "highest", deserialize_with = "cents")]
+    pub highest_cents: i64,
+    #[serde(rename = "lowest", deserialize_with = "cents")]
+    pub lowest_cents: i64,
+    pub order_count: i64,
+    pub volume: i64,
 }
 
 /// One asset of a character, with only what the valuation and the list read.
@@ -201,6 +221,21 @@ pub struct EsiResponse<T> {
     pub body: T,
     /// When ESI's cache for this answer runs out, on the local clock.
     pub expires_at: Option<OffsetDateTime>,
+    /// ESI's own `Expires` (Unix seconds): the same for every answer of one cache generation,
+    /// whatever the local clock says.
+    pub server_expires: Option<i64>,
+}
+
+/// One page of a region's whole order book.
+#[derive(Debug, Clone)]
+pub struct EsiBookPage {
+    pub orders: Vec<EsiMarketOrder>,
+    /// How many pages the book has (`X-Pages`).
+    pub pages: u32,
+    /// When ESI's cache for this page runs out, on the local clock.
+    pub expires_at: Option<OffsetDateTime>,
+    /// ESI's own `Expires` (Unix seconds): pages of one cache generation share it.
+    pub generation: Option<i64>,
 }
 
 pub struct EsiClient {
@@ -252,6 +287,7 @@ impl EsiClient {
         Ok(EsiResponse {
             body: (response.body * 100.0).round() as i64,
             expires_at: response.expires_at,
+            server_expires: response.server_expires,
         })
     }
 
@@ -298,6 +334,7 @@ impl EsiClient {
         Ok(EsiResponse {
             body: assets,
             expires_at: first.expires_at,
+            server_expires: first.server_expires,
         })
     }
 
@@ -387,7 +424,40 @@ impl EsiClient {
         Ok(EsiResponse {
             body: orders,
             expires_at: first.expires_at,
+            server_expires: first.server_expires,
         })
+    }
+
+    /// One page of every public market order of a region, whatever the item. Needs no token.
+    pub async fn region_orders_page(
+        &self,
+        region_id: i64,
+        page: u32,
+    ) -> Result<EsiBookPage, EsiError> {
+        let mut url = self.url(&format!("markets/{region_id}/orders"));
+        url.query_pairs_mut().append_pair("page", &page.to_string());
+        let (response, pages) = self
+            .fetch_paged::<Vec<EsiMarketOrder>>(ROUTE_REGION_BOOK, self.http.get(url))
+            .await?;
+        Ok(EsiBookPage {
+            orders: response.body,
+            pages: pages.unwrap_or(1),
+            expires_at: response.expires_at,
+            generation: response.server_expires,
+        })
+    }
+
+    /// The daily market history of one item in a region, oldest first. A type nobody traded is an
+    /// empty list; an unknown type is `NotFound`. Needs no token.
+    pub async fn market_history(
+        &self,
+        region_id: i64,
+        type_id: i64,
+    ) -> Result<EsiResponse<Vec<EsiHistoryDay>>, EsiError> {
+        let mut url = self.url(&format!("markets/{region_id}/history"));
+        url.query_pairs_mut()
+            .append_pair("type_id", &type_id.to_string());
+        self.fetch(ROUTE_HISTORY, self.http.get(url)).await
     }
 
     fn url(&self, path: &str) -> Url {
@@ -423,6 +493,7 @@ impl EsiClient {
         match status {
             s if s.is_success() => {
                 let expires_at = expires_at(response.headers(), self.clock.now());
+                let server_expires = server_expires(response.headers());
                 let pages =
                     header_int(response.headers(), "x-pages").and_then(|p| u32::try_from(p).ok());
                 // Read as text first: reqwest's own decode error does not say which field failed.
@@ -432,7 +503,14 @@ impl EsiClient {
                     .map_err(|e| EsiError::Temporary(format!("unreadable ESI answer: {e}")))?;
                 let body = serde_json::from_str(&text)
                     .map_err(|e| EsiError::Temporary(format!("unreadable ESI answer: {e}")))?;
-                Ok((EsiResponse { body, expires_at }, pages))
+                Ok((
+                    EsiResponse {
+                        body,
+                        expires_at,
+                        server_expires,
+                    },
+                    pages,
+                ))
             }
             StatusCode::FORBIDDEN => Err(EsiError::Forbidden),
             StatusCode::NOT_FOUND => Err(EsiError::NotFound),
@@ -474,6 +552,16 @@ pub fn user_agent(public_base_url: &Url, contact: Option<&str>) -> String {
     }
     agent.push(')');
     agent
+}
+
+/// ESI's `Expires` as it is, in Unix seconds.
+fn server_expires(headers: &HeaderMap) -> Option<i64> {
+    let expires = httpdate::parse_http_date(headers.get("expires")?.to_str().ok()?).ok()?;
+    let seconds = expires
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    i64::try_from(seconds).ok()
 }
 
 /// ESI's `Expires` on the local clock: the server's `Expires` minus its own `Date`, added to now,

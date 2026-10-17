@@ -360,3 +360,82 @@ async fn the_same_inputs_give_the_same_rows_and_a_change_gives_different_ones(po
 
     assert_ne!(before, fees_of(&pool, &[ALICE]).await);
 }
+
+// ---- the built-in station for a character without orders there ----
+
+#[sqlx::test]
+async fn a_character_without_orders_in_jita_still_has_fees_there(pool: PgPool) {
+    let acc = account(&pool).await;
+    character(&pool, acc, ALICE).await;
+    order(&pool, 1, ALICE, AMARR).await;
+    polled(&pool, ALICE, "skills").await;
+    polled(&pool, ALICE, "standings").await;
+    skill(&pool, ALICE, ACCOUNTING, 5).await;
+    skill(&pool, ALICE, BROKER_RELATIONS, 5).await;
+    standing(&pool, ALICE, CALDARI_STATE, "faction", "2.0").await;
+    standing(&pool, ALICE, CALDARI_NAVY, "npc_corp", "1.5").await;
+    owner(&pool, JITA, CALDARI_NAVY).await;
+
+    let at_jita = fees::at_location(&pool, acc, &[ALICE], JITA).await.unwrap();
+
+    assert_eq!(at_jita.len(), 1);
+    let row = &at_jita[0];
+    assert_eq!((row.character_id, row.location_id), (ALICE, JITA));
+    assert_eq!(row.sales_tax.as_deref(), Some("3.375"));
+    assert_eq!(row.broker_fee.as_deref(), Some("1.410"));
+    assert!(row.min_margin.as_deref().unwrap().starts_with("6.5063"));
+    // What the orders page lists is still driven by the orders: only Amarr.
+    let listed = fees_of(&pool, &[ALICE]).await;
+    assert_eq!(
+        listed.iter().map(|r| r.location_id).collect::<Vec<_>>(),
+        [AMARR]
+    );
+}
+
+#[sqlx::test]
+async fn fees_at_a_location_follow_the_polls_and_the_owner_like_the_order_fees(pool: PgPool) {
+    let acc = account(&pool).await;
+    character(&pool, acc, ALICE).await;
+
+    // Nothing polled: nothing known.
+    let row = &fees::at_location(&pool, acc, &[ALICE], JITA).await.unwrap()[0];
+    assert_eq!(
+        (&row.sales_tax, &row.broker_fee, &row.min_margin),
+        (&None, &None, &None)
+    );
+
+    // Skills polled: a sales tax, but no broker fee without standings and an owner.
+    polled(&pool, ALICE, "skills").await;
+    skill(&pool, ALICE, ACCOUNTING, 5).await;
+    skill(&pool, ALICE, BROKER_RELATIONS, 5).await;
+    let row = &fees::at_location(&pool, acc, &[ALICE], JITA).await.unwrap()[0];
+    assert_eq!(row.sales_tax.as_deref(), Some("3.375"));
+    assert_eq!((&row.broker_fee, &row.min_margin), (&None, &None));
+
+    // Standings polled too, but the owner is not known yet.
+    polled(&pool, ALICE, "standings").await;
+    let row = &fees::at_location(&pool, acc, &[ALICE], JITA).await.unwrap()[0];
+    assert_eq!(row.broker_fee, None);
+
+    // The owner is known: the fee follows (no standings towards it count as 0).
+    owner(&pool, JITA, CALDARI_NAVY).await;
+    let row = &fees::at_location(&pool, acc, &[ALICE], JITA).await.unwrap()[0];
+    assert_eq!(row.broker_fee.as_deref(), Some("1.50"), "3 - 0.3 * 5");
+}
+
+#[sqlx::test]
+async fn fees_at_a_location_never_reach_another_accounts_characters(pool: PgPool) {
+    let acc = account(&pool).await;
+    let other = account(&pool).await;
+    character(&pool, acc, ALICE).await;
+    character(&pool, other, BOB).await;
+
+    let rows = fees::at_location(&pool, acc, &[ALICE, BOB], JITA)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        rows.iter().map(|r| r.character_id).collect::<Vec<_>>(),
+        [ALICE]
+    );
+}

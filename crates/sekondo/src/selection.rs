@@ -12,6 +12,15 @@ pub struct ViewQuery {
     pub bsort: Option<String>,
     pub bdir: Option<String>,
     pub range: Option<String>,
+    /// The Opportunities page's per-table sorting: expansion, classic, mean reversion, trend.
+    pub xs: Option<String>,
+    pub xd: Option<String>,
+    pub cs: Option<String>,
+    pub cd: Option<String>,
+    pub ms: Option<String>,
+    pub md: Option<String>,
+    pub ts: Option<String>,
+    pub td: Option<String>,
 }
 
 impl ViewQuery {
@@ -26,6 +35,14 @@ impl ViewQuery {
                 "bsort" => &mut parsed.bsort,
                 "bdir" => &mut parsed.bdir,
                 "range" => &mut parsed.range,
+                "xs" => &mut parsed.xs,
+                "xd" => &mut parsed.xd,
+                "cs" => &mut parsed.cs,
+                "cd" => &mut parsed.cd,
+                "ms" => &mut parsed.ms,
+                "md" => &mut parsed.md,
+                "ts" => &mut parsed.ts,
+                "td" => &mut parsed.td,
                 _ => continue,
             };
             slot.get_or_insert_with(|| value.into_owned());

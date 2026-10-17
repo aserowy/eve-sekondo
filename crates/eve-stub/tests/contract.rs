@@ -321,6 +321,73 @@ async fn market_orders_conform_on_every_page_and_when_empty() {
     }
 }
 
+fn history_day() -> Value {
+    json!({"date": "2026-10-16", "average": 5.5, "highest": 6.0, "lowest": 5.0,
+           "order_count": 10, "volume": 100})
+}
+
+#[tokio::test]
+async fn the_region_wide_book_conforms_on_every_page() {
+    let f = common::start_unverified().await;
+    control(
+        &f,
+        "market-orders",
+        json!({"region_id": 10000002, "page_size": 1,
+               "orders": [market_order(1, false), market_order(2, true)]}),
+    )
+    .await;
+    for page in 1..=2 {
+        let answer = market_of(&f, 10000002, &format!("page={page}")).await;
+        assert_eq!(answer.headers["x-pages"], "2");
+        conforms("region-orders", "orders", &answer);
+    }
+}
+
+#[tokio::test]
+async fn market_history_conforms_with_days_and_without() {
+    let f = common::start_unverified().await;
+    control(
+        &f,
+        "market-history",
+        json!({"region_id": 10000002, "type_id": 34, "days": [history_day()]}),
+    )
+    .await;
+
+    let with = get(&f, "/markets/10000002/history?type_id=34", None).await;
+    let without = get(&f, "/markets/10000002/history?type_id=35", None).await;
+
+    conforms("market-history", "history", &with);
+    conforms("market-history", "no-history", &without);
+}
+
+#[tokio::test]
+async fn a_history_fixture_without_a_volume_fails_the_conformance_check() {
+    let f = common::start_unverified().await;
+    let mut day = history_day();
+    day.as_object_mut().unwrap().remove("volume");
+    control(
+        &f,
+        "market-history",
+        json!({"region_id": 10000002, "type_id": 34, "days": [day]}),
+    )
+    .await;
+
+    let answer = get(&f, "/markets/10000002/history?type_id=34", None).await;
+
+    let violations = esi_contract::check(
+        &contract("market-history"),
+        "history",
+        Some(answer.status),
+        &answer.headers,
+        answer.body.as_ref(),
+    );
+    assert_eq!(violations.len(), 1);
+    assert!(
+        violations[0].to_string().contains("volume"),
+        "{violations:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_market_fixture_without_a_system_fails_the_conformance_check() {
     let f = common::start_unverified().await;
@@ -414,6 +481,7 @@ async fn injected_failures_conform_on_every_esi_route() {
             ("names", "names"),
             ("structures", "structures"),
             ("market", "market-orders"),
+            ("history", "market-history"),
             ("wallet", "wallet"),
             ("assets", "assets"),
             ("transactions", "wallet-transactions"),
@@ -432,6 +500,7 @@ async fn injected_failures_conform_on_every_esi_route() {
                 "orders" => get(&f, &orders, Some(&token)).await,
                 "names" => names(&f, &[34]).await,
                 "market" => get(&f, market, None).await,
+                "history" => get(&f, "/markets/10000002/history?type_id=34", None).await,
                 "wallet" => get(&f, &wallet, Some(&token)).await,
                 "assets" => get(&f, &assets, Some(&token)).await,
                 "transactions" => get(&f, &transactions, Some(&token)).await,

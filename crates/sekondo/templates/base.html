@@ -19,6 +19,7 @@
       <li><a href="{{ nav.dashboard_href() }}"{% if nav.dashboard_current() %} aria-current="page"{% endif %}>Dashboard</a></li>
       <li><a href="{{ nav.orders_href() }}"{% if nav.orders_current() %} aria-current="page"{% endif %}>Orders</a></li>
       <li><a href="{{ nav.wealth_href() }}"{% if nav.wealth_current() %} aria-current="page"{% endif %}>Wealth</a></li>
+      <li><a href="{{ nav.opportunities_href() }}"{% if nav.opportunities_current() %} aria-current="page"{% endif %}>Opportunities</a></li>
     </ul>
     <div class="controls">{% block controls %}{% endblock %}</div>
     <a class="icon-control" href="{{ nav.characters_href() }}" aria-label="Characters" title="Characters"{% if nav.characters_current() %} aria-current="page"{% endif %}>{% include "icons/users.html" %}</a>

@@ -717,3 +717,169 @@ async fn the_transactions_call_maps_errors_and_shares_the_wallet_rate_limit_grou
     ));
     assert!(h.client.assets(90000001, &token).await.is_ok());
 }
+
+#[tokio::test]
+async fn a_region_book_page_carries_its_orders_the_page_count_and_the_expiry() {
+    let h = common::esi_harness().await;
+    let orders: Vec<_> = (1..=5)
+        .map(|id| market_order(id, 30 + id, id % 2 == 0, 10.25))
+        .collect();
+    h.control(
+        "market-orders",
+        json!({"region_id": 10000002, "orders": orders, "page_size": 2}),
+    )
+    .await;
+    h.control("esi-expires", json!({"seconds": 300})).await;
+
+    let first = h.client.region_orders_page(10000002, 1).await.unwrap();
+    let last = h.client.region_orders_page(10000002, 3).await.unwrap();
+
+    assert_eq!(first.pages, 3);
+    assert_eq!(
+        first.orders.iter().map(|o| o.order_id).collect::<Vec<_>>(),
+        [1, 2]
+    );
+    let order = &first.orders[0];
+    assert_eq!(
+        (order.type_id, order.location_id, order.volume_remain),
+        (31, 60003760, 3)
+    );
+    assert_eq!(order.price_cents, 1025);
+    assert_eq!(last.orders.len(), 1);
+    let ahead = first.expires_at.unwrap() - h.clock.now();
+    assert!(
+        ahead >= Duration::seconds(299) && ahead <= Duration::seconds(300),
+        "{ahead}"
+    );
+    assert_eq!(h.stub.esi_calls("market"), 2);
+}
+
+#[tokio::test]
+async fn a_region_book_page_past_the_end_is_not_found() {
+    let h = common::esi_harness().await;
+    let result = h.client.region_orders_page(10000002, 2).await;
+    assert!(matches!(result, Err(EsiError::NotFound)), "{result:?}");
+}
+
+#[tokio::test]
+async fn region_book_pages_fail_like_the_other_market_calls() {
+    let h = common::esi_harness().await;
+    h.control("esi-fail-next", json!({"route": "market", "status": 503}))
+        .await;
+    let failed = h.client.region_orders_page(10000002, 1).await;
+    assert!(matches!(failed, Err(EsiError::Temporary(_))), "{failed:?}");
+
+    h.control(
+        "esi-fail-next",
+        json!({"route": "market", "status": 429, "headers": {"retry-after": "60", "x-ratelimit-group": "market-order"}}),
+    )
+    .await;
+    let limited = h.client.region_orders_page(10000002, 1).await;
+    assert!(
+        matches!(limited, Err(EsiError::Deferred { .. })),
+        "{limited:?}"
+    );
+    assert!(matches!(
+        h.client.region_orders_page(10000002, 1).await,
+        Err(EsiError::Deferred { .. })
+    ));
+    assert_eq!(h.stub.esi_calls("market"), 2, "no request during the block");
+
+    h.clock.advance(Duration::seconds(61));
+    assert!(h.client.region_orders_page(10000002, 1).await.is_ok());
+}
+
+fn history_day(date: &str, average: f64, volume: i64) -> serde_json::Value {
+    json!({"date": date, "average": average, "highest": average + 0.5,
+           "lowest": average - 0.5, "order_count": 12, "volume": volume})
+}
+
+#[tokio::test]
+async fn market_history_is_parsed_with_prices_in_cents_and_the_expiry() {
+    let h = common::esi_harness().await;
+    h.control(
+        "market-history",
+        json!({"region_id": 10000002, "type_id": 34, "days": [
+            history_day("2026-10-15", 5.25, 1000), history_day("2026-10-16", 5.5, 2000),
+        ]}),
+    )
+    .await;
+    h.control("esi-expires", json!({"seconds": 3600})).await;
+
+    let response = h.client.market_history(10000002, 34).await.unwrap();
+
+    assert_eq!(response.body.len(), 2);
+    let day = &response.body[1];
+    assert_eq!(day.date, "2026-10-16");
+    assert_eq!(
+        (day.average_cents, day.highest_cents, day.lowest_cents),
+        (550, 600, 500)
+    );
+    assert_eq!((day.order_count, day.volume), (12, 2000));
+    let ahead = response.expires_at.unwrap() - h.clock.now();
+    assert!(ahead >= Duration::seconds(3599), "{ahead}");
+    assert_eq!(h.stub.esi_calls("history"), 1);
+}
+
+#[tokio::test]
+async fn a_type_without_history_is_an_empty_list() {
+    let h = common::esi_harness().await;
+    let response = h.client.market_history(10000002, 35).await.unwrap();
+    assert!(response.body.is_empty());
+}
+
+#[tokio::test]
+async fn market_history_failures_map_like_the_other_market_calls() {
+    let h = common::esi_harness().await;
+    h.control(
+        "market-fail",
+        json!({"region_id": 10000002, "type_id": 34, "status": 404}),
+    )
+    .await;
+    let missing = h.client.market_history(10000002, 34).await;
+    assert!(matches!(missing, Err(EsiError::NotFound)), "{missing:?}");
+    h.control("market-fail", json!({"clear": true})).await;
+
+    h.control("esi-fail-next", json!({"route": "history", "status": 503}))
+        .await;
+    let failed = h.client.market_history(10000002, 34).await;
+    assert!(matches!(failed, Err(EsiError::Temporary(_))), "{failed:?}");
+
+    h.control(
+        "esi-fail-next",
+        json!({"route": "history", "status": 420, "headers": {"x-esi-error-limit-reset": "30"}}),
+    )
+    .await;
+    let limited = h.client.market_history(10000002, 34).await;
+    assert!(
+        matches!(limited, Err(EsiError::Deferred { .. })),
+        "{limited:?}"
+    );
+    assert_eq!(h.stub.esi_calls("history"), 3);
+    assert!(matches!(
+        h.client.market_history(10000002, 34).await,
+        Err(EsiError::Deferred { .. })
+    ));
+    assert_eq!(
+        h.stub.esi_calls("history"),
+        3,
+        "no request during the block"
+    );
+}
+
+#[tokio::test]
+async fn a_429_on_the_history_pauses_it_for_retry_after() {
+    let h = common::esi_harness().await;
+    h.control(
+        "esi-fail-next",
+        json!({"route": "history", "status": 429, "headers": {"retry-after": "60"}}),
+    )
+    .await;
+    let limited = h.client.market_history(10000002, 34).await;
+    assert!(
+        matches!(limited, Err(EsiError::Deferred { .. })),
+        "{limited:?}"
+    );
+    h.clock.advance(Duration::seconds(61));
+    assert!(h.client.market_history(10000002, 34).await.is_ok());
+}

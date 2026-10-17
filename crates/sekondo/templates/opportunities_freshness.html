@@ -1,0 +1,18 @@
+<h2 class="panel-title">Freshness</h2>
+<ul class="freshness">
+  <li data-kind="book">
+    Order book
+    {% if view.freshness.book_stale %}<mark class="badge stale">Stale</mark>{% endif %}
+    {% if view.freshness.book_waiting %}<mark class="badge">Waiting for first refresh</mark>{% endif %}
+    {% if let Some(last) = view.freshness.book_last %}<small>Last refresh: {{ last }} EVE time</small>{% endif %}
+    {% if let Some(error) = view.freshness.book_error %}<small class="error">Last error: {{ error }}</small>{% endif %}
+  </li>
+  <li data-kind="history">
+    Market history
+    {% if let Some(last) = view.freshness.history_last %}<small>Last run: {{ last }} EVE time</small>{% else %}<small>No run finished yet</small>{% endif %}
+    {% if let Some(error) = view.freshness.history_error %}<small class="error">Last error: {{ error }}</small>{% endif %}
+  </li>
+  <li data-kind="snapshots">
+    <small>{{ view.freshness.own_days_text }}</small>
+  </li>
+</ul>

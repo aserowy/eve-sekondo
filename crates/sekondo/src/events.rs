@@ -18,6 +18,9 @@ pub enum Event {
     /// A skills or standings poll, or the lookup of a station owner, changed a fee of a
     /// character. Only the orders page's character entries listen to it.
     FeesUpdated,
+    /// The station book was refreshed or a history pass stored rows. Sent to every account: the
+    /// station market is public. Only the opportunities page listens to it.
+    OpportunitiesUpdated,
 }
 
 impl Event {
@@ -28,12 +31,15 @@ impl Event {
             Self::MarketUpdated => "market-updated",
             Self::WealthUpdated => "wealth-updated",
             Self::FeesUpdated => "fees-updated",
+            Self::OpportunitiesUpdated => "opportunities-updated",
         }
     }
 }
 
 pub trait EventBus: Send + Sync {
     fn publish(&self, account: Uuid, event: Event);
+    /// A signal for every account, for what is public. Reaches every subscriber once.
+    fn publish_all(&self, event: Event);
     /// Signals for one account only. A subscriber that fell behind gets
     /// [`Event::OrdersUpdated`] instead of an error: re-fetching is idempotent.
     fn subscribe(&self, account: Uuid) -> BoxStream<'static, Event>;
@@ -41,8 +47,15 @@ pub trait EventBus: Send + Sync {
 
 const CAPACITY: usize = 256;
 
+/// Who a signal is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Target {
+    Account(Uuid),
+    All,
+}
+
 pub struct InProcessBus {
-    tx: broadcast::Sender<(Uuid, Event)>,
+    tx: broadcast::Sender<(Target, Event)>,
 }
 
 impl InProcessBus {
@@ -66,14 +79,21 @@ impl Default for InProcessBus {
 impl EventBus for InProcessBus {
     fn publish(&self, account: Uuid, event: Event) {
         // No subscribers is the normal case when nobody has a page open.
-        let _ = self.tx.send((account, event));
+        let _ = self.tx.send((Target::Account(account), event));
+    }
+
+    fn publish_all(&self, event: Event) {
+        let _ = self.tx.send((Target::All, event));
     }
 
     fn subscribe(&self, account: Uuid) -> BoxStream<'static, Event> {
         futures_util::stream::unfold(self.tx.subscribe(), move |mut rx| async move {
             loop {
                 match rx.recv().await {
-                    Ok((who, event)) if who == account => return Some((event, rx)),
+                    Ok((Target::All, event)) => return Some((event, rx)),
+                    Ok((Target::Account(who), event)) if who == account => {
+                        return Some((event, rx));
+                    }
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         return Some((Event::OrdersUpdated, rx));
@@ -180,6 +200,46 @@ mod tests {
 
         assert_eq!(next(&mut stream_a).await, Some(Event::MarketUpdated));
         assert_eq!(next(&mut stream_b).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_broadcast_reaches_every_account() {
+        let bus = InProcessBus::new();
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        let mut stream_a = bus.subscribe(a);
+        let mut stream_b = bus.subscribe(b);
+        let mut stream_a2 = bus.subscribe(a);
+
+        bus.publish_all(Event::OpportunitiesUpdated);
+
+        assert_eq!(next(&mut stream_a).await, Some(Event::OpportunitiesUpdated));
+        assert_eq!(next(&mut stream_b).await, Some(Event::OpportunitiesUpdated));
+        assert_eq!(
+            next(&mut stream_a2).await,
+            Some(Event::OpportunitiesUpdated)
+        );
+        assert_eq!(next(&mut stream_a).await, None, "once");
+    }
+
+    #[tokio::test]
+    async fn a_broadcast_and_an_account_signal_do_not_get_mixed_up() {
+        let bus = InProcessBus::new();
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        let mut stream_a = bus.subscribe(a);
+        let mut stream_b = bus.subscribe(b);
+
+        bus.publish(a, Event::OrdersUpdated);
+        bus.publish_all(Event::OpportunitiesUpdated);
+
+        assert_eq!(next(&mut stream_a).await, Some(Event::OrdersUpdated));
+        assert_eq!(next(&mut stream_a).await, Some(Event::OpportunitiesUpdated));
+        assert_eq!(next(&mut stream_b).await, Some(Event::OpportunitiesUpdated));
+        assert_eq!(next(&mut stream_b).await, None, "b never saw a's signal");
+    }
+
+    #[test]
+    fn the_opportunities_signal_has_its_own_stable_name() {
+        assert_eq!(Event::OpportunitiesUpdated.name(), "opportunities-updated");
     }
 
     #[tokio::test]
