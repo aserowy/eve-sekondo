@@ -21,8 +21,8 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::state::{
-    ACCESS_TOKEN_SECONDS, EsiFailure, Inner, NAMES, PendingCode, RefreshRecord, STRUCTURES, Shared,
-    now_secs, random_token,
+    ACCESS_TOKEN_SECONDS, EsiFailure, Inner, MARKET_PAGE_SIZE, MarketFixture, NAMES, PendingCode,
+    RefreshRecord, STRUCTURES, Shared, now_secs, random_token,
 };
 
 macro_rules! method_router {
@@ -55,6 +55,7 @@ eve_routes! {
     ("GET", "/characters/{id}/orders", character_orders),
     ("POST", "/universe/names", universe_names),
     ("GET", "/universe/structures/{id}", universe_structure),
+    ("GET", "/markets/{region_id}/orders", market_orders),
 }
 
 pub fn router(shared: Shared) -> Router {
@@ -64,6 +65,7 @@ pub fn router(shared: Shared) -> Router {
         .route("/scopes", post(scopes))
         .route("/fail-next-token", post(fail_next_token))
         .route("/orders", post(set_orders))
+        .route("/market-orders", post(set_market_orders))
         .route("/esi-expires", post(set_esi_expires))
         .route("/structure-access", post(set_structure_access))
         .route("/esi-fail-next", post(esi_fail_next))
@@ -420,6 +422,7 @@ async fn stats(State(shared): State<Shared>) -> Json<Value> {
         "orders_calls": calls("orders"),
         "names_calls": calls("names"),
         "structures_calls": calls("structures"),
+        "market_calls": calls("market"),
     }))
 }
 
@@ -677,5 +680,83 @@ struct DelayBody {
 /// Makes the orders route answer slowly, so tests can act while a poll is in flight.
 async fn set_esi_delay(State(shared): State<Shared>, Json(body): Json<DelayBody>) -> StatusCode {
     shared.lock().unwrap().esi_delay_ms = body.millis;
+    StatusCode::NO_CONTENT
+}
+
+#[derive(Deserialize)]
+struct MarketQuery {
+    type_id: Option<i64>,
+    order_type: Option<String>,
+    page: Option<usize>,
+}
+
+/// The public market orders of a region for one item, paged like ESI's. Needs no token.
+async fn market_orders(
+    State(shared): State<Shared>,
+    Path(region_id): Path<i64>,
+    Query(query): Query<MarketQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let mut inner = shared.lock().unwrap();
+    if let Some(response) = begin_esi_call(&mut inner, "market", &headers) {
+        return response;
+    }
+    let (orders, page_size) = inner
+        .market_orders
+        .get(&region_id)
+        .map_or((&[][..], MARKET_PAGE_SIZE), |f| {
+            (&f.orders[..], f.page_size)
+        });
+    let wanted: Vec<&Value> = orders
+        .iter()
+        .filter(|o| query.type_id.is_none_or(|t| o["type_id"] == t))
+        .filter(|o| match query.order_type.as_deref() {
+            Some("buy") => o["is_buy_order"] == true,
+            Some("sell") => o["is_buy_order"] == false,
+            _ => true,
+        })
+        .collect();
+    let pages = wanted.len().div_ceil(page_size).max(1);
+    let page = query.page.unwrap_or(1).max(1);
+    let slice: Vec<&Value> = wanted
+        .into_iter()
+        .skip((page - 1) * page_size)
+        .take(page_size)
+        .collect();
+    let mut response_headers = esi_headers(&inner);
+    // Like real ESI on this route: rate-limit headers instead of the error-limit ones.
+    response_headers.remove("x-esi-error-limit-remain");
+    response_headers.remove("x-esi-error-limit-reset");
+    for (name, value) in [
+        ("x-ratelimit-group", "market-order"),
+        ("x-ratelimit-limit", "12000/15m"),
+        ("x-ratelimit-remaining", "11999"),
+        ("x-ratelimit-used", "1"),
+    ] {
+        response_headers.insert(name, value.parse().expect("header value"));
+    }
+    response_headers.insert("x-pages", pages.to_string().parse().expect("header value"));
+    (response_headers, Json(slice)).into_response()
+}
+
+#[derive(Deserialize)]
+struct MarketOrdersBody {
+    region_id: i64,
+    orders: Vec<Value>,
+    page_size: Option<usize>,
+}
+
+/// Replaces what ESI returns as the public market orders of a region.
+async fn set_market_orders(
+    State(shared): State<Shared>,
+    Json(body): Json<MarketOrdersBody>,
+) -> StatusCode {
+    shared.lock().unwrap().market_orders.insert(
+        body.region_id,
+        MarketFixture {
+            orders: body.orders,
+            page_size: body.page_size.unwrap_or(MARKET_PAGE_SIZE).max(1),
+        },
+    );
     StatusCode::NO_CONTENT
 }

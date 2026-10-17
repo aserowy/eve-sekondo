@@ -34,8 +34,10 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("listening on https://{}", listener.local_addr()?);
     // Started here and not in `App::new`, so tests opt in to background polling.
     let scheduler = app.state.poller.clone().spawn_scheduler();
+    let market_scheduler = app.state.market.clone().spawn_scheduler();
     let result = app::serve(app, listener, Handle::new()).await;
     scheduler.abort();
+    market_scheduler.abort();
     result?;
     Ok(())
 }

@@ -17,7 +17,7 @@ use crate::{
 
 /// The most a poll is pushed back so characters drift apart. Never negative: a character is
 /// never polled before the interval or ESI's cache expiry has passed.
-const MAX_JITTER: Duration = Duration::seconds(30);
+pub(crate) const MAX_JITTER: Duration = Duration::seconds(30);
 /// Location IDs from here up are player structures; everything below is public data.
 pub const STRUCTURE_ID_MIN: i64 = 100_000_000;
 /// How long a name ESI would not give is left alone before asking again.
@@ -27,11 +27,11 @@ const NAMES_BATCH: usize = 1000;
 /// How many characters are polled at the same time.
 const DEFAULT_CONCURRENCY: usize = 4;
 /// A claimed character is left alone this long, so a poll that dies cannot starve it for good.
-const CLAIM_LEASE: Duration = Duration::minutes(5);
+pub(crate) const CLAIM_LEASE: Duration = Duration::minutes(5);
 /// How often the scheduler looks for due characters.
 pub const SCHEDULER_TICK: std::time::Duration = std::time::Duration::from_secs(5);
 /// The first retry after a failure; doubles per consecutive failure, capped at the interval.
-const BACKOFF_START: Duration = Duration::minutes(1);
+pub(crate) const BACKOFF_START: Duration = Duration::minutes(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PollOutcome {
@@ -335,11 +335,7 @@ impl Poller {
     }
 
     fn jitter(&self) -> Duration {
-        let max = MAX_JITTER
-            .min(self.interval / 10)
-            .whole_milliseconds()
-            .max(1) as u64;
-        Duration::milliseconds((rand::random::<u64>() % (max + 1)) as i64)
+        jitter(self.interval)
     }
 
     async fn record_failure(
@@ -535,10 +531,21 @@ impl Poller {
 
 // ---- the scheduler (design §2) ----
 
+/// A little random delay, never negative, so polls drift apart.
+pub(crate) fn jitter(interval: Duration) -> Duration {
+    let max = MAX_JITTER.min(interval / 10).whole_milliseconds().max(1) as u64;
+    Duration::milliseconds((rand::random::<u64>() % (max + 1)) as i64)
+}
+
 /// A stable spread over the interval, so characters linked together do not poll together.
 fn first_offset(character_id: i64, interval: Duration) -> Duration {
+    spread(&character_id.to_be_bytes(), interval)
+}
+
+/// A stable offset inside the interval for whatever the key names.
+pub(crate) fn spread(key: &[u8], interval: Duration) -> Duration {
     use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(character_id.to_be_bytes());
+    let digest = Sha256::digest(key);
     let hash = u64::from_be_bytes(digest[..8].try_into().expect("8 bytes"));
     Duration::seconds((hash % interval.whole_seconds().max(1) as u64) as i64)
 }

@@ -19,7 +19,9 @@ use crate::{
     csrf, dashboard,
     esi::EsiClient,
     events::{EventBus, InProcessBus},
-    headers, orders, pages,
+    headers,
+    market::{MARKET_INTERVAL, MarketPoller},
+    orders, pages,
     poller::Poller,
     repo::Repo,
     session, sse,
@@ -39,6 +41,7 @@ pub struct AppState {
     pub tokens: Arc<TokenService>,
     pub esi: Arc<EsiClient>,
     pub poller: Arc<Poller>,
+    pub market: Arc<MarketPoller>,
     pub events: Arc<dyn EventBus>,
     pub sse_tick: std::time::Duration,
 }
@@ -120,6 +123,13 @@ impl App {
             clock.clone(),
             config.order_poll_interval,
         ));
+        let market = Arc::new(MarketPoller::new(
+            pool.clone(),
+            esi.clone(),
+            events.clone(),
+            clock.clone(),
+            MARKET_INTERVAL,
+        ));
         let state = AppState {
             config: Arc::new(config),
             pool,
@@ -130,6 +140,7 @@ impl App {
             tokens,
             esi,
             poller,
+            market,
             events,
             sse_tick: options.sse_tick,
         };
@@ -169,11 +180,12 @@ pub fn router(state: AppState, extra_routes: Router<AppState>) -> Router {
     #[cfg(feature = "test-hooks")]
     let routes = {
         tracing::warn!(
-            "built with the test-hooks feature: POST /_test/refresh/{{id}} and POST /_test/poll/{{id}} are enabled"
+            "built with the test-hooks feature: POST /_test/refresh/{{id}}, POST /_test/poll/{{id}} and POST /_test/market-poll are enabled"
         );
         routes
             .route("/_test/refresh/{id}", post(crate::test_hooks::refresh))
             .route("/_test/poll/{id}", post(crate::test_hooks::poll))
+            .route("/_test/market-poll", post(crate::test_hooks::market_poll))
     };
 
     let router = routes

@@ -12,13 +12,15 @@
     <tr id="order-{{ r.order_id }}">
       <td>{{ r.character }}{% if r.is_corporation %} <mark class="badge corp">Corp</mark>{% endif %}</td>
       <td>{{ r.item }}</td>
-      <td>{{ r.location }}</td>
-      <td>{{ r.region }}</td>
       <td class="num" title="{{ r.price_exact }}">{{ r.price }}</td>
+      <td>{% if r.standing_class.is_empty() %}{{ r.standing }}{% else %}<mark class="badge {{ r.standing_class }}">{{ r.standing }}</mark>{% endif %}</td>
+      <td class="num"{% if !r.gap_exact.is_empty() %} title="{{ r.gap_exact }}"{% endif %}>{{ r.gap }}</td>
       <td class="num">{{ r.volume }}</td>
       <td class="num" title="{{ r.amount_exact }}">{{ r.amount }}</td>
       <td>{{ r.issued }}</td>
       <td>{{ r.left }}</td>
+      <td>{{ r.location }}</td>
+      <td>{{ r.region }}</td>
     </tr>
     {% endfor %}
   </tbody>

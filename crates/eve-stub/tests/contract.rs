@@ -158,6 +158,19 @@ fn order(id: i64, buy: bool, location: i64) -> Value {
     order
 }
 
+async fn market_of(f: &Fixture, region: i64, query: &str) -> Answer {
+    get(f, &format!("/markets/{region}/orders?{query}"), None).await
+}
+
+fn market_order(id: i64, buy: bool) -> Value {
+    json!({
+        "order_id": id, "type_id": 34, "location_id": STATION, "system_id": 30000142,
+        "is_buy_order": buy, "price": 10.5, "range": if buy { "region" } else { "station" },
+        "duration": 90, "issued": "2026-10-11T12:00:00Z", "min_volume": 1,
+        "volume_remain": 3, "volume_total": 5,
+    })
+}
+
 #[test]
 fn every_stub_route_has_a_contract_and_every_contract_a_route() {
     assert_eq!(coverage(eve_stub::ROUTES), Vec::<String>::new());
@@ -284,6 +297,60 @@ async fn a_character_without_orders_conforms_to_nothing_but_has_no_violation_but
 }
 
 #[tokio::test]
+async fn market_orders_conform_on_every_page_and_when_empty() {
+    let f = common::start_unverified().await;
+    let empty = market_of(&f, 10000002, "order_type=all&type_id=34").await;
+    conforms("market-orders", "orders", &empty);
+
+    control(
+        &f,
+        "market-orders",
+        json!({"region_id": 10000002, "page_size": 1,
+               "orders": [market_order(1, false), market_order(2, true)]}),
+    )
+    .await;
+    for page in 1..=2 {
+        let answer = market_of(
+            &f,
+            10000002,
+            &format!("order_type=all&type_id=34&page={page}"),
+        )
+        .await;
+        assert_eq!(answer.headers["x-pages"], "2");
+        conforms("market-orders", "orders", &answer);
+    }
+}
+
+#[tokio::test]
+async fn a_market_fixture_without_a_system_fails_the_conformance_check() {
+    let f = common::start_unverified().await;
+    let mut order = market_order(1, false);
+    order.as_object_mut().unwrap().remove("system_id");
+    control(
+        &f,
+        "market-orders",
+        json!({"region_id": 10000002, "orders": [order]}),
+    )
+    .await;
+
+    let answer = market_of(&f, 10000002, "order_type=all&type_id=34").await;
+
+    let violations = esi_contract::check(
+        &contract("market-orders"),
+        "orders",
+        Some(answer.status),
+        &answer.headers,
+        answer.body.as_ref(),
+    );
+    assert_eq!(violations.len(), 1);
+    assert!(
+        violations[0].to_string().contains("system_id"),
+        "{}",
+        violations[0]
+    );
+}
+
+#[tokio::test]
 async fn names_conform_when_found_and_when_one_is_unknown() {
     let f = common::start_unverified().await;
     conforms(
@@ -321,6 +388,7 @@ async fn injected_failures_conform_on_every_esi_route() {
     let token = f.stub.issue_access_token(ALICE).unwrap();
     let structure = format!("/universe/structures/{STRUCTURE}");
     let orders = format!("/characters/{ALICE}/orders");
+    let market = "/markets/10000002/orders?order_type=all&type_id=34";
 
     let failures: [(u16, &str, Value); 3] = [
         (
@@ -340,6 +408,7 @@ async fn injected_failures_conform_on_every_esi_route() {
             ("orders", "orders"),
             ("names", "names"),
             ("structures", "structures"),
+            ("market", "market-orders"),
         ] {
             control(
                 &f,
@@ -350,6 +419,7 @@ async fn injected_failures_conform_on_every_esi_route() {
             let answer = match route {
                 "orders" => get(&f, &orders, Some(&token)).await,
                 "names" => names(&f, &[34]).await,
+                "market" => get(&f, market, None).await,
                 _ => get(&f, &structure, Some(&token)).await,
             };
             assert_eq!(answer.status, status, "{route}");

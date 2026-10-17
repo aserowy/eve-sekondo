@@ -343,3 +343,278 @@ async fn a_foreign_character_id_in_the_url_shows_the_own_characters(pool: PgPool
     assert!(!html.contains(r#"id="order-7001""#));
     assert!(!html.contains("Carol Charlie"));
 }
+
+/// The labels of a table's header cells, without the sort arrows.
+fn header_labels(table: &str) -> Vec<String> {
+    table
+        .split("<th scope")
+        .skip(1)
+        .map(|th| {
+            let link = th.split("</a>").next().unwrap();
+            let text = link.rsplit('>').next().unwrap();
+            text.trim_end_matches([' ', '\u{25B2}', '\u{25BC}'])
+                .to_owned()
+        })
+        .collect()
+}
+
+/// The text of a row's cells.
+fn cell_texts(row: &str) -> Vec<String> {
+    row.split("<td")
+        .skip(1)
+        .map(|td| {
+            let inner = td.split("</td>").next().unwrap();
+            let text = inner.split_once('>').map_or("", |(_, rest)| rest);
+            // The text without any markup inside the cell.
+            text.split('<')
+                .map(|part| part.split_once('>').map_or(part, |(_, after)| after))
+                .collect::<String>()
+                .trim()
+                .to_owned()
+        })
+        .collect()
+}
+
+#[sqlx::test]
+async fn location_and_region_come_last_in_both_tables(pool: PgPool) {
+    let (app, browser) = with_polled_fixture(pool).await;
+
+    let html = get(&app, &browser, "/orders").await;
+
+    for (table, amount) in [(sell_table(&html), "Value"), (buy_table(&html), "Escrow")] {
+        let labels = header_labels(table);
+        assert_eq!(
+            labels[labels.len() - 3..],
+            ["Time left", "Location", "Region"],
+            "{labels:?}"
+        );
+        assert!(labels.contains(&amount.to_owned()), "{labels:?}");
+    }
+    let sell = cell_texts(row(&html, 5001));
+    assert_eq!(
+        sell[sell.len() - 2],
+        "Jita IV - Moon 4 - Caldari Navy Assembly Plant"
+    );
+    assert_eq!(sell[sell.len() - 1], "The Forge");
+    let buy = cell_texts(row(&html, 5003));
+    assert_eq!(buy[buy.len() - 2], "Alpha Keepstar");
+    assert_eq!(buy[buy.len() - 1], "The Forge");
+    assert_eq!(sell.len(), header_labels(sell_table(&html)).len());
+}
+
+// ---- standing and gap ----
+
+const STATION: i64 = 60003760;
+const STRUCTURE: i64 = 1000000000001;
+
+fn public_sell(id: i64, type_id: i64, price: f64) -> Value {
+    json!({
+        "order_id": id, "type_id": type_id, "location_id": STATION, "system_id": 30000142,
+        "is_buy_order": false, "price": price, "range": "station",
+        "duration": 90, "issued": "2026-10-11T12:00:00Z", "min_volume": 1,
+        "volume_remain": 3, "volume_total": 5,
+    })
+}
+
+/// Puts the market of The Forge in the stub and refreshes every pair the orders use.
+async fn with_market(app: &TestApp, market: Vec<Value>) {
+    app.stub_control(
+        "market-orders",
+        json!({"region_id": 10000002, "orders": market}),
+    )
+    .await;
+    app.state.market.tick().await;
+    let pairs: Vec<(i64, i64)> = sqlx::query_as("SELECT region_id, type_id FROM market_sync")
+        .fetch_all(&app.state.pool)
+        .await
+        .unwrap();
+    for (region, type_id) in pairs {
+        app.state.market.refresh_pair(region, type_id).await;
+    }
+}
+
+async fn alice_sells(pool: PgPool, orders: Vec<Value>) -> (TestApp, Browser) {
+    let app = app(pool).await;
+    let browser = signed_in(&app, ALICE).await;
+    app.stub_control("orders", json!({"character_id": ALICE, "orders": orders}))
+        .await;
+    app.state.poller.poll_character(ALICE).await;
+    (app, browser)
+}
+
+#[sqlx::test]
+async fn a_top_order_reads_top_in_the_success_style_and_has_no_gap(pool: PgPool) {
+    let (app, browser) = alice_sells(pool, vec![order(1, 34, STATION, false, 1_500_000.0)]).await;
+    with_market(
+        &app,
+        vec![
+            public_sell(1, 34, 1_500_000.0),
+            public_sell(2, 34, 2_000_000.0),
+        ],
+    )
+    .await;
+
+    let html = get(&app, &browser, "/orders").await;
+    let r = row(&html, 1);
+
+    assert!(r.contains(r#"<mark class="badge top">Top</mark>"#), "{r}");
+    let cells = cell_texts(r);
+    assert_eq!(cells[3], "Top");
+    assert_eq!(cells[4], "", "no gap for a top order");
+}
+
+#[sqlx::test]
+async fn an_undercut_order_shows_the_count_and_the_gap_with_the_exact_value_on_hover(pool: PgPool) {
+    let (app, browser) = alice_sells(pool, vec![order(1, 34, STATION, false, 1_012_500.0)]).await;
+    with_market(
+        &app,
+        vec![
+            public_sell(1, 34, 1_012_500.0),
+            public_sell(2, 34, 1_000_000.0),
+            public_sell(3, 34, 1_005_000.0),
+            public_sell(4, 34, 1_010_000.0),
+        ],
+    )
+    .await;
+
+    let html = get(&app, &browser, "/orders").await;
+    let r = row(&html, 1);
+
+    assert!(
+        r.contains(r#"<mark class="badge undercut">Undercut 3</mark>"#),
+        "{r}"
+    );
+    assert!(r.contains(r#"title="12,500.00 ISK">12.5k (1.3%)<"#), "{r}");
+}
+
+#[sqlx::test]
+async fn an_order_without_market_data_shows_a_dash_for_standing_and_gap(pool: PgPool) {
+    let (app, browser) = with_polled_fixture(pool).await;
+
+    let html = get(&app, &browser, "/orders").await;
+    let cells = cell_texts(row(&html, 5001));
+
+    assert_eq!(cells[3], "\u{2014}");
+    assert_eq!(cells[4], "\u{2014}");
+    assert!(!row(&html, 5001).contains("badge top"));
+}
+
+#[sqlx::test]
+async fn the_standing_and_gap_columns_follow_the_price_in_both_tables(pool: PgPool) {
+    let (app, browser) = with_polled_fixture(pool).await;
+
+    let html = get(&app, &browser, "/orders").await;
+
+    for (table, amount) in [(sell_table(&html), "Value"), (buy_table(&html), "Escrow")] {
+        assert_eq!(
+            header_labels(table),
+            [
+                "Character",
+                "Item",
+                "Price",
+                "Standing",
+                "Behind by",
+                "Volume",
+                amount,
+                "Issued",
+                "Time left",
+                "Location",
+                "Region"
+            ]
+        );
+    }
+}
+
+// ---- sorting by standing and gap ----
+
+/// Five sell orders: ids 1 to 5 are top, undercut 3 times, 12 times, once, and without market
+/// data (in a structure).
+async fn standing_mix(pool: PgPool) -> (TestApp, Browser) {
+    let (app, browser) = alice_sells(
+        pool,
+        vec![
+            order(1, 34, STATION, false, 100.0),
+            order(2, 35, STATION, false, 100.0),
+            order(3, 36, STATION, false, 100.0),
+            order(4, 37, STATION, false, 100.0),
+            order(5, 38, STRUCTURE, false, 100.0),
+        ],
+    )
+    .await;
+    let mut market = vec![public_sell(100, 34, 120.0)];
+    for (item, count) in [(35, 3), (36, 12), (37, 1)] {
+        for n in 0..count {
+            market.push(public_sell(1000 * item + n, item, 99.0 - n as f64 * 0.01));
+        }
+    }
+    with_market(&app, market).await;
+    (app, browser)
+}
+
+fn order_of_rows(html: &str, ids: &[i64]) -> Vec<i64> {
+    let mut found: Vec<(usize, i64)> = ids.iter().map(|id| (position(html, *id), *id)).collect();
+    found.sort_unstable();
+    found.into_iter().map(|(_, id)| id).collect()
+}
+
+#[sqlx::test]
+async fn sorting_by_standing_reads_the_number_and_puts_no_data_last(pool: PgPool) {
+    let (app, browser) = standing_mix(pool).await;
+
+    let asc = get(&app, &browser, "/orders?sort=standing&dir=asc").await;
+    assert_eq!(order_of_rows(&asc, &[1, 2, 3, 4, 5]), [1, 4, 2, 3, 5]);
+
+    let desc = get(&app, &browser, "/orders?sort=standing&dir=desc").await;
+    assert_eq!(order_of_rows(&desc, &[1, 2, 3, 4, 5]), [3, 2, 4, 1, 5]);
+}
+
+#[sqlx::test]
+async fn the_standing_header_links_to_its_own_sorting_and_reverses_it(pool: PgPool) {
+    let (app, browser) = standing_mix(pool).await;
+
+    let default = unescaped(&get(&app, &browser, "/orders").await);
+    assert!(default.contains("sort=standing&dir=asc"), "{default}");
+    let sorted = unescaped(&get(&app, &browser, "/orders?sort=standing&dir=asc").await);
+    assert!(sorted.contains("sort=standing&dir=desc"));
+    assert!(sorted.contains(r#"aria-sort="ascending""#));
+}
+
+#[sqlx::test]
+async fn sorting_by_gap_counts_a_top_order_as_no_difference_and_puts_no_data_last(pool: PgPool) {
+    let (app, browser) = alice_sells(
+        pool,
+        vec![
+            order(1, 34, STATION, false, 100.0),
+            order(2, 35, STATION, false, 105.0),
+            order(3, 36, STATION, false, 180.0),
+            order(4, 37, STRUCTURE, false, 100.0),
+        ],
+    )
+    .await;
+    with_market(
+        &app,
+        vec![
+            public_sell(10, 34, 120.0),
+            public_sell(20, 35, 100.0),
+            public_sell(30, 36, 100.0),
+        ],
+    )
+    .await;
+
+    let asc = get(&app, &browser, "/orders?sort=gap&dir=asc").await;
+    assert_eq!(order_of_rows(&asc, &[1, 2, 3, 4]), [1, 2, 3, 4]);
+
+    let desc = get(&app, &browser, "/orders?sort=gap&dir=desc").await;
+    assert_eq!(order_of_rows(&desc, &[1, 2, 3, 4]), [3, 2, 1, 4]);
+}
+
+#[sqlx::test]
+async fn an_unknown_sort_name_still_falls_back_to_the_default(pool: PgPool) {
+    let (app, browser) = standing_mix(pool).await;
+
+    let html = get(&app, &browser, "/orders?sort=standing%3B%20DROP&dir=desc").await;
+
+    // The default is the item name, ascending: the unnamed items sort by their number.
+    assert_eq!(order_of_rows(&html, &[1, 2, 3, 4, 5]).len(), 5);
+    assert!(unescaped(&html).contains("sort=standing&dir=asc"));
+}

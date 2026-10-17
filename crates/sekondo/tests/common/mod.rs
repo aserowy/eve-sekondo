@@ -405,6 +405,7 @@ pub struct PollEnv {
     pub tokens: Arc<sekondo::tokens::TokenService>,
     pub esi: Arc<sekondo::esi::EsiClient>,
     pub poller: Arc<sekondo::poller::Poller>,
+    pub market: Arc<sekondo::market::MarketPoller>,
     pub events: Arc<sekondo::events::InProcessBus>,
     sso: Arc<sekondo::sso::SsoClient>,
     pki: TestPki,
@@ -464,6 +465,13 @@ impl PollEnv {
             clock.clone(),
             interval,
         ));
+        let market = Arc::new(sekondo::market::MarketPoller::new(
+            pool.clone(),
+            esi.clone(),
+            events.clone(),
+            clock.clone(),
+            time::Duration::minutes(5),
+        ));
         Self {
             stub,
             pool,
@@ -472,6 +480,7 @@ impl PollEnv {
             tokens,
             esi,
             poller,
+            market,
             events,
             sso,
             pki,

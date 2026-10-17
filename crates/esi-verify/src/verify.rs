@@ -6,7 +6,7 @@ use esi_contract::{Verifiable, ViolationKind, check, contract, contracts, gate::
 use reqwest::header::{HeaderMap, USER_AGENT};
 use secrecy::{ExposeSecret, SecretString};
 use sekondo::{
-    esi::{COMPATIBILITY_DATE, EsiName, EsiOrder, EsiStructure, user_agent},
+    esi::{COMPATIBILITY_DATE, EsiMarketOrder, EsiName, EsiOrder, EsiStructure, user_agent},
     oauth::{Intent, PendingFlow},
     poller::STRUCTURE_ID_MIN,
     sso::{SsoClient, decode_token_body},
@@ -478,6 +478,31 @@ async fn verify_esi(
         run.check("structures", variant, &answer);
         if variant == "found" {
             let _: Option<EsiStructure> = decode(run, "structures", &answer);
+        }
+    }
+
+    // The public market of the pair of the first sell order and of the first buy order, which
+    // lists the character's own order too.
+    for own in [
+        orders.iter().find(|o| !o.is_buy_order),
+        orders.iter().find(|o| o.is_buy_order),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let mut url = esi(&format!("markets/{}/orders", own.region_id))?;
+        url.query_pairs_mut()
+            .append_pair("order_type", "all")
+            .append_pair("type_id", &own.type_id.to_string())
+            .append_pair("page", "1");
+        let answer = esi_request(settings, http.get(url), "market-orders").await?;
+        run.check("market-orders", "orders", &answer);
+        if let Some(market) = decode::<Vec<EsiMarketOrder>>(run, "market-orders", &answer)
+            && market.is_empty()
+        {
+            run.problem(
+                "market-orders/orders: the answer has no orders, but the character's own order for the item is on the market".to_owned(),
+            );
         }
     }
     Ok(())

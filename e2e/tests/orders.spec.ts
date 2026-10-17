@@ -1,4 +1,6 @@
-import { expect, loginWith, pollCharacter, stubControl, stubOrder, test } from '../support/fixtures';
+import {
+  expect, loginWith, marketPoll, pollCharacter, stubControl, stubMarket, stubMarketOrder, stubOrder, test,
+} from '../support/fixtures';
 
 test('sell and buy orders show up after a poll, sortable, with exact amounts on hover', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
@@ -82,4 +84,88 @@ test('corporation orders carry a marker', async ({ page }) => {
 
   await expect(page.locator('#order-1').getByText('Corp', { exact: true })).toBeVisible();
   await expect(page.locator('#order-2').getByText('Corp', { exact: true })).toHaveCount(0);
+});
+
+test('location and region are the last two columns of both tables', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  expect(await pollCharacter(page, 90000001)).toBe('200 updated');
+  await page.goto('/orders');
+
+  const labels = async (section: string) =>
+    (await page.locator(`${section} thead th`).allInnerTexts()).map((t) => t.replace(/[\u25B2\u25BC]/g, '').trim());
+  const sell = await labels('#sell-orders');
+  const buy = await labels('#buy-orders');
+  expect(sell.slice(-3)).toEqual(['Time left', 'Location', 'Region']);
+  expect(buy.slice(-3)).toEqual(['Time left', 'Location', 'Region']);
+
+  // The cells follow the headers.
+  const cells = await page.locator('#sell-orders #order-5001 td').allInnerTexts();
+  expect(cells.slice(-2)).toEqual(['Jita IV - Moon 4 - Caldari Navy Assembly Plant', 'The Forge']);
+  expect(cells).toHaveLength(sell.length);
+});
+
+test('standing and gap show as badges and text, with the exact gap on hover', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  await stubControl('orders', {
+    character_id: 90000001,
+    orders: [stubOrder(1, { type: 34, price: 1_012_500 }), stubOrder(2, { type: 35, price: 1_500_000 })],
+  });
+  expect(await pollCharacter(page, 90000001)).toBe('200 updated');
+  await stubMarket([
+    stubMarketOrder(1, { type: 34, price: 1_012_500 }),
+    stubMarketOrder(11, { type: 34, price: 1_000_000 }),
+    stubMarketOrder(12, { type: 34, price: 1_005_000 }),
+    stubMarketOrder(13, { type: 34, price: 1_010_000 }),
+    stubMarketOrder(2, { type: 35, price: 1_500_000 }),
+    stubMarketOrder(21, { type: 35, price: 1_800_000 }),
+  ]);
+
+  await page.goto('/orders');
+  const dashes = page.locator('#sell-orders #order-1 td').filter({ hasText: '\u2014' });
+  await expect(dashes).toHaveCount(2); // no market data yet
+
+  expect(await marketPoll(page)).toBe('200 2');
+  await page.goto('/orders');
+
+  const undercut = page.locator('#sell-orders #order-1');
+  await expect(undercut.locator('.badge.undercut')).toHaveText('Undercut 3');
+  await expect(undercut.getByText('12.5k (1.3%)', { exact: true })).toHaveAttribute('title', '12,500.00 ISK');
+  const top = page.locator('#sell-orders #order-2');
+  await expect(top.locator('.badge.top')).toHaveText('Top');
+  await expect(top.locator('.badge.undercut')).toHaveCount(0);
+  // The two badges differ in colour, and both come from the page's CSS framework.
+  const colour = (badge: typeof undercut) => badge.evaluate((el) => getComputedStyle(el).backgroundColor);
+  expect(await colour(top.locator('.badge.top'))).not.toBe(await colour(undercut.locator('.badge.undercut')));
+});
+
+test('sorting by standing puts top first, reads the number and keeps orders without data last', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  await stubControl('orders', {
+    character_id: 90000001,
+    orders: [
+      stubOrder(1, { type: 34, price: 100 }),
+      stubOrder(2, { type: 35, price: 100 }),
+      stubOrder(3, { type: 36, price: 100 }),
+      stubOrder(4, { type: 37, price: 100 }),
+      { ...stubOrder(5, { type: 38, price: 100 }), location_id: 1000000000001 },
+    ],
+  });
+  expect(await pollCharacter(page, 90000001)).toBe('200 updated');
+  const market = [stubMarketOrder(100, { type: 34, price: 120 })];
+  for (const [type, count] of [[35, 3], [36, 12], [37, 1]]) {
+    for (let n = 0; n < count; n++) market.push(stubMarketOrder(1000 * type + n, { type, price: 99 - n / 100 }));
+  }
+  await stubMarket(market);
+  await marketPoll(page);
+  await page.goto('/orders');
+
+  const ids = async () => page.locator('#sell-orders tbody tr').evaluateAll((rows) => rows.map((r) => r.id));
+  const standing = page.locator('#sell-orders').getByRole('link', { name: 'Standing' });
+  await standing.click();
+  await expect(page).toHaveURL(/sort=standing&dir=asc/);
+  await expect.poll(ids).toEqual(['order-1', 'order-4', 'order-2', 'order-3', 'order-5']);
+
+  await page.locator('#sell-orders').getByRole('link', { name: 'Standing' }).click();
+  await expect(page).toHaveURL(/sort=standing&dir=desc/);
+  await expect.poll(ids).toEqual(['order-3', 'order-2', 'order-4', 'order-1', 'order-5']);
 });

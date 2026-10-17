@@ -1,10 +1,11 @@
 {
-  "fingerprint": "f1ce2da5751649bb41ee3a82e6d3e44f823504b0775263f08b9953fa4ac5948d",
-  "verified_at": "2026-10-16T12:44:41.697260927Z",
+  "fingerprint": "9820de62adddef055ab2da3cdb58b9e95b21d2be35bcae5bb7c666af5e088066",
+  "verified_at": "2026-10-17T03:37:18.913175757Z",
   "variants": [
     "authorization/callback",
     "authorization/request",
     "jwks/rsa-keys",
+    "market-orders/orders",
     "names/found",
     "names/unknown-id",
     "orders/buy-orders",

@@ -340,3 +340,81 @@ async fn the_backfill_sums_each_snapshot_poll_into_one_entry(pool: PgPool) {
         )
     );
 }
+
+#[sqlx::test]
+async fn market_orders_hold_one_public_order_per_id_and_no_account_data(pool: PgPool) {
+    let columns: Vec<String> = sqlx::query_scalar(
+        "SELECT column_name FROM information_schema.columns \
+         WHERE table_name = 'market_orders' ORDER BY column_name",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        columns,
+        [
+            "is_buy_order",
+            "location_id",
+            "order_id",
+            "price",
+            "range",
+            "region_id",
+            "system_id",
+            "type_id"
+        ]
+    );
+    let insert = "INSERT INTO market_orders \
+        (order_id, region_id, type_id, location_id, system_id, is_buy_order, price, range) \
+        VALUES (1, 10000002, 34, 60003760, 30000142, false, 10.50, 'station')";
+    sqlx::query(insert).execute(&pool).await.unwrap();
+    assert!(
+        sqlx::query(insert).execute(&pool).await.is_err(),
+        "order_id is the key"
+    );
+}
+
+#[sqlx::test]
+async fn market_orders_are_indexed_by_region_and_item(pool: PgPool) {
+    let indexes: Vec<String> =
+        sqlx::query_scalar("SELECT indexdef FROM pg_indexes WHERE tablename = 'market_orders'")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(
+        indexes.iter().any(|d| d.contains("(region_id, type_id)")),
+        "{indexes:?}"
+    );
+}
+
+#[sqlx::test]
+async fn market_sync_has_one_row_per_region_and_item(pool: PgPool) {
+    let insert = "INSERT INTO market_sync (region_id, type_id, next_poll_at) \
+                  VALUES (10000002, 34, now())";
+    sqlx::query(insert).execute(&pool).await.unwrap();
+    assert!(
+        sqlx::query(insert).execute(&pool).await.is_err(),
+        "(region_id, type_id) is the key"
+    );
+    let failures: i32 =
+        sqlx::query_scalar("SELECT failures FROM market_sync WHERE region_id = 10000002")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(failures, 0, "no failures yet");
+    for column in [
+        "last_success_at",
+        "last_attempt_at",
+        "last_error",
+        "esi_expires_at",
+    ] {
+        let found: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM information_schema.columns \
+             WHERE table_name = 'market_sync' AND column_name = $1",
+        )
+        .bind(column)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(found, 1, "{column}");
+    }
+}

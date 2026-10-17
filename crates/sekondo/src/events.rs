@@ -9,6 +9,9 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
     OrdersUpdated,
+    /// A market refresh changed the standing or the gap of an order. Only the orders page
+    /// listens to it.
+    MarketUpdated,
 }
 
 impl Event {
@@ -16,6 +19,7 @@ impl Event {
     pub fn name(self) -> &'static str {
         match self {
             Self::OrdersUpdated => "orders-updated",
+            Self::MarketUpdated => "market-updated",
         }
     }
 }
@@ -124,7 +128,34 @@ mod tests {
     }
 
     #[test]
-    fn the_sse_name_is_stable() {
+    fn the_sse_names_are_stable() {
         assert_eq!(Event::OrdersUpdated.name(), "orders-updated");
+        assert_eq!(Event::MarketUpdated.name(), "market-updated");
+    }
+
+    #[tokio::test]
+    async fn a_market_signal_reaches_only_its_account() {
+        let bus = InProcessBus::new();
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        let mut stream_a = bus.subscribe(a);
+        let mut stream_b = bus.subscribe(b);
+
+        bus.publish(a, Event::MarketUpdated);
+
+        assert_eq!(next(&mut stream_a).await, Some(Event::MarketUpdated));
+        assert_eq!(next(&mut stream_b).await, None);
+    }
+
+    #[tokio::test]
+    async fn the_lag_fallback_is_still_the_orders_signal_whatever_was_missed() {
+        let bus = InProcessBus::with_capacity(2);
+        let account = Uuid::new_v4();
+        let mut stream = bus.subscribe(account);
+
+        for _ in 0..10 {
+            bus.publish(Uuid::new_v4(), Event::MarketUpdated);
+        }
+
+        assert_eq!(next(&mut stream).await, Some(Event::OrdersUpdated));
     }
 }

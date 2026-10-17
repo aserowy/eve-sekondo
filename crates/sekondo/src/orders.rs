@@ -33,6 +33,10 @@ pub enum SortKey {
     Location,
     Region,
     Price,
+    /// "Top" first, then the number of undercutting orders; no market data last.
+    Standing,
+    /// The difference to the best price; no market data last.
+    Gap,
     Volume,
     /// The order value of a sell order, the escrow of a buy order.
     Amount,
@@ -41,12 +45,14 @@ pub enum SortKey {
 }
 
 impl SortKey {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 11] = [
         Self::Character,
         Self::Item,
         Self::Location,
         Self::Region,
         Self::Price,
+        Self::Standing,
+        Self::Gap,
         Self::Volume,
         Self::Amount,
         Self::Issued,
@@ -61,6 +67,8 @@ impl SortKey {
             Self::Location => "location",
             Self::Region => "region",
             Self::Price => "price",
+            Self::Standing => "standing",
+            Self::Gap => "gap",
             Self::Volume => "volume",
             Self::Amount => "amount",
             Self::Issued => "issued",
@@ -68,7 +76,23 @@ impl SortKey {
         }
     }
 
-    /// The SQL expression to sort by. Only these literals ever reach the query text.
+    /// The SQL `ORDER BY` terms for a direction. Only these literals ever reach the query text.
+    /// The standing and the gap put orders without a standing last in both directions, so the
+    /// first term does not follow the direction.
+    fn order_by(self, direction: &str) -> String {
+        match self {
+            // `undercut > 0` is false for "Top", so it comes first in ascending order.
+            Self::Standing => format!(
+                "(st.undercut IS NULL), (st.undercut > 0) {direction}, st.undercut {direction}"
+            ),
+            // A top order has no best price to differ from: it counts as no difference.
+            Self::Gap => format!(
+                "(st.undercut IS NULL), COALESCE(abs(st.best_price - o.price), 0) {direction}"
+            ),
+            other => format!("{} {direction}", other.expression()),
+        }
+    }
+
     fn expression(self) -> &'static str {
         match self {
             Self::Character => "lower(c.name)",
@@ -82,6 +106,7 @@ impl SortKey {
             }
             Self::Issued => "o.issued",
             Self::TimeLeft => "o.issued + o.duration * interval '1 day'",
+            Self::Standing | Self::Gap => unreachable!("ordered by `order_by`"),
         }
     }
 }
@@ -165,6 +190,12 @@ pub struct OrderRow {
     pub escrow_cents: Option<i64>,
     pub issued: OffsetDateTime,
     pub duration: i32,
+    /// How many compared orders have a strictly better price; `None` without market data.
+    pub undercut: Option<i64>,
+    /// The best price among the orders that undercut this one (none for a top order).
+    pub best_price_cents: Option<i64>,
+    /// Per unit, the difference to the best price; `None` for a top order or without market data.
+    pub gap_cents: Option<i64>,
 }
 
 impl OrderRow {
@@ -172,6 +203,49 @@ impl OrderRow {
         self.issued + time::Duration::days(i64::from(self.duration))
     }
 }
+
+/// Joins `st` to the current orders `o`: how many other public orders undercut each of them and
+/// the best of those prices, or NULL when there is no standing (design §5). The listing and the
+/// change detection both use it, so a signal is sent exactly when what is shown changes.
+///
+/// A standing exists only when the order's pair was refreshed once, the order is not in a player
+/// structure and, for a buy order, its own row in the market data tells its solar system.
+/// A sell order is compared at its station. A buy order is compared at its station with the buy
+/// orders that reach it: any order there, a `region` range, and a `solarsystem` or jump range
+/// from the same solar system. The own range is not read.
+pub(crate) const STANDING_JOIN: &str = "LEFT JOIN LATERAL (
+        SELECT CASE WHEN a.available THEN c.undercut END AS undercut,
+               CASE WHEN a.available THEN c.best_price END AS best_price
+        FROM (SELECT o.location_id < 100000000
+                 AND EXISTS (SELECT 1 FROM market_sync s
+                             WHERE s.region_id = o.region_id AND s.type_id = o.type_id
+                               AND s.last_success_at IS NOT NULL)
+                 AND (NOT o.is_buy_order
+                      OR EXISTS (SELECT 1 FROM market_orders own WHERE own.order_id = o.order_id))
+                 AS available) a,
+        LATERAL (
+            SELECT count(*) AS undercut,
+                   CASE WHEN o.is_buy_order THEN max(m.price) ELSE min(m.price) END AS best_price
+            FROM market_orders m
+            WHERE m.region_id = o.region_id AND m.type_id = o.type_id
+              AND m.order_id <> o.order_id
+              AND CASE WHEN o.is_buy_order THEN
+                    m.is_buy_order AND m.price > o.price
+                    AND (m.location_id = o.location_id
+                         OR m.range = 'region'
+                         OR (m.range <> 'station'
+                             AND m.system_id = (SELECT own.system_id FROM market_orders own
+                                                WHERE own.order_id = o.order_id)))
+                  ELSE
+                    NOT m.is_buy_order AND m.price < o.price AND m.location_id = o.location_id
+                  END
+        ) c
+    ) st ON true";
+
+/// The per-unit difference to the best price in cents, for an order that is undercut. Needs
+/// `STANDING_JOIN` (`st`) and the current order (`o`).
+pub(crate) const GAP_CENTS: &str =
+    "CASE WHEN st.undercut > 0 THEN (abs(st.best_price - o.price) * 100)::bigint END";
 
 /// The current orders of the selected characters, restricted to the account in the query itself
 /// so a selection can never reach another account's data.
@@ -196,15 +270,19 @@ pub async fn list_orders(
                 o.volume_remain, o.volume_total,
                 (o.price * o.volume_remain * 100)::bigint AS value_cents,
                 (o.escrow * 100)::bigint AS escrow_cents,
-                o.issued, o.duration
+                o.issued, o.duration,
+                st.undercut,
+                (st.best_price * 100)::bigint AS best_price_cents,
+                {GAP_CENTS} AS gap_cents
          FROM current_orders o
          JOIN characters c ON c.character_id = o.character_id
          LEFT JOIN names tn ON tn.id = o.type_id
          LEFT JOIN names rn ON rn.id = o.region_id
          LEFT JOIN names ln ON ln.id = o.location_id
+         {STANDING_JOIN}
          WHERE c.account_id = $1 AND o.character_id = ANY($2) AND o.is_buy_order = $3
-         ORDER BY {} {direction}, o.order_id",
-        sort.key.expression()
+         ORDER BY {}, o.order_id",
+        sort.key.order_by(direction)
     );
     sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(account_id)
@@ -215,6 +293,9 @@ pub async fn list_orders(
 }
 
 // ---- view model ----
+
+/// Shown where an order has no standing and no gap.
+const NO_DATA: &str = "\u{2014}";
 
 pub struct HeaderView {
     pub label: &'static str,
@@ -233,6 +314,13 @@ pub struct RowView {
     pub is_corporation: bool,
     pub price: String,
     pub price_exact: String,
+    /// `Top`, `Undercut N` or a dash while there is no market data.
+    pub standing: String,
+    /// `top` or `undercut` for the badge; empty without a standing.
+    pub standing_class: &'static str,
+    /// The difference to the best price and its percentage; empty for a top order.
+    pub gap: String,
+    pub gap_exact: String,
     pub volume: String,
     pub amount: String,
     pub amount_exact: String,
@@ -318,13 +406,15 @@ fn headers(state: &ViewState, side: Side) -> Vec<HeaderView> {
     let columns = [
         ("Character", SortKey::Character),
         ("Item", SortKey::Item),
-        ("Location", SortKey::Location),
-        ("Region", SortKey::Region),
         ("Price", SortKey::Price),
+        ("Standing", SortKey::Standing),
+        ("Behind by", SortKey::Gap),
         ("Volume", SortKey::Volume),
         (amount, SortKey::Amount),
         ("Issued", SortKey::Issued),
         ("Time left", SortKey::TimeLeft),
+        ("Location", SortKey::Location),
+        ("Region", SortKey::Region),
     ];
     columns
         .into_iter()
@@ -367,6 +457,24 @@ fn row_view(row: &OrderRow, side: Side, now: OffsetDateTime) -> RowView {
         Side::Sell => row.value_cents,
         Side::Buy => row.escrow_cents.unwrap_or(0),
     };
+    let (standing, standing_class, gap, gap_exact) = match (row.undercut, row.gap_cents) {
+        (None, _) => (NO_DATA.to_owned(), "", NO_DATA.to_owned(), String::new()),
+        (Some(0), _) => ("Top".to_owned(), "top", String::new(), String::new()),
+        (Some(count), gap_cents) => {
+            let gap_cents = gap_cents.unwrap_or(0);
+            let best = row.best_price_cents.unwrap_or(0);
+            (
+                format!("Undercut {count}"),
+                "undercut",
+                format!(
+                    "{} ({}%)",
+                    format::isk_short(gap_cents),
+                    format::percent_of(gap_cents, best)
+                ),
+                format::isk_exact(gap_cents),
+            )
+        }
+    };
     RowView {
         order_id: row.order_id,
         character: row.character_name.clone(),
@@ -382,6 +490,10 @@ fn row_view(row: &OrderRow, side: Side, now: OffsetDateTime) -> RowView {
         is_corporation: row.is_corporation,
         price: format::isk_short(row.price_cents),
         price_exact: format::isk_exact(row.price_cents),
+        standing,
+        standing_class,
+        gap,
+        gap_exact,
         volume: format!("{} / {}", row.volume_remain, row.volume_total),
         amount: format::isk_short(amount_cents),
         amount_exact: format::isk_exact(amount_cents),

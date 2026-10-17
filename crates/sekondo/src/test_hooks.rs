@@ -57,3 +57,12 @@ pub async fn poll(
     }
     .into_response()
 }
+
+/// Refreshes every market pair the signed-in account's current orders use, right now and
+/// whatever `next_poll_at` says (but not the ESI gate). Answers how many pairs it refreshed.
+pub async fn market_poll(State(state): State<AppState>, account: CurrentAccount) -> Response {
+    match state.market.refresh_account_pairs(account.id).await {
+        Ok(refreshed) => refreshed.to_string().into_response(),
+        Err(e) => pages::internal_error(e),
+    }
+}

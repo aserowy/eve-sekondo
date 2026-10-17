@@ -101,7 +101,7 @@ pub const ESI_EXPIRES_SECONDS: u64 = 1200;
 /// The next ESI calls answer with this instead of their normal response.
 #[derive(Clone, Debug)]
 pub struct EsiFailure {
-    /// Only calls to this route fail (`orders`, `names`, `structures`); `None`: any route.
+    /// Only calls to this route fail (`orders`, `names`, `structures`, `market`); `None`: any route.
     pub route: Option<String>,
     pub remaining: u32,
     pub status: u16,
@@ -156,6 +156,8 @@ pub struct Inner {
     pub issued_tokens: HashMap<String, IssuedToken>,
     /// Fixture orders per character, as ESI's JSON.
     pub orders: HashMap<i64, Vec<Value>>,
+    /// Fixture public market orders per region, as ESI's JSON.
+    pub market_orders: HashMap<i64, MarketFixture>,
     /// Seconds ahead that ESI's `Expires` header points.
     pub esi_expires_secs: u64,
     /// Calls per ESI route (`orders`), counting every request, failed or not.
@@ -175,6 +177,16 @@ pub struct Inner {
     pub jwk_n: String,
     pub jwk_e: String,
 }
+
+/// The public market orders of one region and how many fit on a page.
+#[derive(Clone, Debug)]
+pub struct MarketFixture {
+    pub orders: Vec<Value>,
+    pub page_size: usize,
+}
+
+/// ESI's page size for the region market.
+pub const MARKET_PAGE_SIZE: usize = 1000;
 
 /// Overrides for issuing deliberately odd tokens in tests.
 #[derive(Clone, Debug, Default)]
@@ -246,6 +258,7 @@ impl Inner {
             jwks_calls: 0,
             issued_tokens: HashMap::new(),
             orders: default_orders(),
+            market_orders: HashMap::new(),
             esi_expires_secs: ESI_EXPIRES_SECONDS,
             esi_calls: HashMap::new(),
             names_requests: Vec::new(),
@@ -372,6 +385,7 @@ impl Inner {
         self.fail_next_token = 0;
         self.token_options = TokenOptions::default();
         self.orders = default_orders();
+        self.market_orders.clear();
         self.esi_expires_secs = ESI_EXPIRES_SECONDS;
         self.esi_calls.clear();
         self.names_requests.clear();

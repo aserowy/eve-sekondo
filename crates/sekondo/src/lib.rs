@@ -15,6 +15,7 @@ pub mod events;
 pub mod format;
 pub mod freshness;
 pub mod headers;
+pub mod market;
 pub mod oauth;
 pub mod orders;
 pub mod pages;

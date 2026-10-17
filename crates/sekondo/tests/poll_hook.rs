@@ -75,3 +75,79 @@ async fn it_answers_404_for_the_character_of_another_account(pool: PgPool) {
     assert_eq!(order_count(&pool, BOB).await, 0);
     assert_eq!(app.stub().esi_calls("orders"), 0);
 }
+
+async fn market_poll(app: &TestApp, browser: &Browser, token: Option<&str>) -> reqwest::Response {
+    let mut request = browser
+        .post(&app.url("/_test/market-poll"))
+        .header("origin", &app.base_url)
+        .header("hx-request", "true");
+    if let Some(token) = token {
+        request = request.header("x-csrf-token", token);
+    }
+    browser.send(request).await
+}
+
+#[sqlx::test]
+async fn the_market_poll_refreshes_the_tracked_pairs_of_the_account_only_after_a_poll(
+    pool: PgPool,
+) {
+    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+    let browser = app.browser();
+    browser.sso_round_trip(&app, "/auth/login", ALICE).await;
+    let token = token(&app, &browser).await;
+
+    // Nothing is tracked before a poll stored orders.
+    let before = market_poll(&app, &browser, Some(&token)).await;
+    assert_eq!(before.status(), 200);
+    assert_eq!(before.text().await.unwrap(), "0");
+    assert_eq!(app.stub().esi_calls("market"), 0);
+
+    poll(&app, &browser, &token, ALICE).await;
+    let after = market_poll(&app, &browser, Some(&token)).await;
+
+    // The stub's fixture gives Alice orders for three items in The Forge, due or not.
+    assert_eq!(after.text().await.unwrap(), "3");
+    assert_eq!(app.stub().esi_calls("market"), 3);
+    let synced: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM market_sync WHERE last_success_at IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(synced, 3);
+}
+
+#[sqlx::test]
+async fn the_market_poll_leaves_the_pairs_of_other_accounts_alone(pool: PgPool) {
+    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+    let alice = app.browser();
+    alice.sso_round_trip(&app, "/auth/login", ALICE).await;
+    let bob = app.browser();
+    bob.sso_round_trip(&app, "/auth/login", BOB).await;
+    let alice_token = token(&app, &alice).await;
+    let bob_token = token(&app, &bob).await;
+    poll(&app, &alice, &alice_token, ALICE).await;
+    poll(&app, &bob, &bob_token, BOB).await;
+
+    let res = market_poll(&app, &bob, Some(&bob_token)).await;
+
+    // Bob has one order; Alice's two other items are not his business.
+    assert_eq!(res.text().await.unwrap(), "1");
+    assert_eq!(app.stub().esi_calls("market"), 1);
+}
+
+#[sqlx::test]
+async fn the_market_poll_needs_the_csrf_token_and_a_session(pool: PgPool) {
+    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+    let browser = app.browser();
+    browser.sso_round_trip(&app, "/auth/login", ALICE).await;
+    let token = token(&app, &browser).await;
+    poll(&app, &browser, &token, ALICE).await;
+
+    let without_token = market_poll(&app, &browser, None).await;
+    assert_eq!(without_token.status(), 403);
+
+    let stranger = app.browser();
+    let without_session = market_poll(&app, &stranger, Some(&token)).await;
+    assert_ne!(without_session.status(), 200);
+    assert_eq!(app.stub().esi_calls("market"), 0);
+}

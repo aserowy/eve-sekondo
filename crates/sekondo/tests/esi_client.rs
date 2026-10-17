@@ -222,3 +222,148 @@ async fn a_sell_order_without_min_volume_is_accepted_as_esi_sends_it() {
     assert_eq!(response.body[0].min_volume, 1);
     assert!(!response.body[0].is_corporation);
 }
+
+fn market_order(id: i64, type_id: i64, buy: bool, price: f64) -> serde_json::Value {
+    json!({
+        "order_id": id, "type_id": type_id, "location_id": 60003760, "system_id": 30000142,
+        "is_buy_order": buy, "price": price, "range": "station",
+        "duration": 90, "issued": "2026-10-11T12:00:00Z", "min_volume": 1,
+        "volume_remain": 3, "volume_total": 5,
+    })
+}
+
+#[tokio::test]
+async fn a_one_page_market_answer_is_returned_whole_without_a_token() {
+    let h = common::esi_harness().await;
+    h.control(
+        "market-orders",
+        json!({"region_id": 10000002, "orders": [
+            market_order(1, 34, false, 10.25), market_order(2, 34, true, 9.5),
+        ]}),
+    )
+    .await;
+
+    let response = h.client.market_orders(10000002, 34).await.unwrap();
+
+    assert_eq!(response.body.len(), 2);
+    let sell = response.body.iter().find(|o| o.order_id == 1).unwrap();
+    assert_eq!(sell.price_cents, 1025);
+    assert_eq!((sell.location_id, sell.system_id), (60003760, 30000142));
+    assert!(!sell.is_buy_order);
+    assert!(
+        response
+            .body
+            .iter()
+            .find(|o| o.order_id == 2)
+            .unwrap()
+            .is_buy_order
+    );
+    assert_eq!(h.stub.esi_calls("market"), 1);
+}
+
+#[tokio::test]
+async fn a_three_page_market_answer_is_returned_whole() {
+    let h = common::esi_harness().await;
+    let orders: Vec<_> = (1..=5)
+        .map(|id| market_order(id, 34, false, 10.0))
+        .collect();
+    h.control(
+        "market-orders",
+        json!({"region_id": 10000002, "orders": orders, "page_size": 2}),
+    )
+    .await;
+
+    let response = h.client.market_orders(10000002, 34).await.unwrap();
+
+    let mut ids: Vec<i64> = response.body.iter().map(|o| o.order_id).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, [1, 2, 3, 4, 5]);
+    assert_eq!(h.stub.esi_calls("market"), 3);
+}
+
+#[tokio::test]
+async fn only_the_requested_item_is_returned() {
+    let h = common::esi_harness().await;
+    h.control(
+        "market-orders",
+        json!({"region_id": 10000002, "orders": [
+            market_order(1, 34, false, 10.0), market_order(2, 35, false, 10.0),
+        ]}),
+    )
+    .await;
+
+    let response = h.client.market_orders(10000002, 35).await.unwrap();
+
+    assert_eq!(
+        response.body.iter().map(|o| o.order_id).collect::<Vec<_>>(),
+        [2]
+    );
+}
+
+#[tokio::test]
+async fn the_expiry_of_the_first_page_is_reported() {
+    let h = common::esi_harness().await;
+    h.control("esi-expires", json!({"seconds": 480})).await;
+
+    let response = h.client.market_orders(10000002, 34).await.unwrap();
+
+    let ahead = response.expires_at.unwrap() - h.clock.now();
+    assert!(
+        ahead >= Duration::seconds(479) && ahead <= Duration::seconds(480),
+        "{ahead}"
+    );
+}
+
+#[tokio::test]
+async fn a_failing_market_page_is_a_temporary_failure() {
+    let h = common::esi_harness().await;
+    h.control("esi-fail-next", json!({"route": "market", "status": 503}))
+        .await;
+    let failed = h.client.market_orders(10000002, 34).await;
+    assert!(matches!(failed, Err(EsiError::Temporary(_))), "{failed:?}");
+}
+
+#[tokio::test]
+async fn the_gate_pauses_the_market_route_without_pausing_the_character_orders() {
+    let h = common::esi_harness().await;
+    let token = h.token(90000001);
+    h.control(
+        "esi-fail-next",
+        json!({"route": "market", "status": 429, "headers": {"retry-after": "60", "x-ratelimit-group": "market-order"}}),
+    )
+    .await;
+
+    let limited = h.client.market_orders(10000002, 34).await;
+    assert!(
+        matches!(limited, Err(EsiError::Deferred { .. })),
+        "{limited:?}"
+    );
+    assert!(matches!(
+        h.client.market_orders(10000002, 34).await,
+        Err(EsiError::Deferred { .. })
+    ));
+    assert_eq!(h.stub.esi_calls("market"), 1, "no request during the block");
+    assert!(h.client.orders(90000001, &token).await.is_ok());
+
+    h.clock.advance(Duration::seconds(61));
+    assert!(h.client.market_orders(10000002, 34).await.is_ok());
+}
+
+#[tokio::test]
+async fn a_market_error_limit_does_not_exist_but_the_global_one_still_applies() {
+    // The market route sends no error-limit headers; an exhausted error limit seen on another
+    // route still pauses it, as everything else.
+    let h = common::esi_harness().await;
+    h.control(
+        "esi-fail-next",
+        json!({"route": "names", "status": 420, "headers": {"x-esi-error-limit-reset": "30"}}),
+    )
+    .await;
+    let _ = h.client.names(&[34]).await;
+
+    assert!(matches!(
+        h.client.market_orders(10000002, 34).await,
+        Err(EsiError::Deferred { .. })
+    ));
+    assert_eq!(h.stub.esi_calls("market"), 0);
+}

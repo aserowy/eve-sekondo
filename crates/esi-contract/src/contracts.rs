@@ -362,6 +362,46 @@ pub fn structures() -> Call {
     }
 }
 
+/// The public market orders of a region for one item. No token; every page carries `X-Pages`.
+pub fn market_orders() -> Call {
+    // Real ESI limits this route by rate, not by error count (verified): it sends the rate-limit
+    // group and what is left of it, and no error-limit headers.
+    let headers = vec![
+        header("date", HttpDate, Always),
+        header("expires", HttpDate, Always),
+        header("x-pages", Integer, Always),
+        header("x-ratelimit-group", Token, Always),
+        header("x-ratelimit-remaining", Integer, Always),
+        header("x-esi-error-limit-remain", Integer, Absent),
+        header("x-esi-error-limit-reset", Integer, Absent),
+    ];
+    // Only what the app reads: not the volumes, duration or issue date.
+    let fields = vec![
+        field("order_id", Ty::Int, Always),
+        field("type_id", Ty::Int, Always),
+        field("location_id", Ty::Int, Always),
+        field("system_id", Ty::Int, Always),
+        field("is_buy_order", Ty::Bool, Always),
+        field("price", Ty::Number, Always),
+        field("range", Ty::Str, Always),
+    ];
+    let mut variants = vec![variant(
+        "orders",
+        StatusSpec::Exact(200),
+        headers,
+        BodySpec::Json(Ty::array_of(Ty::Object(fields))),
+    )];
+    variants.extend(esi_failure_variants());
+    Call {
+        name: "market-orders",
+        routes: vec![Route {
+            method: "GET",
+            path: "/markets/{region_id}/orders",
+        }],
+        variants,
+    }
+}
+
 /// Every contract.
 pub fn contracts() -> Vec<Call> {
     vec![
@@ -371,6 +411,7 @@ pub fn contracts() -> Vec<Call> {
         orders(),
         names(),
         structures(),
+        market_orders(),
     ]
 }
 
@@ -767,6 +808,114 @@ mod tests {
         );
     }
 
+    fn market_order() -> Value {
+        json!({
+            "order_id": 7, "type_id": 34, "location_id": 60003760, "system_id": 30000142,
+            "is_buy_order": false, "price": 10.5, "range": "region",
+            "duration": 90, "issued": "2026-10-11T12:00:00Z", "min_volume": 1,
+            "volume_remain": 3, "volume_total": 5,
+        })
+    }
+
+    /// What real ESI sends on the market route: the rate-limit headers, no error-limit ones.
+    fn market_ok() -> HeaderMap {
+        headers(&[
+            ("date", "Fri, 16 Oct 2026 10:00:00 GMT"),
+            ("expires", "Fri, 16 Oct 2026 10:05:00 GMT"),
+            ("x-pages", "3"),
+            ("x-ratelimit-group", "market-order"),
+            ("x-ratelimit-remaining", "11998"),
+        ])
+    }
+
+    #[test]
+    fn market_orders_answer_with_the_fields_and_pages_the_app_reads() {
+        let call = market_orders();
+        let body = json!([market_order()]);
+        assert!(problems(&call, "orders", Some(200), &market_ok(), Some(body.clone())).is_empty());
+        // The app does not read the volumes or the rest, so they are not required.
+        let slim = json!([{
+            "order_id": 7, "type_id": 34, "location_id": 60003760, "system_id": 30000142,
+            "is_buy_order": true, "price": 10.5, "range": "5",
+        }]);
+        assert!(problems(&call, "orders", Some(200), &market_ok(), Some(slim)).is_empty());
+        // An item nobody trades is an empty page.
+        assert!(problems(&call, "orders", Some(200), &market_ok(), Some(json!([]))).is_empty());
+
+        let mut h = market_ok();
+        h.remove("x-pages");
+        assert_eq!(
+            problems(&call, "orders", Some(200), &h, Some(body.clone())),
+            ["header x-pages is missing but always present"]
+        );
+        h.insert("x-pages", HeaderValue::from_static("many"));
+        assert_eq!(
+            problems(&call, "orders", Some(200), &h, Some(body)).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn the_market_route_is_rate_limited_not_error_limited() {
+        let call = market_orders();
+        let body = json!([market_order()]);
+        let mut h = market_ok();
+        h.remove("x-ratelimit-group");
+        assert_eq!(
+            problems(&call, "orders", Some(200), &h, Some(body.clone())),
+            ["header x-ratelimit-group is missing but always present"]
+        );
+        // The error limit headers are not sent here.
+        let mut h = market_ok();
+        h.insert("x-esi-error-limit-remain", HeaderValue::from_static("100"));
+        assert_eq!(
+            problems(&call, "orders", Some(200), &h, Some(body)),
+            ["header x-esi-error-limit-remain is present but must be absent"]
+        );
+    }
+
+    #[test]
+    fn a_market_order_without_a_system_breaks_the_contract() {
+        for field in [
+            "system_id",
+            "order_id",
+            "type_id",
+            "location_id",
+            "is_buy_order",
+            "price",
+            "range",
+        ] {
+            let mut order = market_order();
+            order.as_object_mut().unwrap().remove(field);
+            assert_eq!(
+                problems(
+                    &market_orders(),
+                    "orders",
+                    Some(200),
+                    &market_ok(),
+                    Some(json!([order]))
+                ),
+                [format!("$[0].{field} is missing but always present")]
+            );
+        }
+    }
+
+    #[test]
+    fn market_orders_need_no_token_and_have_the_usual_failures() {
+        let call = market_orders();
+        for name in ["error-limited", "rate-limited", "server-error"] {
+            assert!(
+                matches!(
+                    call.variant(name).map(|v| v.verifiable),
+                    Some(Verifiable::No(_))
+                ),
+                "{name}"
+            );
+        }
+        assert!(problems(&call, "server-error", Some(503), &HeaderMap::new(), None).is_empty());
+        assert_eq!(call.routes[0].path, "/markets/{region_id}/orders");
+    }
+
     #[test]
     fn names_found_and_unknown() {
         let call = names();
@@ -888,7 +1037,7 @@ mod tests {
         assert!(problems(&call, "server-error", Some(502), &HeaderMap::new(), None).is_empty());
     }
 
-    const ALL_ROUTES: [(&str, &str); 7] = [
+    const ALL_ROUTES: [(&str, &str); 8] = [
         ("GET", "/oauth/jwks"),
         ("GET", "/v2/oauth/authorize"),
         ("GET", "/v2/oauth/authorize/select"),
@@ -896,6 +1045,7 @@ mod tests {
         ("GET", "/characters/{id}/orders"),
         ("POST", "/universe/names"),
         ("GET", "/universe/structures/{id}"),
+        ("GET", "/markets/{region_id}/orders"),
     ];
 
     #[test]

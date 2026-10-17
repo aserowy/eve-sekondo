@@ -27,6 +27,8 @@ const REQUEST_TIMEOUT: StdDuration = StdDuration::from_secs(30);
 pub const ROUTE_ORDERS: &str = "orders";
 pub const ROUTE_NAMES: &str = "names";
 pub const ROUTE_STRUCTURES: &str = "structures";
+/// Public market orders, in a rate-limit group of their own.
+pub const ROUTE_MARKET: &str = "market";
 
 #[derive(Debug, thiserror::Error)]
 pub enum EsiError {
@@ -67,6 +69,20 @@ pub struct EsiOrder {
     #[serde(with = "time::serde::rfc3339")]
     pub issued: OffsetDateTime,
     pub duration: i32,
+}
+
+/// One public market order, with only what the comparison of standings reads.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct EsiMarketOrder {
+    pub order_id: i64,
+    pub type_id: i64,
+    pub location_id: i64,
+    pub system_id: i64,
+    pub is_buy_order: bool,
+    /// ISK in cents, as for the character's own orders.
+    #[serde(rename = "price", deserialize_with = "cents")]
+    pub price_cents: i64,
+    pub range: String,
 }
 
 fn no_minimum() -> i64 {
@@ -153,6 +169,37 @@ impl EsiClient {
         Ok(self.fetch(ROUTE_STRUCTURES, request).await?.body)
     }
 
+    /// All public market orders of a region for one item, every page read one after another. The
+    /// expiry is the first page's. One failing page fails the whole answer. Needs no token.
+    pub async fn market_orders(
+        &self,
+        region_id: i64,
+        type_id: i64,
+    ) -> Result<EsiResponse<Vec<EsiMarketOrder>>, EsiError> {
+        let page_request = |page: u32| {
+            let mut url = self.url(&format!("markets/{region_id}/orders"));
+            url.query_pairs_mut()
+                .append_pair("order_type", "all")
+                .append_pair("type_id", &type_id.to_string())
+                .append_pair("page", &page.to_string());
+            self.http.get(url)
+        };
+        let (first, pages) = self
+            .fetch_paged::<Vec<EsiMarketOrder>>(ROUTE_MARKET, page_request(1))
+            .await?;
+        let mut orders = first.body;
+        for page in 2..=pages.unwrap_or(1) {
+            let (next, _) = self
+                .fetch_paged::<Vec<EsiMarketOrder>>(ROUTE_MARKET, page_request(page))
+                .await?;
+            orders.extend(next.body);
+        }
+        Ok(EsiResponse {
+            body: orders,
+            expires_at: first.expires_at,
+        })
+    }
+
     fn url(&self, path: &str) -> Url {
         self.base_url.join(path).expect("a valid ESI path")
     }
@@ -162,6 +209,15 @@ impl EsiClient {
         route: &'static str,
         request: reqwest::RequestBuilder,
     ) -> Result<EsiResponse<T>, EsiError> {
+        Ok(self.fetch_paged(route, request).await?.0)
+    }
+
+    /// Like `fetch`, and also the page count from `X-Pages` when the answer has one.
+    async fn fetch_paged<T: serde::de::DeserializeOwned>(
+        &self,
+        route: &'static str,
+        request: reqwest::RequestBuilder,
+    ) -> Result<(EsiResponse<T>, Option<u32>), EsiError> {
         self.gate
             .check(route)
             .map_err(|until| EsiError::Deferred { until })?;
@@ -177,6 +233,8 @@ impl EsiClient {
         match status {
             s if s.is_success() => {
                 let expires_at = expires_at(response.headers(), self.clock.now());
+                let pages =
+                    header_int(response.headers(), "x-pages").and_then(|p| u32::try_from(p).ok());
                 // Read as text first: reqwest's own decode error does not say which field failed.
                 let text = response
                     .text()
@@ -184,7 +242,7 @@ impl EsiClient {
                     .map_err(|e| EsiError::Temporary(format!("unreadable ESI answer: {e}")))?;
                 let body = serde_json::from_str(&text)
                     .map_err(|e| EsiError::Temporary(format!("unreadable ESI answer: {e}")))?;
-                Ok(EsiResponse { body, expires_at })
+                Ok((EsiResponse { body, expires_at }, pages))
             }
             StatusCode::FORBIDDEN => Err(EsiError::Forbidden),
             StatusCode::NOT_FOUND => Err(EsiError::NotFound),

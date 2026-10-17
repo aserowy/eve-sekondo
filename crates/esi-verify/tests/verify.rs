@@ -154,6 +154,15 @@ async fn world(person: Person) -> World {
             json!({"structure_id": FORBIDDEN_STRUCTURE, "allowed": false}),
         )
         .await;
+    // The default orders of Alice: a sell order for 34 and a buy order for 36, both in The Forge.
+    world
+        .control(
+            "market-orders",
+            json!({"region_id": 10000002, "orders": [
+                market_order(7001, 34, false), market_order(7002, 36, true),
+            ]}),
+        )
+        .await;
     world
 }
 
@@ -218,6 +227,15 @@ fn order(id: i64, buy: bool) -> Value {
     order
 }
 
+fn market_order(id: i64, type_id: i64, buy: bool) -> Value {
+    json!({
+        "order_id": id, "type_id": type_id, "location_id": 60003760, "system_id": 30000142,
+        "is_buy_order": buy, "price": 10.5, "range": "station",
+        "duration": 90, "issued": "2026-10-11T12:00:00Z", "min_volume": 1,
+        "volume_remain": 3, "volume_total": 5,
+    })
+}
+
 #[tokio::test]
 async fn a_passing_verification_records_the_fingerprint_and_the_variants() {
     let w = world(Person::LogsIn).await;
@@ -243,6 +261,7 @@ async fn a_passing_verification_records_the_fingerprint_and_the_variants() {
         "names/unknown-id",
         "structures/found",
         "structures/forbidden",
+        "market-orders/orders",
     ] {
         assert!(record.variants.iter().any(|v| v == variant), "{variant}");
     }
@@ -250,6 +269,7 @@ async fn a_passing_verification_records_the_fingerprint_and_the_variants() {
         !record.variants.iter().any(|v| v.contains("rate-limited")),
         "failure variants cannot be verified"
     );
+    assert_eq!(w.stub.esi_calls("market"), 2, "one request per side");
     assert_eq!(w.visitor.opened.load(Ordering::SeqCst), 1);
     assert!(
         output.contains("/v2/oauth/authorize?"),
@@ -451,4 +471,100 @@ async fn a_forbidden_structure_that_is_allowed_fails_the_forbidden_variant() {
 
     assert!(result.is_err());
     assert!(output.contains("structures/forbidden"), "{output}");
+}
+
+#[tokio::test]
+async fn the_market_requests_are_built_from_the_first_sell_and_the_first_buy_order() {
+    let w = world(Person::LogsIn).await;
+    let sell = |id, type_id, region| {
+        let mut o = order(id, false);
+        o["type_id"] = json!(type_id);
+        o["region_id"] = json!(region);
+        o
+    };
+    let mut buy = order(3, true);
+    buy["type_id"] = json!(36);
+    buy["region_id"] = json!(10000002);
+    w.control(
+        "orders",
+        json!({"character_id": ALICE, "orders": [
+            sell(1, 35, 10000043), sell(2, 34, 10000002), buy,
+        ]}),
+    )
+    .await;
+    // Only these two (region, item) pairs have market orders. The second sell order's pair has
+    // none, so using it, or any other pair, would give an empty answer.
+    w.control(
+        "market-orders",
+        json!({"region_id": 10000043, "orders": [market_order(8001, 35, false)]}),
+    )
+    .await;
+    w.control(
+        "market-orders",
+        json!({"region_id": 10000002, "orders": [market_order(8002, 36, true)]}),
+    )
+    .await;
+
+    let (result, output) = w.verify().await;
+
+    result.unwrap_or_else(|e| panic!("{e}\n{output}"));
+    assert_eq!(w.stub.esi_calls("market"), 2);
+}
+
+#[tokio::test]
+async fn a_market_answer_without_a_system_names_the_call_and_the_field() {
+    let w = world(Person::LogsIn).await;
+    let old = w.write_old_record();
+    let mut missing = market_order(7001, 34, false);
+    missing.as_object_mut().unwrap().remove("system_id");
+    w.control(
+        "market-orders",
+        json!({"region_id": 10000002, "orders": [missing, market_order(7002, 36, true)]}),
+    )
+    .await;
+
+    let (result, output) = w.verify().await;
+
+    assert!(result.is_err());
+    assert!(output.contains("market-orders/orders"), "{output}");
+    assert!(output.contains("$[0].system_id"), "{output}");
+    assert_eq!(w.record(), Some(old));
+}
+
+#[tokio::test]
+async fn an_empty_market_answer_for_the_characters_own_item_fails() {
+    let w = world(Person::LogsIn).await;
+    let old = w.write_old_record();
+    w.control(
+        "market-orders",
+        json!({"region_id": 10000002, "orders": []}),
+    )
+    .await;
+
+    let (result, output) = w.verify().await;
+
+    assert!(result.is_err());
+    assert!(output.contains("market-orders/orders"), "{output}");
+    assert!(output.contains("no orders"), "{output}");
+    assert_eq!(w.record(), Some(old));
+}
+
+#[tokio::test]
+async fn a_market_answer_the_app_cannot_decode_fails_with_the_decoding_error() {
+    let w = world(Person::LogsIn).await;
+    let mut odd = market_order(7001, 34, false);
+    odd["price"] = json!("ten");
+    w.control(
+        "market-orders",
+        json!({"region_id": 10000002, "orders": [odd, market_order(7002, 36, true)]}),
+    )
+    .await;
+
+    let (result, output) = w.verify().await;
+
+    assert!(result.is_err());
+    assert!(
+        output.contains("market-orders: the app cannot decode"),
+        "{output}"
+    );
 }

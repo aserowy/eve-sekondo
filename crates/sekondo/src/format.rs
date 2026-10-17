@@ -83,6 +83,19 @@ pub fn time_left(expires_at: OffsetDateTime, now: OffsetDateTime) -> String {
     }
 }
 
+/// `part` as a percentage of `whole` (both in cents), rounded half up to one decimal, without
+/// floating point: `12,500` of `1,000,000` ISK is `1.3`.
+pub fn percent_of(part_cents: i64, whole_cents: i64) -> String {
+    if whole_cents <= 0 {
+        return "0.0".to_owned();
+    }
+    let part = i128::from(part_cents);
+    let whole = i128::from(whole_cents);
+    // Tenths of a percent: part / whole * 1000, half up.
+    let tenths = (part * 1000 * 2 + whole) / (whole * 2);
+    format!("{}.{}", tenths / 10, tenths % 10)
+}
+
 /// A moment in EVE time (UTC): `2026-10-01 12:00`.
 pub fn eve_time(moment: OffsetDateTime) -> String {
     let moment = moment.to_offset(time::UtcOffset::UTC);
@@ -163,6 +176,28 @@ mod tests {
         assert_eq!(isk_exact(0), "0.00 ISK");
         assert_eq!(isk_exact(isk(15_000_000, 0)), "15,000,000.00 ISK");
         assert_eq!(isk_exact(5), "0.05 ISK");
+    }
+
+    #[test]
+    fn a_gap_is_a_percentage_of_the_best_price_rounded_half_up_to_one_decimal() {
+        assert_eq!(percent_of(isk(12_500, 0), isk(1_000_000, 0)), "1.3");
+        assert_eq!(percent_of(isk(5, 0), isk(100, 0)), "5.0");
+        // Exactly on a half: 1.25 % is 1.3, 1.24 % is 1.2.
+        assert_eq!(percent_of(125, 10_000), "1.3");
+        assert_eq!(percent_of(124, 10_000), "1.2");
+        assert_eq!(percent_of(isk(100, 0), isk(100, 0)), "100.0");
+        assert_eq!(percent_of(isk(250, 0), isk(100, 0)), "250.0");
+    }
+
+    #[test]
+    fn a_gap_percentage_survives_tiny_and_huge_amounts() {
+        // One cent behind a best price of 100 trillion ISK is far below a tenth of a percent.
+        assert_eq!(percent_of(1, i64::MAX), "0.0");
+        assert_eq!(percent_of(1, 1), "100.0");
+        assert_eq!(percent_of(i64::MAX, 1), "922337203685477580700.0");
+        assert_eq!(percent_of(i64::MAX / 2, i64::MAX), "50.0");
+        // A best price of nothing cannot be a base for a percentage.
+        assert_eq!(percent_of(5, 0), "0.0");
     }
 
     #[test]
