@@ -360,7 +360,8 @@ async fn market_orders_hold_one_public_order_per_id_and_no_account_data(pool: Pg
             "range",
             "region_id",
             "system_id",
-            "type_id"
+            "type_id",
+            "volume_remain"
         ]
     );
     let insert = "INSERT INTO market_orders \
@@ -617,4 +618,146 @@ async fn deleting_a_character_removes_its_fee_data_and_keeps_the_public_tables(p
         assert_eq!(count(&pool, table).await, 0, "{table}");
     }
     assert_eq!(count(&pool, "station_owners").await, 1);
+}
+
+// ---- trade margin: purchases, remembered sell orders, costs ----
+
+/// Everything in the migration after the `-- backfill` marker.
+fn history_backfill_statement() -> &'static str {
+    include_str!("../migrations/20261017000005_trade_margin.sql")
+        .split_once("-- backfill\n")
+        .expect("a `-- backfill` marker in the migration")
+        .1
+}
+
+async fn insert_sell_snapshot(
+    pool: &PgPool,
+    (polled_at, issued): (&str, &str),
+    (character, order_id): (i64, i64),
+    (is_buy, is_corp): (bool, bool),
+) {
+    sqlx::query(
+        "INSERT INTO order_snapshots (polled_at, character_id, order_id, type_id, region_id, \
+         location_id, is_buy_order, is_corporation, price, volume_remain, volume_total, \
+         min_volume, range, escrow, issued, duration) \
+         VALUES ($1::timestamptz, $2, $3, 34, 10000002, 60003760, $4, $5, 10, 3, 20, 1, \
+         'station', NULL, $6::timestamptz, 90)",
+    )
+    .bind(polled_at)
+    .bind(character)
+    .bind(order_id)
+    .bind(is_buy)
+    .bind(is_corp)
+    .bind(issued)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test]
+async fn the_history_backfill_keeps_the_earliest_issued_and_skips_corp_and_buy_orders(
+    pool: PgPool,
+) {
+    let account = insert_account(&pool).await;
+    insert_character(&pool, account, 1).await;
+    let (sell, buy, corp_sell) = ((false, false), (true, false), (false, true));
+    // Order 1 is repriced between the two polls and ESI then reports a later issue time.
+    insert_sell_snapshot(
+        &pool,
+        ("2026-10-01 10:00+00", "2026-10-01 10:00+00"),
+        (1, 1),
+        sell,
+    )
+    .await;
+    insert_sell_snapshot(
+        &pool,
+        ("2026-10-01 14:20+00", "2026-10-01 14:00+00"),
+        (1, 1),
+        sell,
+    )
+    .await;
+    insert_sell_snapshot(
+        &pool,
+        ("2026-10-01 10:00+00", "2026-10-01 09:00+00"),
+        (1, 2),
+        buy,
+    )
+    .await;
+    insert_sell_snapshot(
+        &pool,
+        ("2026-10-01 10:00+00", "2026-10-01 09:00+00"),
+        (1, 3),
+        corp_sell,
+    )
+    .await;
+    sqlx::query("DELETE FROM sell_order_history")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    sqlx::query(history_backfill_statement())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let rows: Vec<(i64, i64, i64, String, i64)> = sqlx::query_as(
+        "SELECT order_id, character_id, type_id, first_issued::text, volume_total \
+         FROM sell_order_history ORDER BY order_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, [(1, 1, 34, "2026-10-01 10:00:00+00".to_owned(), 20)]);
+}
+
+#[sqlx::test]
+async fn purchases_and_remembered_orders_are_keyed_and_indexed_for_the_allocation(pool: PgPool) {
+    let account = insert_account(&pool).await;
+    insert_character(&pool, account, 1).await;
+    let purchase = "INSERT INTO purchases (transaction_id, character_id, type_id, location_id, \
+                    quantity, unit_price, bought_at) \
+                    VALUES (7, 1, 34, 60003760, 10, 100.25, now())";
+    sqlx::query(purchase).execute(&pool).await.unwrap();
+    assert!(
+        sqlx::query(purchase).execute(&pool).await.is_err(),
+        "transaction_id is the key"
+    );
+    let history = "INSERT INTO sell_order_history (order_id, character_id, type_id, first_issued, \
+                   volume_total) VALUES (9, 1, 34, now(), 20)";
+    sqlx::query(history).execute(&pool).await.unwrap();
+    assert!(
+        sqlx::query(history).execute(&pool).await.is_err(),
+        "order_id is the key"
+    );
+    sqlx::query(
+        "INSERT INTO sell_order_costs (order_id, covered_units, cost) VALUES (9, 20, 2005.00)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let indexes: Vec<String> =
+        sqlx::query_scalar("SELECT indexdef FROM pg_indexes WHERE tablename = 'purchases'")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(
+        indexes
+            .iter()
+            .any(|d| d.contains("(character_id, type_id, bought_at, transaction_id)")),
+        "{indexes:?}"
+    );
+}
+
+#[sqlx::test]
+async fn a_transactions_sync_row_is_allowed_and_an_unknown_kind_is_not(pool: PgPool) {
+    let account = insert_account(&pool).await;
+    insert_character(&pool, account, 1).await;
+    let insert = |kind: &'static str| {
+        sqlx::query(
+            "INSERT INTO wealth_sync (character_id, kind, next_poll_at) VALUES (1, $1, now())",
+        )
+        .bind(kind)
+    };
+    insert("transactions").execute(&pool).await.unwrap();
+    assert!(insert("journal").execute(&pool).await.is_err());
 }

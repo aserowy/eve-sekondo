@@ -8,7 +8,7 @@ use secrecy::{ExposeSecret, SecretString};
 use sekondo::{
     esi::{
         COMPATIBILITY_DATE, EsiAsset, EsiMarketOrder, EsiName, EsiOrder, EsiPrice, EsiSkills,
-        EsiStanding, EsiStation, EsiStructure, user_agent,
+        EsiStanding, EsiStation, EsiStructure, EsiTransaction, user_agent,
     },
     oauth::{Intent, PendingFlow},
     poller::STRUCTURE_ID_MIN,
@@ -555,9 +555,15 @@ async fn verify_wealth(
         );
     }
 
+    verify_transactions(settings, run, http, token, me).await?;
+
     // Another character's data is refused whatever the scopes are.
     let stranger = me + 1;
-    for (call, path) in [("wallet", "wallet"), ("assets", "assets")] {
+    for (call, path) in [
+        ("wallet", "wallet"),
+        ("wallet-transactions", "wallet/transactions"),
+        ("assets", "assets"),
+    ] {
         let answer = esi_request(
             settings,
             http.get(esi(&format!("characters/{stranger}/{path}"))?)
@@ -571,6 +577,62 @@ async fn verify_wealth(
     let answer = esi_request(settings, http.get(esi("markets/prices")?), "prices").await?;
     run.check("prices", "list", &answer);
     let _: Option<Vec<EsiPrice>> = decode(run, "prices", &answer);
+    Ok(())
+}
+
+/// The newest wallet transactions, then one page older than the oldest of them. Notes how many
+/// each answer carried and whether `from_id` includes the transaction it names, which the poll's
+/// paging depends on. No transaction is printed.
+async fn verify_transactions(
+    settings: &Settings,
+    run: &mut Run<'_>,
+    http: &reqwest::Client,
+    token: &SecretString,
+    me: i64,
+) -> Result<()> {
+    let url = settings
+        .esi_base_url
+        .join(&format!("characters/{me}/wallet/transactions"))
+        .map_err(|e| VerifyError(e.to_string()))?;
+    let answer = esi_request(
+        settings,
+        http.get(url.clone()).bearer_auth(token.expose_secret()),
+        "wallet-transactions",
+    )
+    .await?;
+    run.check("wallet-transactions", "newest", &answer);
+    let Some(newest) = decode::<Vec<EsiTransaction>>(run, "wallet-transactions", &answer) else {
+        return Ok(());
+    };
+    if !newest.iter().any(|t| t.is_buy && t.is_personal) {
+        run.problem(
+            "wallet-transactions/newest: a purchase is needed: the verification character has none in its wallet transactions, so the answer cannot be checked".to_owned(),
+        );
+    }
+    let Some(oldest) = newest.iter().map(|t| t.transaction_id).min() else {
+        return Ok(());
+    };
+
+    let mut older_url = url;
+    older_url
+        .query_pairs_mut()
+        .append_pair("from_id", &oldest.to_string());
+    let answer = esi_request(
+        settings,
+        http.get(older_url).bearer_auth(token.expose_secret()),
+        "wallet-transactions",
+    )
+    .await?;
+    run.check("wallet-transactions", "from-id", &answer);
+    if let Some(older) = decode::<Vec<EsiTransaction>>(run, "wallet-transactions", &answer) {
+        let inclusive = older.iter().any(|t| t.transaction_id == oldest);
+        run.say(format!(
+            "note  wallet-transactions: newest {}, from_id page {}, from_id inclusive: {}",
+            newest.len(),
+            older.len(),
+            if inclusive { "yes" } else { "no" },
+        ));
+    }
     Ok(())
 }
 

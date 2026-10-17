@@ -1,7 +1,7 @@
 import { chartData, chartDrawn } from '../support/charts';
 import {
-  expect, loginWith, marketPoll, marketPollOutsideBrowser, pollCharacter, pollOutsideBrowser, stubControl, stubMarket,
-  stubMarketOrder, stubOrder, stubAsset, test, wealthPoll,
+  expect, feePoll, loginWith, marketPoll, marketPollOutsideBrowser, pollCharacter, pollOutsideBrowser, stubControl,
+  stubMarket, stubMarketOrder, stubOrder, stubAsset, stubTradeSkills, stubTransaction, test, wealthPoll,
 } from '../support/fixtures';
 
 test('the tables refresh after a poll without reloading', async ({ page }) => {
@@ -91,6 +91,23 @@ test('a standing changes after a market refresh without reloading', async ({ pag
   expect(await marketPoll(page)).toBe('200 1');
 
   await expect(page.locator('#order-1 .badge.undercut')).toHaveText('Undercut 1');
+  expect(await page.evaluate(() => (window as unknown as { marker: string }).marker)).toBe('same page');
+});
+
+test('the undercut volume changes after a market refresh without reloading', async ({ page }) => {
+  await topSeller(page);
+  await stubMarket([stubMarketOrder(1, { price: 100 }), stubMarketOrder(2, { price: 90, remain: 20 })]);
+  expect(await marketPoll(page)).toBe('200 1');
+  await page.goto('/orders');
+  const cell = page.locator('#order-1 td').nth(5);
+  await expect(cell).toHaveText('20');
+  await page.evaluate(() => ((window as unknown as { marker: string }).marker = 'same page'));
+
+  // Same standing and gap: only the units in front change.
+  await stubMarket([stubMarketOrder(1, { price: 100 }), stubMarketOrder(2, { price: 90, remain: 8 })]);
+  expect(await marketPoll(page)).toBe('200 1');
+
+  await expect(cell).toHaveText('8');
   expect(await page.evaluate(() => (window as unknown as { marker: string }).marker)).toBe('same page');
 });
 
@@ -282,4 +299,58 @@ test('missed wealth signals are caught up after the stream reconnects', async ({
 
   await page.unroute('**/events');
   await expect.poll(lastWallet, { timeout: 20_000 }).toBe(2_000_000_000);
+});
+
+/** Alice sells 10 units of item 34 at 150 and has the cost of all 10 (at 100 each), with Accounting 5 and Broker Relations 5. */
+async function aliceWithAMargin(page: import('@playwright/test').Page) {
+  await loginWith(page, 'Alice Alpha');
+  await stubControl('skills', { character_id: 90000001, skills: stubTradeSkills(5, 5) });
+  await stubControl('orders', {
+    character_id: 90000001,
+    orders: [stubOrder(1, { type: 34, price: 150, remain: 10 }), stubOrder(3, { type: 35, price: 120, remain: 10 })],
+  });
+  expect(await pollCharacter(page, 90000001)).toBe('200 updated');
+  await stubControl('transactions', {
+    character_id: 90000001,
+    transactions: [stubTransaction(1, { type: 34, quantity: 10 }), stubTransaction(2, { type: 35, quantity: 4 })],
+  });
+  expect(await wealthPoll(page, 90000001, 'transactions')).toBe('200 updated');
+  expect(await feePoll(page)).toBe('200 ok');
+  await page.goto('/orders');
+}
+
+const marginCell = (page: import('@playwright/test').Page, order: number) =>
+  page.locator(`#sell-orders #order-${order} td`).nth(8);
+
+test('a margin changes after a fee change without reloading', async ({ page }) => {
+  await aliceWithAMargin(page);
+  await expect(marginCell(page, 1)).toHaveText('428.23');
+  await page.evaluate(() => ((window as unknown as { marker: string }).marker = 'same page'));
+
+  // Accounting 4 raises the sales tax to 4.2%: 10 * 150 * (1 - 4.2% - 1.41%) - 1000 = 415.85
+  await stubControl('skills', { character_id: 90000001, skills: stubTradeSkills(4, 5) });
+  expect(await feePoll(page)).toBe('200 ok');
+
+  await expect(marginCell(page, 1)).toHaveText('415.85');
+  expect(await page.evaluate(() => (window as unknown as { marker: string }).marker)).toBe('same page');
+});
+
+test('a margin appears after the missing purchase is polled without reloading', async ({ page }) => {
+  await aliceWithAMargin(page);
+  await expect(marginCell(page, 3)).toHaveText('\u2014');
+  await page.evaluate(() => ((window as unknown as { marker: string }).marker = 'same page'));
+
+  // The other 6 units of item 35 were bought too: 10 * 120 * 0.95215 - 10 * 100 = 142.58
+  await stubControl('transactions', {
+    character_id: 90000001,
+    transactions: [
+      stubTransaction(1, { type: 34, quantity: 10 }),
+      stubTransaction(2, { type: 35, quantity: 4 }),
+      stubTransaction(3, { type: 35, quantity: 6 }),
+    ],
+  });
+  expect(await wealthPoll(page, 90000001, 'transactions')).toBe('200 updated');
+
+  await expect(marginCell(page, 3)).toHaveText('142.58');
+  expect(await page.evaluate(() => (window as unknown as { marker: string }).marker)).toBe('same page');
 });

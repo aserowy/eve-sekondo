@@ -15,8 +15,12 @@
       <td class="num" title="{{ r.price_exact }}">{{ r.price }}</td>
       <td>{% if r.standing_class.is_empty() %}{{ r.standing }}{% else %}<mark class="badge {{ r.standing_class }}">{{ r.standing }}</mark>{% endif %}</td>
       <td class="num"{% if !r.gap_exact.is_empty() %} title="{{ r.gap_exact }}"{% endif %}>{{ r.gap }}</td>
+      <td class="num">{{ r.undercut_volume }}</td>
       <td class="num">{{ r.volume }}</td>
       <td class="num" title="{{ r.amount_exact }}">{{ r.amount }}</td>
+      {% if table.has_margin %}
+      <td class="num"{% if !r.margin_title.is_empty() %} title="{{ r.margin_title }}"{% endif %}>{% if r.margin_negative %}<mark class="badge loss">{{ r.margin }}</mark>{% else %}{{ r.margin }}{% endif %}</td>
+      {% endif %}
       <td>{{ r.issued }}</td>
       <td>{{ r.left }}</td>
       <td>{{ r.location }}</td>

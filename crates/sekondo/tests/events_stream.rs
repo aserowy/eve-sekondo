@@ -314,3 +314,54 @@ async fn fees_updated_stays_within_the_account(pool: PgPool) {
     assert!(alice_text.contains("event: fees-updated"), "{alice_text:?}");
     assert!(!bob_text.contains("fees-updated"), "{bob_text:?}");
 }
+
+fn one_purchase() -> serde_json::Value {
+    serde_json::json!({
+        "character_id": ALICE,
+        "transactions": [{
+            "transaction_id": 1, "date": "2026-10-01T12:00:00Z", "type_id": 34,
+            "location_id": 60003760, "quantity": 10, "unit_price": 100.25,
+            "is_buy": true, "is_personal": true,
+        }],
+    })
+}
+
+#[sqlx::test]
+async fn a_transactions_poll_that_stores_a_purchase_sends_orders_updated_and_not_wealth(
+    pool: PgPool,
+) {
+    let app = app(pool).await;
+    let alice = signed_in(&app, ALICE).await;
+    app.stub_control("transactions", one_purchase()).await;
+    let mut stream = open_stream(&app, &alice).await;
+
+    app.state
+        .wealth
+        .poll(ALICE, sekondo::wealth_poller::Kind::Transactions)
+        .await;
+
+    let (text, _) = read_for(&mut stream, Duration::from_millis(600)).await;
+    assert!(text.contains("event: orders-updated"), "{text:?}");
+    assert!(!text.contains("wealth-updated"), "{text:?}");
+}
+
+#[sqlx::test]
+async fn a_transactions_poll_that_stores_nothing_new_sends_no_signal(pool: PgPool) {
+    let app = app(pool).await;
+    let alice = signed_in(&app, ALICE).await;
+    app.stub_control("transactions", one_purchase()).await;
+    app.state
+        .wealth
+        .poll(ALICE, sekondo::wealth_poller::Kind::Transactions)
+        .await;
+    let mut stream = open_stream(&app, &alice).await;
+
+    // The same purchase again, and an empty answer.
+    app.state
+        .wealth
+        .poll(ALICE, sekondo::wealth_poller::Kind::Transactions)
+        .await;
+
+    let (text, _) = read_for(&mut stream, Duration::from_millis(600)).await;
+    assert!(!text.contains("event:"), "{text:?}");
+}

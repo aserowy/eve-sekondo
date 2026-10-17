@@ -102,7 +102,38 @@ minimum margin of a station trade (hover a figure for the exact rate and its inp
 The orders page (`/orders`) takes `?chars=<id>,<id>` to select characters and `sort`/`dir` (sell table)
 and `bsort`/`bdir` (buy table) for the sorting; the URL can be bookmarked. Open pages are told about new
 data over a server-sent event stream (`/events`) and re-fetch the affected tables themselves. A skills or
-standings poll that changes a fee only re-fetches the fee rows, not the order tables.
+standings poll that changes a fee re-fetches the fee rows and the order tables, because the margins depend
+on the fees.
+
+## Undercut volume and margin
+
+The orders tables show, next to "Undercut N", the **undercut volume**: the remaining units of exactly the
+orders counted in "Undercut N" (empty for a top order, "—" without market data). The sell table also shows
+the **margin** of each sell order: what its remaining units earn after fees, minus what they cost.
+
+- **Transactions poll.** Once an hour per character (never before ESI's cache expiry) the app reads the
+  wallet transactions. It uses the wallet scope the app already has, so no new login is needed. A poll
+  reads from the newest transaction back until an answer holds a transaction it already stored, ESI
+  returns nothing older, or 50 answers were read. Every personal purchase is stored permanently as a
+  purchase lot, so the history grows beyond ESI's window of about 30 days. Sales and corporation
+  purchases are not stored.
+- **First in, first out.** Every personal sell order is remembered with the time it was first issued and
+  its total volume, also after it closes (a reprice does not change it). Per character and item, the
+  orders in the order they were first issued take units from the oldest lots bought at or before the order
+  was issued that earlier orders did not take, at any location. Repricing an order does not change what it
+  took, and a purchase that is stored late is picked up because the allocation is redone from all lots.
+  Another character's purchases are never used.
+- **Margin formula.** `remaining volume × price × (1 − sales tax − broker fee) − remaining volume ×
+  average cost per unit`, with the character's current fees at the order's location (see "Market fees")
+  and the average cost per unit being the order's known cost over its total volume. It is rounded half up
+  to the cent and can be negative (shown in the error style). Hover it for the exact amount and the cost
+  per unit. The margin reads "—" when the cost is not known for every unit of the order (hover: "cost known
+  for X of Y units"), when the fees are not known (including in a player structure), and for corporation
+  orders.
+- **Instant sales are not tracked.** Selling straight into someone else's buy order takes no lots, so a
+  later sell order may get older, cheaper lots than it really did. By decision there is no attempt to
+  tell those sales apart.
+- The design and the specifications are in `openspec/changes/order-undercut-volume-and-margin/`.
 
 ## 4. Run with Compose
 
@@ -149,7 +180,7 @@ cargo test --workspace --features sekondo/test-hooks   # unit and integration te
 cd e2e && npm install && npx playwright test           # browser tests
 ```
 
-The `test-hooks` feature adds `POST /_test/refresh/{id}`, `POST /_test/poll/{id}` and `POST /_test/fee-poll` (a signed-in
+The `test-hooks` feature adds `POST /_test/refresh/{id}`, `POST /_test/poll/{id}`, `POST /_test/wealth-poll/{id}/{kind}` (`wallet`, `assets` or `transactions`) and `POST /_test/fee-poll` (a signed-in
 account's own characters only; CSRF-protected like any other POST). The first forces a token refresh, the
 second runs one order poll right away, ignoring the schedule but not ESI's limits, so browser tests do not
 have to wait for the scheduler. The third polls the skills and standings of all the account's characters and looks up its station owners. All are compiled out of everything else. The Playwright setup builds with

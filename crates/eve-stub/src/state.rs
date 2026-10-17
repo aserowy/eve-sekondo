@@ -167,6 +167,8 @@ pub struct Inner {
     pub wallets: HashMap<i64, f64>,
     /// Fixture assets per character, as ESI's JSON.
     pub assets: HashMap<i64, MarketFixture>,
+    /// Fixture wallet transactions per character, as ESI's JSON, and how many one answer carries.
+    pub transactions: HashMap<i64, MarketFixture>,
     /// Fixture skill list per character, as ESI's JSON objects.
     pub skills: HashMap<i64, Vec<Value>>,
     /// Fixture standings per character, as ESI's JSON objects.
@@ -210,6 +212,9 @@ pub const MARKET_PAGE_SIZE: usize = 1000;
 
 /// ESI's page size for the assets of a character.
 pub const ASSETS_PAGE_SIZE: usize = 1000;
+
+/// How many wallet transactions one answer carries.
+pub const TRANSACTIONS_PAGE_SIZE: usize = 1000;
 
 /// Overrides for issuing deliberately odd tokens in tests.
 #[derive(Clone, Debug, Default)]
@@ -284,6 +289,7 @@ impl Inner {
             market_orders: HashMap::new(),
             wallets: default_wallets(),
             assets: default_assets(),
+            transactions: HashMap::new(),
             skills: default_skills(),
             standings: default_standings(),
             station_owners: default_station_owners(),
@@ -418,6 +424,7 @@ impl Inner {
         self.market_orders.clear();
         self.wallets = default_wallets();
         self.assets = default_assets();
+        self.transactions.clear();
         self.skills = default_skills();
         self.standings = default_standings();
         self.station_owners = default_station_owners();

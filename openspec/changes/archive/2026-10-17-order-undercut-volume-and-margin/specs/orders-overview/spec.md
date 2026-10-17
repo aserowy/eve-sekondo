@@ -1,0 +1,89 @@
+# Spec Delta
+
+## MODIFIED Requirements
+
+### Requirement: Order columns
+Each row SHALL show the character, the item, the price, the standing, the gap to the best price, the undercut volume, the remaining and total volume, the date issued, the time left until the order expires, and finally the location and its region. Sell rows SHALL show the order value (price multiplied by remaining volume), followed by the margin. Buy rows SHALL show the escrow. Orders placed on behalf of the corporation SHALL carry a "Corp" marker. Dates and times SHALL be shown in EVE time (UTC). The standing SHALL read "Top" for a top order, styled with the success style of the page's CSS framework, and "Undercut N" for an undercut order, with N the number of undercutting orders, styled with its error style. The gap SHALL be empty for a top order and otherwise show the per-unit price difference to the best price followed by its percentage in brackets, with the difference shortened as described below and its exact value on hover. The undercut volume SHALL be empty for a top order and otherwise show the undercut volume, as described by the market-position capability, as a whole number with thousands separators. The gap and the undercut volume SHALL read "—" while the order has no standing, as described by the market-position capability. The margin SHALL show the margin of the sell order, as described by the trade-margin capability, shortened as described below. Hovering it SHALL show its exact value and the average purchase cost per unit. A negative margin SHALL be styled with the error style. The margin SHALL read "—" while the order has no margin. When the reason is that the purchase cost is not fully known, hovering it SHALL show how many of the order's units have a known cost.
+
+#### Scenario: Sell row
+- **WHEN** a sell order of 10 remaining out of 20 units at 1,500,000.00 ISK is shown
+- **THEN** its row shows volume "10 / 20" and value 15,000,000.00 ISK (shortened as described below)
+
+#### Scenario: Buy row
+- **WHEN** a buy order with 2,500,000.00 ISK in escrow is shown
+- **THEN** its row shows the escrow of 2,500,000.00 ISK (shortened as described below)
+
+#### Scenario: Time left
+- **WHEN** an order issued 80 days and 2 hours ago with a 90-day duration is shown
+- **THEN** its time left reads 9 days 22 hours (rounded down to whole hours)
+
+#### Scenario: Corporation order
+- **WHEN** an order placed on behalf of the corporation is shown
+- **THEN** its row carries a "Corp" marker
+
+#### Scenario: Location and region come last
+- **WHEN** either table is shown
+- **THEN** its last two columns are the location and the region, after the time left
+
+#### Scenario: Top order
+- **WHEN** a sell order that is the lowest price at its station is shown
+- **THEN** its standing reads "Top" in the success style, and its gap and undercut volume are empty
+
+#### Scenario: Undercut order
+- **WHEN** a sell order of 1,012,500.00 ISK is undercut by three orders with 1,250 units remaining between them, and the best price is 1,000,000.00 ISK
+- **THEN** its standing reads "Undercut 3" in the error style, its gap reads "12.5k (1.3%)" and shows "12,500.00 ISK" on hover, and its undercut volume reads "1,250"
+
+#### Scenario: Undercut buy order
+- **WHEN** a buy order undercut by two reaching orders with 300 and 1,000 units remaining is shown
+- **THEN** its undercut volume reads "1,300"
+
+#### Scenario: No market data
+- **WHEN** an order whose market data has not been fetched yet is shown
+- **THEN** its standing, its gap and its undercut volume read "—"
+
+#### Scenario: Margin shown
+- **WHEN** a sell order with a margin of 2,142,337.50 ISK and a purchase cost of 106.67 ISK per unit is shown
+- **THEN** its margin reads "2.142m", and hovering it shows "2,142,337.50 ISK" and the cost per unit
+
+#### Scenario: Negative margin
+- **WHEN** a sell order with a margin of −1,500.00 ISK is shown
+- **THEN** its margin reads "-1.5k" in the error style
+
+#### Scenario: Cost not fully known
+- **WHEN** a sell order whose purchase cost is known for 5 of 10 units is shown
+- **THEN** its margin reads "—", and hovering it shows "cost known for 5 of 10 units"
+
+#### Scenario: Buy table has no margin
+- **WHEN** the buy table is shown
+- **THEN** it has no margin column
+
+### Requirement: Sorting
+Each table SHALL be sortable by any of its columns in ascending and descending order by activating the column header. The sort column and direction SHALL be kept in the URL. By default the tables SHALL be sorted by item name ascending. The standing column SHALL sort by its text, with the number of an "Undercut N" read as a number: "Top" first, then "Undercut 1", "Undercut 2" and so on up, in ascending order. The gap column SHALL sort by its price difference, a top order counting as no difference. The undercut volume column SHALL sort by its number, a top order counting as 0. Orders without a standing SHALL come last in both directions of the standing, gap and undercut volume columns. The margin column SHALL sort by the margin, and orders without a margin SHALL come last in both directions.
+
+#### Scenario: Sort by price
+- **WHEN** a user activates the price header of the sell table
+- **THEN** the sell table is sorted by price, the URL reflects the sorting, and activating the header again reverses the order
+
+#### Scenario: Default sorting
+- **WHEN** a user opens the orders page without sorting parameters
+- **THEN** both tables are sorted by item name ascending
+
+#### Scenario: Sort by standing
+- **WHEN** a table holds orders that are top, undercut 3 times, undercut 12 times, undercut once, and without market data, and its standing header is activated
+- **THEN** the order is top, undercut 1, undercut 3, undercut 12, and the one without market data last
+
+#### Scenario: Sort by standing descending
+- **WHEN** the standing header is activated again
+- **THEN** the order is undercut 12, undercut 3, undercut 1, top, and the one without market data still last
+
+#### Scenario: Sort by gap
+- **WHEN** a table holds a top order, an order 5.00 ISK behind, an order 80.00 ISK behind and one without market data, and its gap header is activated
+- **THEN** the order is the top one, 5.00 ISK, 80.00 ISK, and the one without market data last
+
+#### Scenario: Sort by undercut volume
+- **WHEN** a table holds a top order, an order with 300 units in front, one with 20 units in front and one without market data, and its undercut volume header is activated
+- **THEN** the order is the top one, 20, 300, and the one without market data last
+
+#### Scenario: Sort by margin descending
+- **WHEN** the sell table holds orders with margins of 500.00 ISK, −20.00 ISK and 9,000.00 ISK, and one without margin, and its margin header is activated twice
+- **THEN** the order is 9,000.00 ISK, 500.00 ISK, −20.00 ISK, and the one without margin last

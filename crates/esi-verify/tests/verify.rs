@@ -163,6 +163,15 @@ async fn world(person: Person) -> World {
             ]}),
         )
         .await;
+    // Three transactions, two of them purchases; the page size is two.
+    world
+        .control(
+            "transactions",
+            json!({"character_id": ALICE, "limit": 2, "transactions": [
+                transaction(9001, true), transaction(9002, false), transaction(9003, true),
+            ]}),
+        )
+        .await;
     world
 }
 
@@ -236,6 +245,14 @@ fn market_order(id: i64, type_id: i64, buy: bool) -> Value {
     })
 }
 
+fn transaction(id: i64, buy: bool) -> Value {
+    json!({
+        "transaction_id": id, "date": "2026-10-11T12:00:00Z", "type_id": 34,
+        "location_id": 60003760, "quantity": 7654321, "unit_price": 100.25,
+        "is_buy": buy, "is_personal": true, "client_id": 9, "journal_ref_id": id,
+    })
+}
+
 #[tokio::test]
 async fn a_passing_verification_records_the_fingerprint_and_the_variants() {
     let w = world(Person::LogsIn).await;
@@ -264,6 +281,9 @@ async fn a_passing_verification_records_the_fingerprint_and_the_variants() {
         "market-orders/orders",
         "wallet/balance",
         "wallet/forbidden",
+        "wallet-transactions/newest",
+        "wallet-transactions/from-id",
+        "wallet-transactions/forbidden",
         "assets/items",
         "assets/forbidden",
         "prices/list",
@@ -312,6 +332,7 @@ async fn nothing_secret_is_printed() {
         "Bearer",
         "1500000",
         "2500000",
+        "7654321",
         "Alice",
         "Tritanium",
         CLIENT_SECRET,
@@ -637,6 +658,11 @@ async fn the_wallet_assets_and_prices_are_each_asked_once_and_the_foreign_ones_a
         "own first page, foreign refused"
     );
     assert_eq!(w.stub.esi_calls("prices"), 1);
+    assert_eq!(
+        w.stub.esi_calls("transactions"),
+        3,
+        "newest, one older page, foreign refused"
+    );
 }
 
 #[tokio::test]
@@ -709,4 +735,40 @@ fn order_at(id: i64, buy: bool, location: i64) -> Value {
     let mut o = order(id, buy);
     o["location_id"] = json!(location);
     o
+}
+
+#[tokio::test]
+async fn the_transactions_page_size_and_the_from_id_behaviour_are_noted() {
+    let w = world(Person::LogsIn).await;
+
+    let (result, output) = w.verify().await;
+
+    result.unwrap_or_else(|e| panic!("{e}\n{output}"));
+    // Two came newest first; real ESI's `from_id` includes the transaction it names.
+    assert!(
+        output.contains(
+            "note  wallet-transactions: newest 2, from_id page 2, from_id inclusive: yes"
+        ),
+        "{output}"
+    );
+}
+
+#[tokio::test]
+async fn without_a_purchase_the_verification_says_a_purchase_is_needed_and_leaves_the_record() {
+    let w = world(Person::LogsIn).await;
+    let old = w.write_old_record();
+    w.control(
+        "transactions",
+        json!({"character_id": ALICE, "transactions": [transaction(9002, false)]}),
+    )
+    .await;
+
+    let (result, output) = w.verify().await;
+
+    assert!(result.is_err());
+    assert!(
+        output.contains("wallet-transactions/newest: a purchase is needed"),
+        "{output}"
+    );
+    assert_eq!(w.record(), Some(old));
 }

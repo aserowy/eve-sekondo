@@ -16,9 +16,10 @@ whether it may be missing or null. The covered calls are: the authorization requ
 the token request (authorization code grant and refresh grant), the JWKS document, the claims of the
 access token JWT, the character orders route, the names lookup (success, and the 404 that one unknown
 ID causes), the structure lookup (success and 403), the public market orders of a region for one item
-(with the `X-Pages` header), the character wallet balance, the character assets (with the `X-Pages`
-header), the market prices, the character skills, the character standings and the station lookup. A
-variant that cannot be provoked against the
+(with the `X-Pages` header and each order's remaining volume), the character wallet balance, the
+character wallet transactions (the newest ones, and older ones from a given transaction ID), the
+character assets (with the `X-Pages` header), the market prices, the character skills, the character
+standings and the station lookup. A variant that cannot be provoked against the
 real services without harm (420, 429, 5xx) SHALL be marked as not verifiable against EVE, with a
 reason.
 
@@ -41,6 +42,11 @@ reason.
 #### Scenario: Fee calls are contracted
 
 - **WHEN** the stub serves the skills, standings or station route
+- **THEN** the contract coverage test finds a contract for it
+
+#### Scenario: The transactions call is contracted
+
+- **WHEN** the stub serves the wallet transactions route
 - **THEN** the contract coverage test finds a contract for it
 
 ### Requirement: The stub conforms to the contracts
@@ -220,3 +226,33 @@ the matching scope and SHALL answer 403 otherwise. The station call SHALL need n
 
 - **WHEN** the stub receives a standings request with a token that lacks the standings scope
 - **THEN** it answers 403
+
+### Requirement: The stub serves the transactions call
+
+The stub SHALL serve the character wallet transactions, newest first, with a limit per answer, and
+older ones when given a transaction ID to start from, as real ESI does. It SHALL have a control to
+set the transactions per character, and every answer SHALL satisfy its contract variant. The call
+SHALL require a token with the wallet scope and SHALL answer 403 otherwise. The verification against
+real EVE SHALL check the call with the verification character, and SHALL fail with a message saying
+that a purchase is needed when the answer contains no purchase.
+
+#### Scenario: Transactions fixture drifts from the contract
+
+- **WHEN** a transactions fixture of the stub omits a field the contract marks as always present
+- **THEN** the stub conformance test fails and names the fixture and the field
+
+#### Scenario: Older transactions
+
+- **WHEN** the stub holds more transactions than one answer carries and is asked for those older
+  than the oldest one returned
+- **THEN** it returns the next older ones, and an empty list once there are none
+
+#### Scenario: Token without the wallet scope
+
+- **WHEN** the stub receives a transactions request with a token that lacks the wallet scope
+- **THEN** it answers 403
+
+#### Scenario: No purchase to verify
+
+- **WHEN** the verification character has no purchase in its wallet transactions
+- **THEN** the verification fails and says that a purchase is needed

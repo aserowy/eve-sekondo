@@ -90,7 +90,9 @@ export function stubOrder(
 /** One public market order as the stub serves it (a sell order at the station of `stubOrder` unless told). */
 export function stubMarketOrder(
   id: number,
-  opts: { type?: number; price?: number; buy?: boolean; location?: number; system?: number; range?: string } = {},
+  opts: {
+    type?: number; price?: number; buy?: boolean; location?: number; system?: number; range?: string; remain?: number;
+  } = {},
 ) {
   return {
     order_id: id,
@@ -103,7 +105,7 @@ export function stubMarketOrder(
     duration: 90,
     issued: new Date(Date.now() - 86_400_000).toISOString().replace(/\.\d+Z$/, 'Z'),
     min_volume: 1,
-    volume_remain: 3,
+    volume_remain: opts.remain ?? 3,
     volume_total: 5,
   };
 }
@@ -131,8 +133,8 @@ export async function pollCharacter(page: Page, characterId: number): Promise<st
   }, characterId);
 }
 
-/** Polls the wallet or the assets of a character now through the test-only hook. */
-export async function wealthPoll(page: Page, characterId: number, kind: 'wallet' | 'assets'): Promise<string> {
+/** Polls the wallet, the assets or the transactions of a character now through the test-only hook. */
+export async function wealthPoll(page: Page, characterId: number, kind: 'wallet' | 'assets' | 'transactions'): Promise<string> {
   return page.evaluate(
     async ([id, what]) => {
       const token = document.querySelector('meta[name="csrf-token"]')!.getAttribute('content')!;
@@ -158,6 +160,23 @@ export function stubTradeSkills(accounting: number, brokerRelations: number) {
     { skill_id: 16622, active_skill_level: accounting, trained_skill_level: accounting },
     { skill_id: 3446, active_skill_level: brokerRelations, trained_skill_level: brokerRelations },
   ];
+}
+
+/** One wallet transaction as the stub serves it: a personal purchase of 34 ten days ago unless told. */
+export function stubTransaction(
+  id: number,
+  opts: { type?: number; quantity?: number; price?: number; buy?: boolean; personal?: boolean; daysAgo?: number } = {},
+) {
+  return {
+    transaction_id: id,
+    date: new Date(Date.now() - (opts.daysAgo ?? 10) * 86_400_000).toISOString().replace(/\.\d+Z$/, 'Z'),
+    type_id: opts.type ?? 34,
+    location_id: 60003760,
+    quantity: opts.quantity ?? 1,
+    unit_price: opts.price ?? 100,
+    is_buy: opts.buy ?? true,
+    is_personal: opts.personal ?? true,
+  };
 }
 
 /** Refreshes ESI's market prices now through the test-only hook. */

@@ -375,7 +375,7 @@ pub fn market_orders() -> Call {
         header("x-esi-error-limit-remain", Integer, Absent),
         header("x-esi-error-limit-reset", Integer, Absent),
     ];
-    // Only what the app reads: not the volumes, duration or issue date.
+    // Only what the app reads: the remaining volume, not the duration or issue date.
     let fields = vec![
         field("order_id", Ty::Int, Always),
         field("type_id", Ty::Int, Always),
@@ -384,6 +384,7 @@ pub fn market_orders() -> Call {
         field("is_buy_order", Ty::Bool, Always),
         field("price", Ty::Number, Always),
         field("range", Ty::Str, Always),
+        field("volume_remain", Ty::Int, Always),
     ];
     let mut variants = vec![variant(
         "orders",
@@ -440,6 +441,52 @@ pub fn wallet() -> Call {
         routes: vec![Route {
             method: "GET",
             path: "/characters/{id}/wallet",
+        }],
+        variants,
+    }
+}
+
+/// The wallet transactions of a character, newest first. `from_id` asks for the ones older than
+/// that transaction ID; the answer has the same shape either way. Only what the app reads.
+pub fn wallet_transactions() -> Call {
+    let fields = || {
+        Ty::array_of(Ty::Object(vec![
+            field("transaction_id", Ty::Int, Always),
+            field("date", Ty::Str, Always),
+            field("type_id", Ty::Int, Always),
+            field("location_id", Ty::Int, Always),
+            field("quantity", Ty::Int, Always),
+            field("unit_price", Ty::Number, Always),
+            field("is_buy", Ty::Bool, Always),
+            field("is_personal", Ty::Bool, Always),
+        ]))
+    };
+    let mut variants = vec![
+        variant(
+            "newest",
+            StatusSpec::Exact(200),
+            char_route_headers(true),
+            BodySpec::Json(fields()),
+        ),
+        variant(
+            "from-id",
+            StatusSpec::Exact(200),
+            char_route_headers(true),
+            BodySpec::Json(fields()),
+        ),
+        variant(
+            "forbidden",
+            StatusSpec::Exact(403),
+            char_route_headers(false),
+            error_body(),
+        ),
+    ];
+    variants.extend(esi_failure_variants());
+    Call {
+        name: "wallet-transactions",
+        routes: vec![Route {
+            method: "GET",
+            path: "/characters/{id}/wallet/transactions",
         }],
         variants,
     }
@@ -603,6 +650,7 @@ pub fn contracts() -> Vec<Call> {
         structures(),
         market_orders(),
         wallet(),
+        wallet_transactions(),
         assets(),
         prices(),
         skills(),
@@ -743,6 +791,7 @@ mod tests {
             names(),
             structures(),
             wallet(),
+            wallet_transactions(),
             assets(),
             prices(),
             skills(),
@@ -1039,10 +1088,10 @@ mod tests {
         let call = market_orders();
         let body = json!([market_order()]);
         assert!(problems(&call, "orders", Some(200), &market_ok(), Some(body.clone())).is_empty());
-        // The app does not read the volumes or the rest, so they are not required.
+        // The app does not read the duration or the rest, so they are not required.
         let slim = json!([{
             "order_id": 7, "type_id": 34, "location_id": 60003760, "system_id": 30000142,
-            "is_buy_order": true, "price": 10.5, "range": "5",
+            "is_buy_order": true, "price": 10.5, "range": "5", "volume_remain": 3,
         }]);
         assert!(problems(&call, "orders", Some(200), &market_ok(), Some(slim)).is_empty());
         // An item nobody trades is an empty page.
@@ -1090,6 +1139,7 @@ mod tests {
             "is_buy_order",
             "price",
             "range",
+            "volume_remain",
         ] {
             let mut order = market_order();
             order.as_object_mut().unwrap().remove(field);
@@ -1228,6 +1278,85 @@ mod tests {
             .is_empty()
         );
         assert_eq!(call.routes[0].path, "/characters/{id}/wallet");
+    }
+
+    fn transaction() -> Value {
+        json!({
+            "transaction_id": 5001, "date": "2026-10-11T12:00:00Z", "type_id": 34,
+            "location_id": 60003760, "quantity": 10, "unit_price": 100.25,
+            "is_buy": true, "is_personal": true, "client_id": 9, "journal_ref_id": 77,
+        })
+    }
+
+    #[test]
+    fn wallet_transactions_answer_with_the_fields_the_app_reads() {
+        let call = wallet_transactions();
+        let body = json!([transaction()]);
+        for variant in ["newest", "from-id"] {
+            assert!(
+                problems(
+                    &call,
+                    variant,
+                    Some(200),
+                    &char_ok("char-wallet"),
+                    Some(body.clone())
+                )
+                .is_empty(),
+                "{variant}"
+            );
+            // Nothing bought in 30 days is an empty list.
+            assert!(
+                problems(
+                    &call,
+                    variant,
+                    Some(200),
+                    &char_ok("char-wallet"),
+                    Some(json!([]))
+                )
+                .is_empty(),
+                "{variant}"
+            );
+        }
+        for field in [
+            "transaction_id",
+            "date",
+            "type_id",
+            "location_id",
+            "quantity",
+            "unit_price",
+            "is_buy",
+            "is_personal",
+        ] {
+            let mut item = transaction();
+            item.as_object_mut().unwrap().remove(field);
+            assert_eq!(
+                problems(
+                    &call,
+                    "newest",
+                    Some(200),
+                    &char_ok("char-wallet"),
+                    Some(json!([item]))
+                ),
+                [format!("$[0].{field} is missing but always present")]
+            );
+        }
+        let mut h = char_ok("char-wallet");
+        h.remove("expires");
+        assert_eq!(
+            problems(&call, "newest", Some(200), &h, Some(body)),
+            ["header expires is missing but always present"]
+        );
+        assert!(
+            problems(
+                &call,
+                "forbidden",
+                Some(403),
+                &char_forbidden("char-wallet"),
+                Some(json!({"error": "Forbidden"}))
+            )
+            .is_empty()
+        );
+        assert_eq!(call.routes[0].path, "/characters/{id}/wallet/transactions");
     }
 
     #[test]
@@ -1501,7 +1630,7 @@ mod tests {
         assert!(problems(&call, "server-error", Some(502), &HeaderMap::new(), None).is_empty());
     }
 
-    const ALL_ROUTES: [(&str, &str); 14] = [
+    const ALL_ROUTES: [(&str, &str); 15] = [
         ("GET", "/oauth/jwks"),
         ("GET", "/v2/oauth/authorize"),
         ("GET", "/v2/oauth/authorize/select"),
@@ -1511,6 +1640,7 @@ mod tests {
         ("GET", "/universe/structures/{id}"),
         ("GET", "/markets/{region_id}/orders"),
         ("GET", "/characters/{id}/wallet"),
+        ("GET", "/characters/{id}/wallet/transactions"),
         ("GET", "/characters/{id}/assets"),
         ("GET", "/characters/{id}/skills"),
         ("GET", "/characters/{id}/standings"),

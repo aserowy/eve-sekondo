@@ -505,24 +505,125 @@ async fn the_standing_and_gap_columns_follow_the_price_in_both_tables(pool: PgPo
 
     let html = get(&app, &browser, "/orders").await;
 
-    for (table, amount) in [(sell_table(&html), "Value"), (buy_table(&html), "Escrow")] {
-        assert_eq!(
-            header_labels(table),
-            [
-                "Character",
-                "Item",
-                "Price",
-                "Standing",
-                "Behind by",
-                "Volume",
-                amount,
-                "Issued",
-                "Time left",
-                "Location",
-                "Region"
-            ]
-        );
+    // The margin follows the value in the sell table; the buy table has none.
+    for (table, amount_columns) in [
+        (sell_table(&html), vec!["Value", "Margin"]),
+        (buy_table(&html), vec!["Escrow"]),
+    ] {
+        let mut expected = vec![
+            "Character",
+            "Item",
+            "Price",
+            "Standing",
+            "Behind by",
+            "Undercut volume",
+            "Volume",
+        ];
+        expected.extend(amount_columns);
+        expected.extend(["Issued", "Time left", "Location", "Region"]);
+        assert_eq!(header_labels(table), expected);
     }
+}
+
+// ---- undercut volume ----
+
+fn with_remaining(mut order: Value, units: i64) -> Value {
+    order["volume_remain"] = json!(units);
+    order
+}
+
+#[sqlx::test]
+async fn the_undercut_volume_is_a_whole_number_with_separators_and_empty_for_a_top_order(
+    pool: PgPool,
+) {
+    let (app, browser) = alice_sells(
+        pool,
+        vec![
+            order(1, 34, STATION, false, 1_012_500.0),
+            order(2, 35, STATION, false, 100.0),
+        ],
+    )
+    .await;
+    with_market(
+        &app,
+        vec![
+            public_sell(1, 34, 1_012_500.0),
+            with_remaining(public_sell(2, 34, 1_000_000.0), 500),
+            with_remaining(public_sell(3, 34, 1_005_000.0), 500),
+            with_remaining(public_sell(4, 34, 1_010_000.0), 250),
+            public_sell(5, 35, 100.0),
+            with_remaining(public_sell(6, 35, 200.0), 40),
+        ],
+    )
+    .await;
+
+    let html = get(&app, &browser, "/orders").await;
+
+    assert_eq!(cell_texts(row(&html, 1))[5], "1,250");
+    assert_eq!(cell_texts(row(&html, 2))[5], "", "a top order has none");
+}
+
+#[sqlx::test]
+async fn a_buy_orders_undercut_volume_sums_the_reaching_orders(pool: PgPool) {
+    let (app, browser) = alice_sells(pool, vec![order(1, 34, STATION, true, 50.0)]).await;
+    let buy = |id: i64, price: f64, range: &str, remaining: i64| {
+        let mut o = with_remaining(public_sell(id, 34, price), remaining);
+        o["is_buy_order"] = json!(true);
+        o["range"] = json!(range);
+        o
+    };
+    with_market(
+        &app,
+        vec![
+            buy(1, 50.0, "station", 9),
+            buy(2, 55.0, "region", 300),
+            buy(3, 60.0, "region", 1000),
+        ],
+    )
+    .await;
+
+    let html = get(&app, &browser, "/orders").await;
+
+    assert_eq!(cell_texts(row(buy_table(&html), 1))[5], "1,300");
+}
+
+#[sqlx::test]
+async fn an_order_without_market_data_shows_a_dash_for_the_undercut_volume(pool: PgPool) {
+    let (app, browser) = with_polled_fixture(pool).await;
+
+    let html = get(&app, &browser, "/orders").await;
+
+    assert_eq!(cell_texts(row(&html, 5001))[5], "\u{2014}");
+}
+
+#[sqlx::test]
+async fn sorting_by_undercut_volume_counts_a_top_order_as_zero_and_puts_no_data_last(pool: PgPool) {
+    let (app, browser) = alice_sells(
+        pool,
+        vec![
+            order(1, 34, STATION, false, 100.0),
+            order(2, 35, STATION, false, 100.0),
+            order(3, 36, STATION, false, 100.0),
+            order(4, 37, STRUCTURE, false, 100.0),
+        ],
+    )
+    .await;
+    with_market(
+        &app,
+        vec![
+            public_sell(10, 34, 90.0),
+            with_remaining(public_sell(20, 35, 90.0), 300),
+            public_sell(30, 36, 100.0),
+        ],
+    )
+    .await;
+    // Item 34: 3 in front (the fixture's default), 35: 300, 36: top, 37: no data.
+
+    let asc = get(&app, &browser, "/orders?sort=undercut-volume&dir=asc").await;
+    assert_eq!(order_of_rows(&asc, &[1, 2, 3, 4]), [3, 1, 2, 4]);
+
+    let desc = get(&app, &browser, "/orders?sort=undercut-volume&dir=desc").await;
+    assert_eq!(order_of_rows(&desc, &[1, 2, 3, 4]), [2, 1, 3, 4]);
 }
 
 // ---- sorting by standing and gap ----
@@ -617,4 +718,134 @@ async fn an_unknown_sort_name_still_falls_back_to_the_default(pool: PgPool) {
     // The default is the item name, ascending: the unnamed items sort by their number.
     assert_eq!(order_of_rows(&html, &[1, 2, 3, 4, 5]).len(), 5);
     assert!(unescaped(&html).contains("sort=standing&dir=asc"));
+}
+
+// ---- margin ----
+
+/// Alice has fee data for Jita 4-4 (Accounting 5, Broker Relations 5, faction standing 2.0 and
+/// corporation standing 1.5: a sales tax of 3.375% and a broker fee of 1.41%).
+async fn alice_with_fees(app: &TestApp) {
+    for statement in [
+        "INSERT INTO fee_sync (character_id, kind, next_poll_at, last_success_at) \
+         VALUES (90000001, 'skills', now(), now()), (90000001, 'standings', now(), now())",
+        "INSERT INTO character_skills (character_id, skill_id, active_level) \
+         VALUES (90000001, 16622, 5), (90000001, 3446, 5)",
+        "INSERT INTO character_standings (character_id, from_id, from_type, standing) \
+         VALUES (90000001, 500001, 'faction', 2.0), (90000001, 1000035, 'npc_corp', 1.5)",
+        "INSERT INTO station_owners (station_id, owner_id, resolved_at) \
+         VALUES (60003760, 1000035, now())",
+    ] {
+        sqlx::query(statement)
+            .execute(&app.state.pool)
+            .await
+            .unwrap();
+    }
+}
+
+/// Alice bought `quantity` of `type_id` at 100.00 before her orders were issued.
+async fn alice_bought(app: &TestApp, bought: &[(i64, i64, i64)]) {
+    let transactions: Vec<Value> = bought
+        .iter()
+        .map(|(id, type_id, quantity)| {
+            json!({
+                "transaction_id": id, "date": "2026-10-01T12:00:00Z", "type_id": type_id,
+                "location_id": STATION, "quantity": quantity, "unit_price": 100.0,
+                "is_buy": true, "is_personal": true,
+            })
+        })
+        .collect();
+    app.stub_control(
+        "transactions",
+        json!({"character_id": ALICE, "transactions": transactions}),
+    )
+    .await;
+    app.state
+        .wealth
+        .poll(ALICE, sekondo::wealth_poller::Kind::Transactions)
+        .await;
+}
+
+/// Sell orders 1 (earns 171.29), 2 (loses 19.14) and 3 (cost known for 3 of 8 units), all
+/// 4 remaining of 8.
+async fn margin_mix(pool: PgPool) -> (TestApp, Browser) {
+    let (app, browser) = alice_sells(
+        pool,
+        vec![
+            order(1, 34, STATION, false, 150.0),
+            order(2, 36, STATION, false, 100.0),
+            order(3, 35, STATION, false, 120.0),
+        ],
+    )
+    .await;
+    alice_with_fees(&app).await;
+    alice_bought(&app, &[(1, 34, 8), (2, 36, 8), (3, 35, 3)]).await;
+    (app, browser)
+}
+
+#[sqlx::test]
+async fn the_sell_table_has_a_margin_column_after_the_value_and_the_buy_table_has_none(
+    pool: PgPool,
+) {
+    let (app, browser) = with_polled_fixture(pool).await;
+
+    let html = get(&app, &browser, "/orders").await;
+
+    let sell = header_labels(sell_table(&html));
+    let value = sell.iter().position(|l| l == "Value").unwrap();
+    assert_eq!(sell[value + 1], "Margin");
+    assert!(!header_labels(buy_table(&html)).contains(&"Margin".to_owned()));
+    // The cells follow the headers.
+    let cells = cell_texts(row(sell_table(&html), 5001));
+    assert_eq!(cells.len(), sell.len());
+}
+
+#[sqlx::test]
+async fn a_margin_shows_short_with_the_exact_value_and_the_cost_per_unit_on_hover(pool: PgPool) {
+    let (app, browser) = margin_mix(pool).await;
+
+    let html = get(&app, &browser, "/orders").await;
+    let r = row(&html, 1);
+
+    // 4 * 150 * 0.95215 - 4 * 100 = 171.29
+    assert!(r.contains(">171.29<"), "{r}");
+    assert!(r.contains("171.29 ISK"), "{r}");
+    assert!(r.contains("cost per unit 100.00 ISK"), "{r}");
+    assert!(!r.contains("badge loss"), "{r}");
+}
+
+#[sqlx::test]
+async fn a_negative_margin_is_in_the_error_style(pool: PgPool) {
+    let (app, browser) = margin_mix(pool).await;
+
+    let html = get(&app, &browser, "/orders").await;
+    let r = row(&html, 2);
+
+    // 4 * 100 * 0.95215 - 4 * 100 = -19.14
+    assert!(
+        r.contains(r#"<mark class="badge loss">-19.14</mark>"#),
+        "{r}"
+    );
+}
+
+#[sqlx::test]
+async fn a_partly_known_cost_shows_a_dash_and_how_many_units_are_known_on_hover(pool: PgPool) {
+    let (app, browser) = margin_mix(pool).await;
+
+    let html = get(&app, &browser, "/orders").await;
+    let r = row(&html, 3);
+
+    assert!(r.contains(r#"title="cost known for 3 of 8 units""#), "{r}");
+    assert!(r.contains(">\u{2014}<"), "{r}");
+}
+
+#[sqlx::test]
+async fn sorting_by_margin_puts_orders_without_one_last_in_both_directions(pool: PgPool) {
+    let (app, browser) = margin_mix(pool).await;
+
+    let desc = get(&app, &browser, "/orders?sort=margin&dir=desc").await;
+    assert_eq!(order_of_rows(&desc, &[1, 2, 3]), [1, 2, 3]);
+
+    let asc = get(&app, &browser, "/orders?sort=margin&dir=asc").await;
+    assert_eq!(order_of_rows(&asc, &[1, 2, 3]), [2, 1, 3]);
+    assert!(unescaped(&asc).contains("sort=margin&dir=desc"));
 }

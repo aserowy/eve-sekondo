@@ -22,7 +22,8 @@ use url::Url;
 
 use crate::state::{
     ACCESS_TOKEN_SECONDS, ASSETS_PAGE_SIZE, EsiFailure, Inner, MARKET_PAGE_SIZE, MarketFixture,
-    NAMES, PendingCode, RefreshRecord, STRUCTURES, Shared, now_secs, random_token,
+    NAMES, PendingCode, RefreshRecord, STRUCTURES, Shared, TRANSACTIONS_PAGE_SIZE, now_secs,
+    random_token,
 };
 
 macro_rules! method_router {
@@ -57,6 +58,7 @@ eve_routes! {
     ("GET", "/universe/structures/{id}", universe_structure),
     ("GET", "/markets/{region_id}/orders", market_orders),
     ("GET", "/characters/{id}/wallet", character_wallet),
+    ("GET", "/characters/{id}/wallet/transactions", character_transactions),
     ("GET", "/characters/{id}/assets", character_assets),
     ("GET", "/markets/prices", market_prices),
     ("GET", "/characters/{id}/skills", character_skills),
@@ -73,6 +75,7 @@ pub fn router(shared: Shared) -> Router {
         .route("/orders", post(set_orders))
         .route("/market-orders", post(set_market_orders))
         .route("/wallet", post(set_wallet))
+        .route("/transactions", post(set_transactions))
         .route("/assets", post(set_assets))
         .route("/prices", post(set_prices))
         .route("/skills", post(set_skills))
@@ -437,6 +440,7 @@ async fn stats(State(shared): State<Shared>) -> Json<Value> {
         "market_calls": calls("market"),
         "wallet_calls": calls("wallet"),
         "assets_calls": calls("assets"),
+        "transactions_calls": calls("transactions"),
         "prices_calls": calls("prices"),
         "skills_calls": calls("skills"),
         "standings_calls": calls("standings"),
@@ -845,6 +849,73 @@ async fn character_wallet(
     }
     let balance = inner.wallets.get(&character_id).copied().unwrap_or(0.0);
     (response_headers, Json(balance)).into_response()
+}
+
+#[derive(Deserialize)]
+struct TransactionsQuery {
+    from_id: Option<i64>,
+}
+
+fn transaction_id(transaction: &Value) -> i64 {
+    transaction["transaction_id"].as_i64().unwrap_or(0)
+}
+
+/// The wallet transactions of a character, newest first. With `from_id`, the ones up to and including it (as real ESI does, verified).
+async fn character_transactions(
+    State(shared): State<Shared>,
+    Path(character_id): Path<i64>,
+    Query(query): Query<TransactionsQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let mut inner = shared.lock().unwrap();
+    if let Some(response) = begin_esi_call(&mut inner, "transactions", &headers) {
+        return response;
+    }
+    let response_headers = char_route_headers(&inner, "char-wallet", "150/15m");
+    if let Err(response) = authorize_character(
+        &inner,
+        &headers,
+        character_id,
+        WALLET_SCOPE,
+        response_headers.clone(),
+    ) {
+        return response;
+    }
+    let (all, limit) = inner
+        .transactions
+        .get(&character_id)
+        .map_or((&[][..], TRANSACTIONS_PAGE_SIZE), |f| {
+            (&f.orders[..], f.page_size)
+        });
+    let mut answer: Vec<&Value> = all
+        .iter()
+        .filter(|t| query.from_id.is_none_or(|from| transaction_id(t) <= from))
+        .collect();
+    answer.sort_by_key(|t| std::cmp::Reverse(transaction_id(t)));
+    answer.truncate(limit);
+    (response_headers, Json(answer)).into_response()
+}
+
+#[derive(Deserialize)]
+struct TransactionsBody {
+    character_id: i64,
+    transactions: Vec<Value>,
+    limit: Option<usize>,
+}
+
+/// Replaces what ESI returns as a character's wallet transactions.
+async fn set_transactions(
+    State(shared): State<Shared>,
+    Json(body): Json<TransactionsBody>,
+) -> StatusCode {
+    shared.lock().unwrap().transactions.insert(
+        body.character_id,
+        MarketFixture {
+            orders: body.transactions,
+            page_size: body.limit.unwrap_or(TRANSACTIONS_PAGE_SIZE).max(1),
+        },
+    );
+    StatusCode::NO_CONTENT
 }
 
 #[derive(Deserialize)]

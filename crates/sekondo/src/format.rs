@@ -51,19 +51,34 @@ fn shorten(value: i128, start: usize) -> String {
 pub fn isk_exact(cents: i64) -> String {
     let negative = cents < 0;
     let value = i128::from(cents).abs();
-    let whole = (value / 100).to_string();
-    let mut grouped = String::new();
-    for (i, digit) in whole.chars().enumerate() {
-        if i > 0 && (whole.len() - i) % 3 == 0 {
-            grouped.push(',');
-        }
-        grouped.push(digit);
-    }
+    let grouped = group_thousands(&(value / 100).to_string());
     format!(
         "{}{grouped}.{:02} ISK",
         if negative { "-" } else { "" },
         value % 100
     )
+}
+
+/// A whole number with thousands separators: `1,250`.
+pub fn thousands(number: i64) -> String {
+    let grouped = group_thousands(&i128::from(number).abs().to_string());
+    if number < 0 {
+        format!("-{grouped}")
+    } else {
+        grouped
+    }
+}
+
+/// Puts a comma between every three digits of a string of digits, counted from the right.
+fn group_thousands(digits: &str) -> String {
+    let mut grouped = String::new();
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
 }
 
 /// Whole days and hours until `expires_at`, rounded down: `9 days 22 hours`.
@@ -198,6 +213,17 @@ mod tests {
         assert_eq!(percent_of(i64::MAX / 2, i64::MAX), "50.0");
         // A best price of nothing cannot be a base for a percentage.
         assert_eq!(percent_of(5, 0), "0.0");
+    }
+
+    #[test]
+    fn whole_numbers_have_thousands_separators() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1_000), "1,000");
+        assert_eq!(thousands(1_250), "1,250");
+        assert_eq!(thousands(1_234_567), "1,234,567");
+        assert_eq!(thousands(-1_234), "-1,234");
+        assert_eq!(thousands(i64::MIN), "-9,223,372,036,854,775,808");
     }
 
     #[test]

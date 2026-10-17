@@ -77,6 +77,13 @@ async fn market_ids(env: &PollEnv) -> Vec<i64> {
         .unwrap()
 }
 
+async fn market_volumes(env: &PollEnv) -> Vec<(i64, i64)> {
+    sqlx::query_as("SELECT order_id, volume_remain FROM market_orders ORDER BY order_id")
+        .fetch_all(&env.pool)
+        .await
+        .unwrap()
+}
+
 async fn next_poll_at(env: &PollEnv, region: i64, type_id: i64) -> OffsetDateTime {
     sqlx::query_scalar("SELECT next_poll_at FROM market_sync WHERE region_id = $1 AND type_id = $2")
         .bind(region)
@@ -117,6 +124,23 @@ async fn a_pair_is_tracked_after_an_order_poll_and_refreshed_within_one_interval
 
     assert_eq!(env.stub.esi_calls("market"), 1);
     assert_eq!(market_ids(&env).await, [100]);
+}
+
+#[sqlx::test]
+async fn stored_volumes_follow_a_refresh(pool: PgPool) {
+    let env = alice_with_an_order(pool).await;
+    let mut order = market_order(100, 34, 9.0);
+    order["volume_remain"] = json!(20);
+    set_market(&env, FORGE, vec![order.clone()], None).await;
+    refresh_all(&env).await;
+    assert_eq!(market_volumes(&env).await, [(100, 20)]);
+
+    order["volume_remain"] = json!(8);
+    set_market(&env, FORGE, vec![order], None).await;
+    env.clock.advance(Duration::minutes(21));
+    env.market.tick().await;
+
+    assert_eq!(market_volumes(&env).await, [(100, 8)]);
 }
 
 #[sqlx::test]
@@ -358,6 +382,7 @@ struct Standing {
     undercut: Option<i64>,
     best_cents: Option<i64>,
     gap_cents: Option<i64>,
+    undercut_volume: Option<i64>,
 }
 
 /// Alice's orders and the market of The Forge are in place and the pair was refreshed.
@@ -394,6 +419,7 @@ async fn standings(
             undercut: r.undercut,
             best_cents: r.best_price_cents,
             gap_cents: r.gap_cents,
+            undercut_volume: r.undercut_volume,
         })
         .collect()
 }
@@ -883,6 +909,30 @@ async fn a_refresh_that_changes_a_standing_signals_the_owner(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn a_refresh_that_only_changes_an_undercutting_orders_volume_signals_the_owner(pool: PgPool) {
+    let (env, account) = market_with(
+        pool,
+        vec![own(1, 34, false, 100.0, STATION)],
+        vec![sell_at(1, 100.0), remaining(sell_at(2, 90.0), 20)],
+    )
+    .await;
+    ok(env.control("esi-expires", json!({"seconds": 300})).await).await;
+    let mut stream = env.events.subscribe(account);
+
+    // Same standing, same gap: only the 20 units in front drop to 8.
+    set_market(
+        &env,
+        FORGE,
+        vec![sell_at(1, 100.0), remaining(sell_at(2, 90.0), 8)],
+        None,
+    )
+    .await;
+    refresh_again(&env).await;
+
+    assert_eq!(signals(&mut stream).await, [Event::MarketUpdated]);
+}
+
+#[sqlx::test]
 async fn a_refresh_that_changes_nothing_signals_nobody(pool: PgPool) {
     let (env, account) = top_seller(pool).await;
     let mut stream = env.events.subscribe(account);
@@ -947,4 +997,73 @@ async fn a_failed_refresh_signals_nobody(pool: PgPool) {
     refresh_again(&env).await;
 
     assert_eq!(signals(&mut stream).await, Vec::<Event>::new());
+}
+
+// ---- undercut volume ----
+
+fn remaining(mut order: Value, units: i64) -> Value {
+    order["volume_remain"] = json!(units);
+    order
+}
+
+#[sqlx::test]
+async fn a_sell_order_behind_two_orders_has_their_remaining_volume_as_undercut_volume(
+    pool: PgPool,
+) {
+    let (env, account) = market_with(
+        pool,
+        vec![own(1, 34, false, 100.0, STATION)],
+        vec![
+            sell_at(1, 100.0),
+            remaining(sell_at(2, 99.0), 5),
+            remaining(sell_at(3, 95.0), 20),
+            remaining(public(4, false, 90.0, OTHER_STATION, SYSTEM, "station"), 50),
+        ],
+    )
+    .await;
+
+    assert_eq!(sell_standing(&env, account).await.undercut_volume, Some(25));
+}
+
+#[sqlx::test]
+async fn a_buy_order_behind_reaching_orders_sums_their_volume_whatever_the_minimum(pool: PgPool) {
+    let mut big_minimum = remaining(buy_at(2, 55.0, OTHER_STATION, NEIGHBOUR, "region"), 1000);
+    big_minimum["min_volume"] = json!(500);
+    let standing = buy_standing(
+        pool,
+        vec![own_buy()],
+        vec![
+            own_buy_row(),
+            big_minimum,
+            remaining(buy_at(3, 52.0, STATION, SYSTEM, "station"), 300),
+            remaining(buy_at(4, 60.0, OTHER_STATION, NEIGHBOUR, "5"), 700),
+        ],
+    )
+    .await;
+
+    assert_eq!(standing.undercut, Some(2));
+    assert_eq!(standing.undercut_volume, Some(1300));
+}
+
+#[sqlx::test]
+async fn a_top_order_has_no_undercut_volume(pool: PgPool) {
+    let (env, account) = market_with(
+        pool,
+        vec![own(1, 34, false, 100.0, STATION)],
+        vec![sell_at(1, 100.0), remaining(sell_at(2, 101.0), 40)],
+    )
+    .await;
+
+    assert_eq!(sell_standing(&env, account).await.undercut_volume, None);
+}
+
+#[sqlx::test]
+async fn an_order_without_market_data_has_no_undercut_volume(pool: PgPool) {
+    let env = alice_with_an_order(pool).await;
+    let account = sqlx::query_scalar("SELECT account_id FROM characters LIMIT 1")
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+
+    assert_eq!(sell_standing(&env, account).await.undercut_volume, None);
 }

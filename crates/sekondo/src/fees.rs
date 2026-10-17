@@ -15,27 +15,10 @@ use uuid::Uuid;
 pub const ACCOUNTING: i64 = 16622;
 pub const BROKER_RELATIONS: i64 = 3446;
 
-/// One row per (character, location) of the current orders. `$1` is the character IDs and `$2`
-/// the account the characters must belong to (`NULL`: any).
-///
-/// - `accounting` and `broker_relations` are `NULL` until the skills were polled once, and 0 when
-///   polled but not trained.
-/// - `faction_standing` and `corp_standing` are `NULL` for a structure, until the standings were
-///   polled once and until the station's owner is known. They are 0 when polled and absent, and
-///   the faction standing is 0 when the owner is in no faction.
-/// - `sales_tax`: 7.5 × (1 − 0.11 × accounting). `broker_fee` (NPC station only):
-///   3 − 0.3·broker relations − 0.03·faction standing − 0.02·corporation standing.
-///   `min_margin`: ((1 + b) / (1 − b − t) − 1) × 100 for a known broker fee b and sales tax t.
-///   All in percent, and not clamped: the formula cannot fall below 1.0%.
-pub const FEES_SQL: &str = "
-    SELECT f.character_id, f.location_id, f.is_structure,
-           f.accounting, f.broker_relations,
-           f.faction_standing::text AS faction_standing, f.corp_standing::text AS corp_standing,
-           f.sales_tax::text AS sales_tax, f.broker_fee::text AS broker_fee,
-           CASE WHEN f.broker_fee IS NOT NULL AND f.sales_tax IS NOT NULL THEN
-               (((1 + f.broker_fee / 100) / (1 - f.broker_fee / 100 - f.sales_tax / 100) - 1) * 100)::text
-           END AS min_margin
-    FROM (
+/// The rates query as one literal, so that [`FEES_SQL`] can be built from it with `concat!`.
+macro_rules! fee_rates_sql {
+    () => {
+        "
         SELECT l.character_id, l.location_id, l.is_structure,
                l.accounting, l.broker_relations, l.faction_standing, l.corp_standing,
                CASE WHEN l.accounting IS NOT NULL THEN 7.5 * (1 - 0.11 * l.accounting) END AS sales_tax,
@@ -85,8 +68,41 @@ pub const FEES_SQL: &str = "
                    ON cs.character_id = loc.character_id AND cs.from_type = 'npc_corp'
                   AND cs.from_id = so.owner_id
         ) l
-    ) f
-    ORDER BY f.character_id, f.location_id";
+"
+    };
+}
+
+/// One row per (character, location) of the current orders. `$1` is the character IDs and `$2`
+/// the account the characters must belong to (`NULL`: any).
+///
+/// - `accounting` and `broker_relations` are `NULL` until the skills were polled once, and 0 when
+///   polled but not trained.
+/// - `faction_standing` and `corp_standing` are `NULL` for a structure, until the standings were
+///   polled once and until the station's owner is known. They are 0 when polled and absent, and
+///   the faction standing is 0 when the owner is in no faction.
+/// - `sales_tax`: 7.5 × (1 − 0.11 × accounting). `broker_fee` (NPC station only):
+///   3 − 0.3·broker relations − 0.03·faction standing − 0.02·corporation standing.
+///   `min_margin`: ((1 + b) / (1 − b − t) − 1) × 100 for a known broker fee b and sales tax t.
+///   All in percent, and not clamped: the formula cannot fall below 1.0%.
+pub const FEES_SQL: &str = concat!(
+    "
+    SELECT f.character_id, f.location_id, f.is_structure,
+           f.accounting, f.broker_relations,
+           f.faction_standing::text AS faction_standing, f.corp_standing::text AS corp_standing,
+           f.sales_tax::text AS sales_tax, f.broker_fee::text AS broker_fee,
+           CASE WHEN f.broker_fee IS NOT NULL AND f.sales_tax IS NOT NULL THEN
+               (((1 + f.broker_fee / 100) / (1 - f.broker_fee / 100 - f.sales_tax / 100) - 1) * 100)::text
+           END AS min_margin
+    FROM (",
+    fee_rates_sql!(),
+    ") f
+    ORDER BY f.character_id, f.location_id"
+);
+
+/// The rates part of [`FEES_SQL`], with its `$1` and `$2`: one row per (character, location) of the
+/// current orders with `sales_tax` and `broker_fee` as `numeric` percent (and the inputs they are
+/// worked out from). The orders listing joins it to work out the margin.
+pub const FEE_RATES_SQL: &str = fee_rates_sql!();
 
 /// The fee figures of one character at one location, as decimal text in percent.
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]

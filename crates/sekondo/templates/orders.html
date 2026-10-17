@@ -13,7 +13,7 @@
   <section id="freshness" hx-get="{{ view.freshness_url }}" hx-trigger="sse:orders-updated, sse:fees-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
     {% include "orders_freshness.html" %}
   </section>
-  <div id="order-tables" hx-get="{{ view.tables_url }}" hx-trigger="sse:orders-updated, sse:market-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
+  <div id="order-tables" hx-get="{{ view.tables_url }}" hx-trigger="sse:orders-updated, sse:market-updated, sse:fees-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
     {% include "orders_tables.html" %}
   </div>
 </div>

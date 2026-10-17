@@ -61,6 +61,7 @@ async fn the_wealth_and_fee_hooks_are_absent(pool: PgPool) {
 
     for path in [
         format!("/_test/wealth-poll/{ALICE}/wallet"),
+        format!("/_test/wealth-poll/{ALICE}/transactions"),
         "/_test/price-refresh".to_owned(),
         "/_test/fee-poll".to_owned(),
     ] {

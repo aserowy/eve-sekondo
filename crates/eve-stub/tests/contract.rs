@@ -391,6 +391,7 @@ async fn injected_failures_conform_on_every_esi_route() {
     let market = "/markets/10000002/orders?order_type=all&type_id=34";
     let wallet = format!("/characters/{ALICE}/wallet");
     let assets = format!("/characters/{ALICE}/assets");
+    let transactions = format!("/characters/{ALICE}/wallet/transactions");
     let skills = format!("/characters/{ALICE}/skills");
     let standings = format!("/characters/{ALICE}/standings");
 
@@ -415,6 +416,7 @@ async fn injected_failures_conform_on_every_esi_route() {
             ("market", "market-orders"),
             ("wallet", "wallet"),
             ("assets", "assets"),
+            ("transactions", "wallet-transactions"),
             ("prices", "prices"),
             ("skills", "skills"),
             ("standings", "standings"),
@@ -432,6 +434,7 @@ async fn injected_failures_conform_on_every_esi_route() {
                 "market" => get(&f, market, None).await,
                 "wallet" => get(&f, &wallet, Some(&token)).await,
                 "assets" => get(&f, &assets, Some(&token)).await,
+                "transactions" => get(&f, &transactions, Some(&token)).await,
                 "prices" => get(&f, "/markets/prices", None).await,
                 "skills" => get(&f, &skills, Some(&token)).await,
                 "standings" => get(&f, &standings, Some(&token)).await,
@@ -455,6 +458,54 @@ async fn assets_page(f: &Fixture, character: i64, token: &str, page: usize) -> A
         Some(token),
     )
     .await
+}
+
+fn transaction(id: i64) -> Value {
+    json!({
+        "transaction_id": id, "date": "2026-10-11T12:00:00Z", "type_id": 34,
+        "location_id": STATION, "quantity": 10, "unit_price": 100.25,
+        "is_buy": true, "is_personal": true, "client_id": 9, "journal_ref_id": id,
+    })
+}
+
+#[tokio::test]
+async fn the_transactions_answers_conform_newest_older_and_forbidden() {
+    let f = common::start_unverified().await;
+    let token = f.stub.issue_access_token(ALICE).unwrap();
+    control(
+        &f,
+        "transactions",
+        json!({
+            "character_id": ALICE, "limit": 1,
+            "transactions": [transaction(1), transaction(2)],
+        }),
+    )
+    .await;
+    let path = format!("/characters/{ALICE}/wallet/transactions");
+
+    let newest = get(&f, &path, Some(&token)).await;
+    assert_eq!(newest.status, 200);
+    assert_eq!(newest.body.as_ref().unwrap().as_array().unwrap().len(), 1);
+    conforms("wallet-transactions", "newest", &newest);
+    let older = get(&f, &format!("{path}?from_id=2"), Some(&token)).await;
+    assert_eq!(older.body.as_ref().unwrap().as_array().unwrap().len(), 1);
+    conforms("wallet-transactions", "from-id", &older);
+    let past = get(&f, &format!("{path}?from_id=1"), Some(&token)).await;
+    conforms("wallet-transactions", "from-id", &past);
+
+    let narrow = f
+        .stub
+        .issue_token(
+            ALICE,
+            &eve_stub::TokenOptions {
+                scopes: Some(vec!["esi-markets.read_character_orders.v1".to_owned()]),
+                ..eve_stub::TokenOptions::default()
+            },
+        )
+        .unwrap();
+    let refused = get(&f, &path, Some(&narrow)).await;
+    assert_eq!(refused.status, 403);
+    conforms("wallet-transactions", "forbidden", &refused);
 }
 
 fn asset(id: i64) -> Value {

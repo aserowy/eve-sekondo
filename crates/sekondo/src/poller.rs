@@ -271,6 +271,25 @@ impl Poller {
         .execute(&mut *tx)
         .await?;
 
+        // Every personal sell order is remembered as first seen: a reprice moves `issued` in ESI
+        // but not here, and a closed order stays.
+        let new_types: Vec<i64> = sqlx::query_scalar(
+            "INSERT INTO sell_order_history (order_id, character_id, type_id, first_issued, volume_total)
+             SELECT order_id, character_id, type_id, issued, volume_total
+             FROM current_orders
+             WHERE character_id = $1 AND NOT is_buy_order AND NOT is_corporation
+             ON CONFLICT (order_id) DO NOTHING
+             RETURNING type_id",
+        )
+        .bind(character_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        // What a new order took is settled right away, in the same transaction.
+        let mut new_types = new_types;
+        new_types.sort_unstable();
+        new_types.dedup();
+        crate::trade::recompute(&mut tx, character_id, &new_types).await?;
+
         // Computed from the rows just written, so the history and the current figures agree, and
         // a poll without orders records zeros. Two polls in the same instant keep the later one
         // rather than failing the whole poll.

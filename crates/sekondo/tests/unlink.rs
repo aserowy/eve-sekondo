@@ -244,6 +244,12 @@ async fn unlinking_a_character_removes_its_wealth_and_fee_data_and_keeps_the_oth
             "INSERT INTO character_standings (character_id, from_id, from_type, standing) \
              VALUES ($1, 1000035, 'npc_corp', 1.5)",
             "INSERT INTO fee_sync (character_id, kind, next_poll_at) VALUES ($1, 'skills', now())",
+            "INSERT INTO wealth_sync (character_id, kind, next_poll_at) VALUES ($1, 'transactions', now())",
+            "INSERT INTO purchases (transaction_id, character_id, type_id, location_id, quantity, \
+             unit_price, bought_at) VALUES ($1, $1, 34, 60003760, 10, 100, now())",
+            "INSERT INTO sell_order_history (order_id, character_id, type_id, first_issued, \
+             volume_total) VALUES ($1, $1, 34, now(), 20)",
+            "INSERT INTO sell_order_costs (order_id, covered_units, cost) VALUES ($1, 10, 1000)",
         ] {
             sqlx::query(statement)
                 .bind(character)
@@ -260,7 +266,9 @@ async fn unlinking_a_character_removes_its_wealth_and_fee_data_and_keeps_the_oth
         ("wallet_balances", 1),
         ("inventory_values", 1),
         ("current_assets", 1),
-        ("wealth_sync", 2),
+        ("wealth_sync", 3),
+        ("purchases", 1),
+        ("sell_order_history", 1),
         ("character_skills", 1),
         ("character_standings", 1),
         ("fee_sync", 1),
@@ -274,4 +282,6 @@ async fn unlinking_a_character_removes_its_wealth_and_fee_data_and_keeps_the_oth
         .unwrap();
         assert_eq!(gone, 0, "{table}");
     }
+    // The costs hang off the remembered orders, so they go with them.
+    assert_eq!(e.count("sell_order_costs").await, 1);
 }

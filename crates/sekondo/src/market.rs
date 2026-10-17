@@ -32,16 +32,18 @@ pub enum RefreshOutcome {
     Deferred,
 }
 
+type SnapshotRow = (Uuid, i64, Option<i64>, Option<i64>, Option<i64>);
+
 /// What a pair's refresh may change on screen: per current order using the pair, its standing
-/// and gap (design §6).
+/// gap and undercut volume (design §6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
-    /// `(account, order, undercut, gap in cents)`, ordered.
-    rows: Vec<(Uuid, i64, Option<i64>, Option<i64>)>,
+    /// `(account, order, undercut, gap in cents, undercut volume)`, ordered.
+    rows: Vec<SnapshotRow>,
 }
 
 impl Snapshot {
-    /// The accounts with an order whose standing or gap differs between the two snapshots, or
+    /// The accounts with an order whose standing, gap or undercut volume differs between the two snapshots, or
     /// that has an order in only one of them.
     pub fn changed_accounts(&self, after: &Snapshot) -> Vec<Uuid> {
         let mut changed: Vec<Uuid> = self
@@ -57,7 +59,7 @@ impl Snapshot {
     }
 }
 
-/// The standing and gap of every current order that uses the pair, from the same SQL the orders
+/// The standing, gap and undercut volume of every current order that uses the pair, from the same SQL the orders
 /// page lists with.
 pub async fn snapshot(
     pool: &PgPool,
@@ -65,7 +67,7 @@ pub async fn snapshot(
     type_id: i64,
 ) -> Result<Snapshot, sqlx::Error> {
     let sql = format!(
-        "SELECT c.account_id, o.order_id, st.undercut, {GAP_CENTS}
+        "SELECT c.account_id, o.order_id, st.undercut, {GAP_CENTS}, st.undercut_volume
          FROM current_orders o
          JOIN characters c ON c.character_id = o.character_id
          {STANDING_JOIN}
@@ -97,6 +99,7 @@ struct MarketColumns {
     is_buy_order: Vec<bool>,
     price_cents: Vec<i64>,
     range: Vec<String>,
+    volume_remain: Vec<i64>,
 }
 
 impl MarketColumns {
@@ -109,6 +112,7 @@ impl MarketColumns {
             c.is_buy_order.push(o.is_buy_order);
             c.price_cents.push(o.price_cents);
             c.range.push(o.range.clone());
+            c.volume_remain.push(o.volume_remain);
         }
         c
     }
@@ -282,7 +286,7 @@ impl MarketPoller {
         }
     }
 
-    /// Tells the accounts whose orders now show a different standing or gap. Without a before
+    /// Tells the accounts whose orders now show a different standing, gap or undercut volume. Without a before
     /// snapshot, or when it cannot be read, nothing is sent: a page also refreshes on reconnect.
     async fn signal_changes(
         &self,
@@ -321,17 +325,19 @@ impl MarketPoller {
             .await?;
         sqlx::query(
             "INSERT INTO market_orders
-                 (order_id, region_id, type_id, location_id, system_id, is_buy_order, price, range)
+                 (order_id, region_id, type_id, location_id, system_id, is_buy_order, price, range,
+                  volume_remain)
              SELECT o.order_id, $1, $2, o.location_id, o.system_id, o.is_buy_order,
-                    o.price_cents::numeric / 100, o.range
+                    o.price_cents::numeric / 100, o.range, o.volume_remain
              FROM unnest($3::bigint[], $4::bigint[], $5::bigint[], $6::bool[], $7::bigint[],
-                         $8::text[])
-                  AS o(order_id, location_id, system_id, is_buy_order, price_cents, range)
+                         $8::text[], $9::bigint[])
+                  AS o(order_id, location_id, system_id, is_buy_order, price_cents, range,
+                       volume_remain)
              ON CONFLICT (order_id) DO UPDATE SET
                  region_id = excluded.region_id, type_id = excluded.type_id,
                  location_id = excluded.location_id, system_id = excluded.system_id,
                  is_buy_order = excluded.is_buy_order, price = excluded.price,
-                 range = excluded.range",
+                 range = excluded.range, volume_remain = excluded.volume_remain",
         )
         .bind(region_id)
         .bind(type_id)
@@ -341,6 +347,7 @@ impl MarketPoller {
         .bind(&columns.is_buy_order)
         .bind(&columns.price_cents)
         .bind(&columns.range)
+        .bind(&columns.volume_remain)
         .execute(&mut *tx)
         .await?;
         // `max(now + interval, ESI's Expires)`, pushed back by a little jitter.

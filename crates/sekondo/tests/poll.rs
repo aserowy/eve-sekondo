@@ -710,3 +710,70 @@ async fn unlinking_a_character_removes_its_poll_totals(pool: PgPool) {
     assert!(poll_totals(&env.pool, ALICE).await.is_empty());
     assert_eq!(poll_totals(&env.pool, BOB).await.len(), 1);
 }
+
+// ---- remembered sell orders ----
+
+async fn remembered(pool: &PgPool) -> Vec<(i64, String, i64)> {
+    sqlx::query_as(
+        "SELECT order_id, first_issued::text, volume_total FROM sell_order_history \
+         ORDER BY order_id",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test]
+async fn a_repriced_sell_order_keeps_the_issue_time_it_was_first_seen_with(pool: PgPool) {
+    let env = linked(pool).await;
+    set_orders(&env, ALICE, vec![order(1, 10.0, 5)]).await;
+    env.poller.poll_character(ALICE).await;
+
+    // Repriced in game: ESI moves `issued`, and the price changes.
+    let mut repriced = order(1, 12.0, 5);
+    repriced["issued"] = json!("2026-10-02T14:00:00Z");
+    set_orders(&env, ALICE, vec![repriced]).await;
+    env.clock.advance(Duration::minutes(21));
+    env.poller.poll_character(ALICE).await;
+
+    assert_eq!(
+        remembered(&env.pool).await,
+        [(1, "2026-10-01 12:00:00+00".to_owned(), 20)]
+    );
+}
+
+#[sqlx::test]
+async fn a_closed_sell_order_stays_remembered(pool: PgPool) {
+    let env = linked(pool).await;
+    set_orders(&env, ALICE, vec![order(1, 10.0, 5)]).await;
+    env.poller.poll_character(ALICE).await;
+
+    set_orders(&env, ALICE, vec![]).await;
+    env.clock.advance(Duration::minutes(21));
+    env.poller.poll_character(ALICE).await;
+
+    assert!(current_ids(&env.pool, ALICE).await.is_empty());
+    assert_eq!(remembered(&env.pool).await.len(), 1);
+}
+
+#[sqlx::test]
+async fn corporation_sell_orders_and_buy_orders_are_not_remembered(pool: PgPool) {
+    let env = linked(pool).await;
+    let mut corp = order(2, 10.0, 5);
+    corp["is_corporation"] = json!(true);
+    set_orders(
+        &env,
+        ALICE,
+        vec![order(1, 10.0, 5), corp, buy_order(3, 100.0, false)],
+    )
+    .await;
+
+    env.poller.poll_character(ALICE).await;
+
+    let ids: Vec<i64> = remembered(&env.pool)
+        .await
+        .into_iter()
+        .map(|r| r.0)
+        .collect();
+    assert_eq!(ids, [1]);
+}

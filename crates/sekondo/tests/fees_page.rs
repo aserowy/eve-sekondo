@@ -244,7 +244,9 @@ async fn only_the_selected_characters_are_listed(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn only_the_freshness_section_follows_fees_updated(pool: PgPool) {
+async fn the_orders_page_follows_fees_updated_in_both_sections_and_no_other_page_does(
+    pool: PgPool,
+) {
     let (app, browser) = setup(&pool).await;
 
     let res = browser.get(&app.url("/orders")).await;
@@ -264,7 +266,8 @@ async fn only_the_freshness_section_follows_fees_updated(pool: PgPool) {
     };
     assert!(trigger("freshness").contains("sse:fees-updated"));
     assert!(trigger("freshness").contains("sse:orders-updated"));
-    assert!(!trigger("order-tables").contains("fees-updated"));
+    // The margins in the tables depend on the fees.
+    assert!(trigger("order-tables").contains("sse:fees-updated"));
 
     let wealth = browser.get(&app.url("/wealth")).await.text().await.unwrap();
     let dashboard = browser

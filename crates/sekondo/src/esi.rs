@@ -30,6 +30,8 @@ pub const ROUTE_STRUCTURES: &str = "structures";
 /// Public market orders, in a rate-limit group of their own.
 pub const ROUTE_MARKET: &str = "market";
 pub const ROUTE_WALLET: &str = "wallet";
+/// Shares the wallet's rate-limit group, which the gate learns from the answers' headers.
+pub const ROUTE_TRANSACTIONS: &str = "transactions";
 pub const ROUTE_ASSETS: &str = "assets";
 pub const ROUTE_PRICES: &str = "prices";
 pub const ROUTE_SKILLS: &str = "skills";
@@ -89,6 +91,7 @@ pub struct EsiMarketOrder {
     #[serde(rename = "price", deserialize_with = "cents")]
     pub price_cents: i64,
     pub range: String,
+    pub volume_remain: i64,
 }
 
 /// One asset of a character, with only what the valuation and the list read.
@@ -104,6 +107,22 @@ pub struct EsiAsset {
     /// ESI leaves the flag out of everything that is not a blueprint copy.
     #[serde(default)]
     pub is_blueprint_copy: bool,
+}
+
+/// One wallet transaction of a character, with only what the purchase history reads.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct EsiTransaction {
+    pub transaction_id: i64,
+    #[serde(rename = "date", with = "time::serde::rfc3339")]
+    pub bought_at: OffsetDateTime,
+    pub type_id: i64,
+    pub location_id: i64,
+    pub quantity: i64,
+    /// ISK in cents, as for orders.
+    #[serde(rename = "unit_price", deserialize_with = "cents")]
+    pub unit_price_cents: i64,
+    pub is_buy: bool,
+    pub is_personal: bool,
 }
 
 /// ESI's market price of one item. An item nobody trades has no average.
@@ -234,6 +253,24 @@ impl EsiClient {
             body: (response.body * 100.0).round() as i64,
             expires_at: response.expires_at,
         })
+    }
+
+    /// One answer of the character's wallet transactions, newest first. With `from_id`, the
+    /// transactions up to and including that one (verified against real ESI). Reading further
+    /// back is the caller's job.
+    pub async fn wallet_transactions(
+        &self,
+        character_id: i64,
+        token: &SecretString,
+        from_id: Option<i64>,
+    ) -> Result<EsiResponse<Vec<EsiTransaction>>, EsiError> {
+        let mut url = self.url(&format!("characters/{character_id}/wallet/transactions"));
+        if let Some(from_id) = from_id {
+            url.query_pairs_mut()
+                .append_pair("from_id", &from_id.to_string());
+        }
+        let request = self.http.get(url).bearer_auth(token.expose_secret());
+        self.fetch(ROUTE_TRANSACTIONS, request).await
     }
 
     /// All assets of a character, every page read one after another. The expiry is the first

@@ -22,7 +22,7 @@
 table.orders th a { text-decoration: none; white-space: nowrap; }
 table.orders td.num { text-align: right; font-variant-numeric: tabular-nums; }
 table.orders td[title] { cursor: help; }
-.badge.stale, .badge.undercut { background: var(--pico-del-color); color: var(--pico-contrast-inverse); }
+.badge.stale, .badge.undercut, .badge.loss { background: var(--pico-del-color); color: var(--pico-contrast-inverse); }
 .badge.top { background: var(--pico-ins-color); color: var(--pico-contrast-inverse); }
 
 /* Pico draws the tick of a checked checkbox with a data: image, which the CSP (img-src) does not

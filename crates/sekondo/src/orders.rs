@@ -14,7 +14,9 @@ use uuid::Uuid;
 use crate::{
     account::CurrentAccount,
     app::AppState,
-    csrf, fees, format,
+    csrf,
+    fees::{self, FEE_RATES_SQL},
+    format,
     freshness::{FreshnessView, freshness_view, list_freshness},
     pages::{self, Nav, Page},
     selection::{CharacterSelection, ViewQuery},
@@ -37,15 +39,20 @@ pub enum SortKey {
     Standing,
     /// The difference to the best price; no market data last.
     Gap,
+    /// The remaining volume of the undercutting orders: a top order counts as 0, no market data
+    /// last.
+    UndercutVolume,
     Volume,
     /// The order value of a sell order, the escrow of a buy order.
     Amount,
+    /// The margin of a sell order; orders without one last.
+    Margin,
     Issued,
     TimeLeft,
 }
 
 impl SortKey {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 13] = [
         Self::Character,
         Self::Item,
         Self::Location,
@@ -53,8 +60,10 @@ impl SortKey {
         Self::Price,
         Self::Standing,
         Self::Gap,
+        Self::UndercutVolume,
         Self::Volume,
         Self::Amount,
+        Self::Margin,
         Self::Issued,
         Self::TimeLeft,
     ];
@@ -69,8 +78,10 @@ impl SortKey {
             Self::Price => "price",
             Self::Standing => "standing",
             Self::Gap => "gap",
+            Self::UndercutVolume => "undercut-volume",
             Self::Volume => "volume",
             Self::Amount => "amount",
+            Self::Margin => "margin",
             Self::Issued => "issued",
             Self::TimeLeft => "left",
         }
@@ -89,6 +100,12 @@ impl SortKey {
             Self::Gap => format!(
                 "(st.undercut IS NULL), COALESCE(abs(st.best_price - o.price), 0) {direction}"
             ),
+            Self::UndercutVolume => {
+                format!("(st.undercut IS NULL), COALESCE(st.undercut_volume, 0) {direction}")
+            }
+            Self::Margin => {
+                format!("({MARGIN_CENTS}) IS NULL, ({MARGIN_CENTS}) {direction}")
+            }
             other => format!("{} {direction}", other.expression()),
         }
     }
@@ -106,7 +123,9 @@ impl SortKey {
             }
             Self::Issued => "o.issued",
             Self::TimeLeft => "o.issued + o.duration * interval '1 day'",
-            Self::Standing | Self::Gap => unreachable!("ordered by `order_by`"),
+            Self::Standing | Self::Gap | Self::UndercutVolume | Self::Margin => {
+                unreachable!("ordered by `order_by`")
+            }
         }
     }
 }
@@ -196,6 +215,17 @@ pub struct OrderRow {
     pub best_price_cents: Option<i64>,
     /// Per unit, the difference to the best price; `None` for a top order or without market data.
     pub gap_cents: Option<i64>,
+    /// The remaining volume of the orders that undercut this one; `None` for a top order or
+    /// without market data.
+    pub undercut_volume: Option<i64>,
+    /// How many of the order's units have a known purchase cost; `None` when the order is not a
+    /// remembered personal sell order.
+    pub covered_units: Option<i64>,
+    /// What the remaining volume earns after the character's fees and the purchase cost, in
+    /// cents; `None` unless the cost covers the whole volume and the fees are known.
+    pub margin_cents: Option<i64>,
+    /// The average purchase cost per unit, in cents, when it covers the whole volume.
+    pub cost_per_unit_cents: Option<i64>,
 }
 
 impl OrderRow {
@@ -205,7 +235,7 @@ impl OrderRow {
 }
 
 /// Joins `st` to the current orders `o`: how many other public orders undercut each of them and
-/// the best of those prices, or NULL when there is no standing (design §5). The listing and the
+/// the best of those prices and their remaining volume, or NULL when there is no standing (design §5). The listing and the
 /// change detection both use it, so a signal is sent exactly when what is shown changes.
 ///
 /// A standing exists only when the order's pair was refreshed once, the order is not in a player
@@ -215,7 +245,8 @@ impl OrderRow {
 /// from the same solar system. The own range is not read.
 pub(crate) const STANDING_JOIN: &str = "LEFT JOIN LATERAL (
         SELECT CASE WHEN a.available THEN c.undercut END AS undercut,
-               CASE WHEN a.available THEN c.best_price END AS best_price
+               CASE WHEN a.available THEN c.best_price END AS best_price,
+               CASE WHEN a.available THEN c.undercut_volume END AS undercut_volume
         FROM (SELECT o.location_id < 100000000
                  AND EXISTS (SELECT 1 FROM market_sync s
                              WHERE s.region_id = o.region_id AND s.type_id = o.type_id
@@ -225,7 +256,8 @@ pub(crate) const STANDING_JOIN: &str = "LEFT JOIN LATERAL (
                  AS available) a,
         LATERAL (
             SELECT count(*) AS undercut,
-                   CASE WHEN o.is_buy_order THEN max(m.price) ELSE min(m.price) END AS best_price
+                   CASE WHEN o.is_buy_order THEN max(m.price) ELSE min(m.price) END AS best_price,
+                   sum(m.volume_remain)::bigint AS undercut_volume
             FROM market_orders m
             WHERE m.region_id = o.region_id AND m.type_id = o.type_id
               AND m.order_id <> o.order_id
@@ -246,6 +278,22 @@ pub(crate) const STANDING_JOIN: &str = "LEFT JOIN LATERAL (
 /// `STANDING_JOIN` (`st`) and the current order (`o`).
 pub(crate) const GAP_CENTS: &str =
     "CASE WHEN st.undercut > 0 THEN (abs(st.best_price - o.price) * 100)::bigint END";
+
+/// The margin of a sell order in cents (design §6). Needs the cost row `sc`, the fee rates `f` and
+/// the current order `o`. The cost per unit is the whole known cost over the total volume, so a
+/// part that was sold already carries its share.
+const MARGIN_CENTS: &str = "CASE WHEN NOT o.is_buy_order AND NOT o.is_corporation
+          AND sc.covered_units = o.volume_total
+          AND f.sales_tax IS NOT NULL AND f.broker_fee IS NOT NULL
+     THEN (round(o.volume_remain * o.price * (1 - f.sales_tax / 100 - f.broker_fee / 100)
+                 - o.volume_remain * sc.cost / o.volume_total, 2) * 100)::bigint
+END";
+
+/// The average cost per unit in cents, for an order whose cost covers its whole volume.
+const COST_PER_UNIT_CENTS: &str =
+    "CASE WHEN sc.covered_units = o.volume_total AND o.volume_total > 0
+     THEN round(sc.cost * 100 / o.volume_total)::bigint
+END";
 
 /// The current orders of the selected characters, restricted to the account in the query itself
 /// so a selection can never reach another account's data.
@@ -273,20 +321,28 @@ pub async fn list_orders(
                 o.issued, o.duration,
                 st.undercut,
                 (st.best_price * 100)::bigint AS best_price_cents,
-                {GAP_CENTS} AS gap_cents
+                {GAP_CENTS} AS gap_cents,
+                st.undercut_volume,
+                CASE WHEN NOT o.is_buy_order AND NOT o.is_corporation THEN sc.covered_units END
+                    AS covered_units,
+                {MARGIN_CENTS} AS margin_cents,
+                {COST_PER_UNIT_CENTS} AS cost_per_unit_cents
          FROM current_orders o
          JOIN characters c ON c.character_id = o.character_id
          LEFT JOIN names tn ON tn.id = o.type_id
          LEFT JOIN names rn ON rn.id = o.region_id
          LEFT JOIN names ln ON ln.id = o.location_id
          {STANDING_JOIN}
-         WHERE c.account_id = $1 AND o.character_id = ANY($2) AND o.is_buy_order = $3
+         LEFT JOIN sell_order_costs sc ON sc.order_id = o.order_id
+         LEFT JOIN ({FEE_RATES_SQL}) f
+                ON f.character_id = o.character_id AND f.location_id = o.location_id
+         WHERE c.account_id = $2 AND o.character_id = ANY($1) AND o.is_buy_order = $3
          ORDER BY {}, o.order_id",
         sort.key.order_by(direction)
     );
     sqlx::query_as(sqlx::AssertSqlSafe(sql))
-        .bind(account_id)
         .bind(selection.ids())
+        .bind(account_id)
         .bind(side == Side::Buy)
         .fetch_all(pool)
         .await
@@ -294,7 +350,7 @@ pub async fn list_orders(
 
 // ---- view model ----
 
-/// Shown where an order has no standing and no gap.
+/// Shown where an order has no standing, gap and undercut volume.
 const NO_DATA: &str = "\u{2014}";
 
 pub struct HeaderView {
@@ -321,14 +377,25 @@ pub struct RowView {
     /// The difference to the best price and its percentage; empty for a top order.
     pub gap: String,
     pub gap_exact: String,
+    /// The undercut volume with separators; empty for a top order.
+    pub undercut_volume: String,
     pub volume: String,
     pub amount: String,
     pub amount_exact: String,
+    /// The margin shortened, or a dash; only the sell table has the column.
+    pub margin: String,
+    /// What hovering the margin adds: the exact value and the cost per unit, or how many units
+    /// have a known cost. Empty when there is nothing to add.
+    pub margin_title: String,
+    /// The margin is negative: it is shown in the error style.
+    pub margin_negative: bool,
     pub issued: String,
     pub left: String,
 }
 
 pub struct TableView {
+    /// The sell table has a margin column, the buy table has not.
+    pub has_margin: bool,
     pub headers: Vec<HeaderView>,
     pub rows: Vec<RowView>,
 }
@@ -403,12 +470,13 @@ fn headers(state: &ViewState, side: Side) -> Vec<HeaderView> {
     } else {
         "Escrow"
     };
-    let columns = [
+    let mut columns = vec![
         ("Character", SortKey::Character),
         ("Item", SortKey::Item),
         ("Price", SortKey::Price),
         ("Standing", SortKey::Standing),
         ("Behind by", SortKey::Gap),
+        ("Undercut volume", SortKey::UndercutVolume),
         ("Volume", SortKey::Volume),
         (amount, SortKey::Amount),
         ("Issued", SortKey::Issued),
@@ -416,6 +484,9 @@ fn headers(state: &ViewState, side: Side) -> Vec<HeaderView> {
         ("Location", SortKey::Location),
         ("Region", SortKey::Region),
     ];
+    if side == Side::Sell {
+        columns.insert(8, ("Margin", SortKey::Margin));
+    }
     columns
         .into_iter()
         .map(|(label, key)| {
@@ -475,6 +546,32 @@ fn row_view(row: &OrderRow, side: Side, now: OffsetDateTime) -> RowView {
             )
         }
     };
+    let undercut_volume = match (row.undercut, row.undercut_volume) {
+        (None, _) => NO_DATA.to_owned(),
+        (Some(_), volume) => volume.map(format::thousands).unwrap_or_default(),
+    };
+    let (margin, margin_title) = match (row.margin_cents, row.cost_per_unit_cents) {
+        (Some(margin), cost) => (
+            format::isk_short(margin),
+            match cost {
+                Some(cost) => format!(
+                    "{}; cost per unit {}",
+                    format::isk_exact(margin),
+                    format::isk_exact(cost)
+                ),
+                None => format::isk_exact(margin),
+            },
+        ),
+        (None, _) => (
+            NO_DATA.to_owned(),
+            match row.covered_units {
+                Some(covered) if covered < row.volume_total => {
+                    format!("cost known for {covered} of {} units", row.volume_total)
+                }
+                _ => String::new(),
+            },
+        ),
+    };
     RowView {
         order_id: row.order_id,
         character: row.character_name.clone(),
@@ -494,9 +591,13 @@ fn row_view(row: &OrderRow, side: Side, now: OffsetDateTime) -> RowView {
         standing_class,
         gap,
         gap_exact,
+        undercut_volume,
         volume: format!("{} / {}", row.volume_remain, row.volume_total),
         amount: format::isk_short(amount_cents),
         amount_exact: format::isk_exact(amount_cents),
+        margin,
+        margin_title,
+        margin_negative: row.margin_cents.is_some_and(|m| m < 0),
         issued: format::eve_time(row.issued),
         left: format::time_left(row.expires_at(), now),
     }
@@ -563,6 +664,7 @@ async fn build_view(
         sell_sort: view_state.sell,
         buy_sort: view_state.buy,
         sell: TableView {
+            has_margin: true,
             headers: headers(&view_state, Side::Sell),
             rows: sell_rows
                 .iter()
@@ -570,6 +672,7 @@ async fn build_view(
                 .collect(),
         },
         buy: TableView {
+            has_margin: false,
             headers: headers(&view_state, Side::Buy),
             rows: buy_rows
                 .iter()

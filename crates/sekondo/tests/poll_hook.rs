@@ -196,6 +196,32 @@ async fn the_wealth_poll_polls_the_wallet_and_the_assets_of_a_character_of_the_a
 }
 
 #[sqlx::test]
+async fn the_wealth_poll_polls_the_transactions_of_a_character_of_the_account(pool: PgPool) {
+    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+    let browser = app.browser();
+    browser.sso_round_trip(&app, "/auth/login", ALICE).await;
+    let token = token(&app, &browser).await;
+    app.stub_control(
+        "transactions",
+        serde_json::json!({"character_id": ALICE, "transactions": [{
+            "transaction_id": 1, "date": "2026-10-01T12:00:00Z", "type_id": 34,
+            "location_id": 60003760, "quantity": 10, "unit_price": 100.25,
+            "is_buy": true, "is_personal": true,
+        }]}),
+    )
+    .await;
+
+    let res = wealth_poll(&app, &browser, &token, ALICE, "transactions").await;
+
+    assert_eq!(res.text().await.unwrap(), "updated");
+    let purchases: i64 = sqlx::query_scalar("SELECT count(*) FROM purchases")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(purchases, 1);
+}
+
+#[sqlx::test]
 async fn the_wealth_poll_refuses_other_accounts_and_unknown_kinds(pool: PgPool) {
     let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
     let alice = app.browser();

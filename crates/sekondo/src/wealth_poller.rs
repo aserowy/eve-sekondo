@@ -5,12 +5,13 @@
 use std::{collections::HashMap, sync::Arc};
 
 use futures_util::StreamExt;
+use secrecy::SecretString;
 use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 
 use crate::{
     clock::Clock,
-    esi::{EsiAsset, EsiClient, EsiError, EsiResponse},
+    esi::{EsiAsset, EsiClient, EsiError, EsiResponse, EsiTransaction},
     events::{Event, EventBus},
     names::{self, STRUCTURE_ID_MIN},
     poller::{
@@ -24,6 +25,11 @@ use crate::{
 const DEFAULT_CONCURRENCY: usize = 4;
 /// ESI caches the assets for an hour, and they are heavy: never poll them more often.
 pub const ASSETS_INTERVAL: Duration = Duration::hours(1);
+/// How often the wallet transactions are polled: ESI caches them for an hour.
+pub const TRANSACTIONS_INTERVAL: Duration = Duration::hours(1);
+/// How many answers one transactions poll asks for at most, so a character with a history that
+/// never reaches a stored transaction cannot keep it busy for ever.
+const MAX_TRANSACTION_REQUESTS: usize = 50;
 /// How many containers deep an asset is followed before its location counts as unknown. Guards
 /// against cycles in the answer.
 const MAX_NESTING: usize = 16;
@@ -33,16 +39,19 @@ const MAX_NESTING: usize = 16;
 pub enum Kind {
     Wallet,
     Assets,
+    /// The purchases among the wallet transactions, for the margin of sell orders.
+    Transactions,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 2] = [Kind::Wallet, Kind::Assets];
+    pub const ALL: [Kind; 3] = [Kind::Wallet, Kind::Assets, Kind::Transactions];
 
     /// The value in `wealth_sync.kind`.
     pub fn as_str(self) -> &'static str {
         match self {
             Kind::Wallet => "wallet",
             Kind::Assets => "assets",
+            Kind::Transactions => "transactions",
         }
     }
 
@@ -55,8 +64,16 @@ impl Kind {
         match self {
             Kind::Wallet => order_interval,
             Kind::Assets => ASSETS_INTERVAL,
+            Kind::Transactions => TRANSACTIONS_INTERVAL,
         }
     }
+}
+
+/// What a transactions poll read from ESI: every transaction of every answer, and the expiry of
+/// the first answer.
+struct Fetched {
+    transactions: Vec<EsiTransaction>,
+    expires_at: Option<OffsetDateTime>,
 }
 
 pub struct WealthPoller {
@@ -93,15 +110,15 @@ impl WealthPoller {
     /// Polls one kind of one character now, whatever its schedule says. Never panics or errors:
     /// every way a poll can end is a [`PollOutcome`], and the database records the details.
     pub async fn poll(&self, character_id: i64, kind: Kind) -> PollOutcome {
-        let outcome = self.run_poll(character_id, kind).await;
-        if outcome == PollOutcome::Updated {
-            self.publish(character_id).await;
+        let (outcome, signal) = self.run_poll(character_id, kind).await;
+        if let Some(event) = signal {
+            self.publish(character_id, event).await;
         }
         outcome
     }
 
-    /// Tells the character's account's open pages that its wealth changed.
-    async fn publish(&self, character_id: i64) {
+    /// Tells the character's account's open pages what changed.
+    async fn publish(&self, character_id: i64, event: Event) {
         match sqlx::query_scalar::<_, uuid::Uuid>(
             "SELECT account_id FROM characters WHERE character_id = $1",
         )
@@ -109,16 +126,21 @@ impl WealthPoller {
         .fetch_optional(&self.pool)
         .await
         {
-            Ok(Some(account)) => self.events.publish(account, Event::WealthUpdated),
+            Ok(Some(account)) => self.events.publish(account, event),
             Ok(None) => {}
             Err(e) => tracing::error!(character_id, "cannot look up the account to signal: {e}"),
         }
     }
 
-    async fn run_poll(&self, character_id: i64, kind: Kind) -> PollOutcome {
-        let now = self.clock.now();
-        let token = match self.tokens.access_token(character_id).await {
-            Ok(token) => token,
+    /// The token to poll with, or how the poll ends without one.
+    async fn token_for(
+        &self,
+        character_id: i64,
+        kind: Kind,
+        now: OffsetDateTime,
+    ) -> Result<SecretString, PollOutcome> {
+        match self.tokens.access_token(character_id).await {
+            Ok(token) => Ok(token),
             Err(TokenError::NeedsRelogin) => {
                 // Make it due again, so it is polled right after it logged in.
                 let _ = sqlx::query(
@@ -130,20 +152,34 @@ impl WealthPoller {
                 .bind(now)
                 .execute(&self.pool)
                 .await;
-                return PollOutcome::NeedsRelogin;
+                Err(PollOutcome::NeedsRelogin)
             }
-            Err(TokenError::UnknownCharacter) => return PollOutcome::Dropped,
+            Err(TokenError::UnknownCharacter) => Err(PollOutcome::Dropped),
             Err(TokenError::Temporary(reason)) => {
-                return self.record_failure(character_id, kind, now, &reason).await;
+                Err(self.record_failure(character_id, kind, now, &reason).await)
             }
+        }
+    }
+
+    /// The outcome of a poll and the signal it sends: a wallet or assets poll changes the wealth
+    /// views; a transactions poll changes the orders page, and only when it stored a purchase.
+    async fn run_poll(&self, character_id: i64, kind: Kind) -> (PollOutcome, Option<Event>) {
+        let now = self.clock.now();
+        let token = match self.token_for(character_id, kind, now).await {
+            Ok(token) => token,
+            Err(outcome) => return (outcome, None),
+        };
+        let wealth = |outcome: PollOutcome| {
+            let signal = (outcome == PollOutcome::Updated).then_some(Event::WealthUpdated);
+            (outcome, signal)
         };
         match kind {
             Kind::Wallet => match self.esi.wallet(character_id, &token).await {
                 Ok(response) => match self.store_wallet(character_id, now, &response).await {
-                    Ok(()) => PollOutcome::Updated,
-                    Err(e) => self.store_failed(character_id, kind, now, e).await,
+                    Ok(()) => wealth(PollOutcome::Updated),
+                    Err(e) => wealth(self.store_failed(character_id, kind, now, e).await),
                 },
-                Err(e) => self.esi_failed(character_id, kind, now, e).await,
+                Err(e) => wealth(self.esi_failed(character_id, kind, now, e).await),
             },
             Kind::Assets => match self.esi.assets(character_id, &token).await {
                 Ok(response) => match self.store_assets(character_id, now, &response).await {
@@ -158,13 +194,144 @@ impl WealthPoller {
                             .flatten()
                             .collect();
                         names::resolve(&self.pool, &self.esi, &token, wanted, now).await;
-                        PollOutcome::Updated
+                        wealth(PollOutcome::Updated)
                     }
-                    Err(e) => self.store_failed(character_id, kind, now, e).await,
+                    Err(e) => wealth(self.store_failed(character_id, kind, now, e).await),
                 },
-                Err(e) => self.esi_failed(character_id, kind, now, e).await,
+                Err(e) => wealth(self.esi_failed(character_id, kind, now, e).await),
             },
+            Kind::Transactions => self.poll_transactions(character_id, now, &token).await,
         }
+    }
+
+    /// Reads the wallet transactions from the newest back until an answer holds a transaction that
+    /// is already stored, is empty, or [`MAX_TRANSACTION_REQUESTS`] answers were read. Stores the
+    /// personal purchases among them and settles the cost of the sell orders they feed.
+    async fn poll_transactions(
+        &self,
+        character_id: i64,
+        now: OffsetDateTime,
+        token: &SecretString,
+    ) -> (PollOutcome, Option<Event>) {
+        let kind = Kind::Transactions;
+        let fetched = match self.fetch_transactions(character_id, token).await {
+            Ok(fetched) => fetched,
+            Err(e) => return (self.esi_failed(character_id, kind, now, e).await, None),
+        };
+        match self.store_transactions(character_id, now, &fetched).await {
+            Ok(stored) => (
+                PollOutcome::Updated,
+                (stored > 0).then_some(Event::OrdersUpdated),
+            ),
+            Err(e) => (self.store_failed(character_id, kind, now, e).await, None),
+        }
+    }
+
+    async fn fetch_transactions(
+        &self,
+        character_id: i64,
+        token: &SecretString,
+    ) -> Result<Fetched, EsiError> {
+        let first = self
+            .esi
+            .wallet_transactions(character_id, token, None)
+            .await?;
+        let expires_at = first.expires_at;
+        let mut transactions = first.body;
+        let mut answer = transactions.clone();
+        for _ in 1..MAX_TRANSACTION_REQUESTS {
+            let ids: Vec<i64> = answer.iter().map(|t| t.transaction_id).collect();
+            // `from_id` includes the transaction it names, so the next answer starts just below.
+            let Some(oldest) = ids.iter().min().copied() else {
+                return Ok(Fetched {
+                    transactions,
+                    expires_at,
+                });
+            };
+            let known: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM purchases WHERE transaction_id = ANY($1))",
+            )
+            .bind(&ids)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| EsiError::Temporary(format!("database error: {e}")))?;
+            if known {
+                return Ok(Fetched {
+                    transactions,
+                    expires_at,
+                });
+            }
+            answer = self
+                .esi
+                .wallet_transactions(character_id, token, Some(oldest - 1))
+                .await?
+                .body;
+            transactions.extend(answer.iter().cloned());
+        }
+        tracing::warn!(
+            character_id,
+            "transactions poll stopped after {MAX_TRANSACTION_REQUESTS} answers"
+        );
+        Ok(Fetched {
+            transactions,
+            expires_at,
+        })
+    }
+
+    /// Stores the personal purchases, once each, settles the cost of the sell orders of the items
+    /// that got one, and updates the sync state, in one transaction. Returns how many are new.
+    async fn store_transactions(
+        &self,
+        character_id: i64,
+        polled_at: OffsetDateTime,
+        fetched: &Fetched,
+    ) -> Result<usize, sqlx::Error> {
+        let purchases: Vec<&EsiTransaction> = fetched
+            .transactions
+            .iter()
+            .filter(|t| t.is_buy && t.is_personal)
+            .collect();
+        let ids: Vec<i64> = purchases.iter().map(|t| t.transaction_id).collect();
+        let types: Vec<i64> = purchases.iter().map(|t| t.type_id).collect();
+        let locations: Vec<i64> = purchases.iter().map(|t| t.location_id).collect();
+        let quantities: Vec<i64> = purchases.iter().map(|t| t.quantity).collect();
+        let prices: Vec<i64> = purchases.iter().map(|t| t.unit_price_cents).collect();
+        let dates: Vec<OffsetDateTime> = purchases.iter().map(|t| t.bought_at).collect();
+
+        let mut tx = self.pool.begin().await?;
+        let mut new_types: Vec<i64> = sqlx::query_scalar(
+            "INSERT INTO purchases
+                 (transaction_id, character_id, type_id, location_id, quantity, unit_price, bought_at)
+             SELECT p.id, $1, p.type_id, p.location_id, p.quantity, p.price_cents::numeric / 100, p.bought_at
+             FROM unnest($2::bigint[], $3::bigint[], $4::bigint[], $5::bigint[], $6::bigint[],
+                         $7::timestamptz[])
+                  AS p(id, type_id, location_id, quantity, price_cents, bought_at)
+             ON CONFLICT (transaction_id) DO NOTHING
+             RETURNING type_id",
+        )
+        .bind(character_id)
+        .bind(&ids)
+        .bind(&types)
+        .bind(&locations)
+        .bind(&quantities)
+        .bind(&prices)
+        .bind(&dates)
+        .fetch_all(&mut *tx)
+        .await?;
+        let stored = new_types.len();
+        new_types.sort_unstable();
+        new_types.dedup();
+        crate::trade::recompute(&mut tx, character_id, &new_types).await?;
+        self.record_success(
+            &mut tx,
+            character_id,
+            Kind::Transactions,
+            polled_at,
+            fetched.expires_at,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(stored)
     }
 
     async fn esi_failed(

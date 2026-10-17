@@ -88,7 +88,7 @@ test('narrowing the selection narrows the locations and fees', async ({ page }) 
   await expect(page.locator('#freshness tbody tr')).toHaveCount(2);
 });
 
-test('a trained skill updates the sales tax without a reload and without re-fetching the order tables', async ({ page }) => {
+test('a trained skill updates the sales tax without a reload and re-fetches the order tables, whose margins depend on it', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
   await stubControl('skills', { character_id: ALICE, skills: stubTradeSkills(4, 5) });
   expect(await pollCharacter(page, ALICE)).toBe('200 updated');
@@ -118,6 +118,6 @@ test('a trained skill updates the sales tax without a reload and without re-fetc
 
   await expect(tax).toHaveText('3.38%');
   expect(fetched).toContain('/orders/freshness');
-  expect(fetched).not.toContain('/orders/tables');
+  expect(fetched).toContain('/orders/tables');
   expect(navigations, 'the page was not reloaded').toEqual([]);
 });

@@ -1,5 +1,6 @@
 import {
-  expect, loginWith, marketPoll, pollCharacter, stubControl, stubMarket, stubMarketOrder, stubOrder, test,
+  expect, feePoll, loginWith, marketPoll, pollCharacter, stubControl, stubMarket, stubMarketOrder, stubOrder,
+  stubTradeSkills, stubTransaction, test, wealthPoll,
 } from '../support/fixtures';
 
 test('sell and buy orders show up after a poll, sortable, with exact amounts on hover', async ({ page }) => {
@@ -122,7 +123,7 @@ test('standing and gap show as badges and text, with the exact gap on hover', as
 
   await page.goto('/orders');
   const dashes = page.locator('#sell-orders #order-1 td').filter({ hasText: '\u2014' });
-  await expect(dashes).toHaveCount(2); // no market data yet
+  await expect(dashes).toHaveCount(4); // no market data yet (standing, gap, undercut volume), and no purchases (margin)
 
   expect(await marketPoll(page)).toBe('200 2');
   await page.goto('/orders');
@@ -168,4 +169,116 @@ test('sorting by standing puts top first, reads the number and keeps orders with
   await page.locator('#sell-orders').getByRole('link', { name: 'Standing' }).click();
   await expect(page).toHaveURL(/sort=standing&dir=desc/);
   await expect.poll(ids).toEqual(['order-3', 'order-2', 'order-4', 'order-1', 'order-5']);
+});
+
+test('the undercut volume shows in both tables, empty for top and a dash without data, and sorts', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  await stubControl('orders', {
+    character_id: 90000001,
+    orders: [
+      stubOrder(1, { type: 34, price: 1_012_500 }),
+      stubOrder(2, { type: 35, price: 100 }),
+      { ...stubOrder(3, { type: 36, price: 100 }), location_id: 1000000000001 },
+      stubOrder(4, { type: 34, price: 50, buy: true }),
+    ],
+  });
+  expect(await pollCharacter(page, 90000001)).toBe('200 updated');
+  await stubMarket([
+    stubMarketOrder(1, { type: 34, price: 1_012_500 }),
+    stubMarketOrder(11, { type: 34, price: 1_000_000, remain: 500 }),
+    stubMarketOrder(12, { type: 34, price: 1_005_000, remain: 500 }),
+    stubMarketOrder(13, { type: 34, price: 1_010_000, remain: 250 }),
+    stubMarketOrder(2, { type: 35, price: 100 }),
+    stubMarketOrder(21, { type: 35, price: 200, remain: 77 }),
+    stubMarketOrder(4, { type: 34, price: 50, buy: true }),
+    stubMarketOrder(41, { type: 34, price: 55, buy: true, range: 'region', remain: 300 }),
+    stubMarketOrder(42, { type: 34, price: 60, buy: true, range: 'region', remain: 1000 }),
+  ]);
+  expect(await marketPoll(page)).toBe('200 3');
+  await page.goto('/orders');
+
+  const volumeCell = (row: string) => page.locator(`${row} td`).nth(5);
+  await expect(page.locator('#sell-orders thead th').nth(5)).toContainText('Undercut volume');
+  await expect(volumeCell('#sell-orders #order-1')).toHaveText('1,250');
+  await expect(volumeCell('#buy-orders #order-4')).toHaveText('1,300');
+  await expect(volumeCell('#sell-orders #order-2')).toHaveText('');
+  await expect(volumeCell('#sell-orders #order-3')).toHaveText('\u2014');
+
+  const ids = async () => page.locator('#sell-orders tbody tr').evaluateAll((rows) => rows.map((r) => r.id));
+  await page.locator('#sell-orders').getByRole('link', { name: 'Undercut volume' }).click();
+  await expect(page).toHaveURL(/sort=undercut-volume&dir=asc/);
+  await expect.poll(ids).toEqual(['order-2', 'order-1', 'order-3']);
+  await page.locator('#sell-orders').getByRole('link', { name: 'Undercut volume' }).click();
+  await expect(page).toHaveURL(/sort=undercut-volume&dir=desc/);
+  await expect.poll(ids).toEqual(['order-1', 'order-2', 'order-3']);
+});
+
+/** Alice has fees known (Accounting 5, Broker Relations 5), and three sell orders of 10 units each: 1 earns, 2 loses, 3 has a cost for 4 of its 10 units. */
+async function aliceWithMargins(page: import('@playwright/test').Page) {
+  await loginWith(page, 'Alice Alpha');
+  await stubControl('skills', { character_id: 90000001, skills: stubTradeSkills(5, 5) });
+  await stubControl('orders', {
+    character_id: 90000001,
+    orders: [
+      stubOrder(1, { type: 34, price: 150, remain: 10 }),
+      stubOrder(2, { type: 36, price: 100, remain: 10 }),
+      stubOrder(3, { type: 35, price: 120, remain: 10 }),
+      stubOrder(4, { type: 34, price: 50, buy: true }),
+    ],
+  });
+  expect(await pollCharacter(page, 90000001)).toBe('200 updated');
+  await stubControl('transactions', {
+    character_id: 90000001,
+    transactions: [
+      stubTransaction(1, { type: 34, quantity: 10 }),
+      stubTransaction(2, { type: 36, quantity: 10 }),
+      stubTransaction(3, { type: 35, quantity: 4 }),
+    ],
+  });
+  expect(await wealthPoll(page, 90000001, 'transactions')).toBe('200 updated');
+  expect(await feePoll(page)).toBe('200 ok');
+  await page.goto('/orders');
+}
+
+test('the margin shows after the value with its exact value and cost on hover, and a loss in the error style', async ({ page }) => {
+  await aliceWithMargins(page);
+
+  const labels = (await page.locator('#sell-orders thead th').allInnerTexts()).map((t) => t.replace(/[\u25B2\u25BC]/g, '').trim());
+  expect(labels.indexOf('Margin')).toBe(labels.indexOf('Value') + 1);
+  const cells = (id: number) => page.locator(`#sell-orders #order-${id} td`);
+  // 10 * 150 * (1 - 3.375% - 1.41%) - 10 * 100 = 428.225
+  const margin = cells(1).nth(labels.indexOf('Margin'));
+  await expect(margin).toHaveText('428.23');
+  await expect(margin).toHaveAttribute('title', '428.23 ISK; cost per unit 100.00 ISK');
+  await expect(margin.locator('.badge.loss')).toHaveCount(0);
+  // 10 * 100 * 0.95215 - 10 * 100 = -47.85
+  const loss = cells(2).nth(labels.indexOf('Margin'));
+  await expect(loss.locator('.badge.loss')).toHaveText('-47.85');
+  const colour = (el: typeof loss) => el.evaluate((e) => getComputedStyle(e).backgroundColor);
+  // The error style gives the badge a background of its own.
+  expect(await colour(loss.locator('.badge.loss'))).not.toBe('rgba(0, 0, 0, 0)');
+});
+
+test('a cost known for part of the units shows a dash and says how many on hover', async ({ page }) => {
+  await aliceWithMargins(page);
+
+  const partial = page.locator('#sell-orders #order-3 td[title^="cost known"]');
+  await expect(partial).toHaveText('\u2014');
+  await expect(partial).toHaveAttribute('title', 'cost known for 4 of 10 units');
+});
+
+test('sorting by margin descending puts the best first and orders without a margin last, and the buy table has no margin', async ({ page }) => {
+  await aliceWithMargins(page);
+
+  const ids = async () => page.locator('#sell-orders tbody tr').evaluateAll((rows) => rows.map((r) => r.id));
+  const header = page.locator('#sell-orders').getByRole('link', { name: 'Margin' });
+  await header.click();
+  await expect(page).toHaveURL(/sort=margin&dir=asc/);
+  await expect.poll(ids).toEqual(['order-2', 'order-1', 'order-3']);
+  await page.locator('#sell-orders').getByRole('link', { name: 'Margin' }).click();
+  await expect(page).toHaveURL(/sort=margin&dir=desc/);
+  await expect.poll(ids).toEqual(['order-1', 'order-2', 'order-3']);
+
+  await expect(page.locator('#buy-orders').getByRole('link', { name: 'Margin' })).toHaveCount(0);
+  await expect(page.locator('#buy-orders #order-4')).toBeVisible();
 });

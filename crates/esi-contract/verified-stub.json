@@ -1,6 +1,6 @@
 {
-  "fingerprint": "aeb15c58333f2899806cf2b3efa451ccf6eb5df1aaa9be9faabdc60377f8aefc",
-  "verified_at": "2026-10-17T09:33:48.261663064Z",
+  "fingerprint": "7c8eb9c70775772d6b2b5420a7071855ee23b08108f4e71cda1587e0319b236f",
+  "verified_at": "2026-10-17T10:13:34.356470793Z",
   "variants": [
     "assets/forbidden",
     "assets/items",
@@ -23,6 +23,9 @@
     "token/access-token-claims",
     "token/authorization-code",
     "token/refresh",
+    "wallet-transactions/forbidden",
+    "wallet-transactions/from-id",
+    "wallet-transactions/newest",
     "wallet/balance",
     "wallet/forbidden"
   ]

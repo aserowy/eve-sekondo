@@ -601,3 +601,119 @@ async fn the_fee_calls_map_errors_like_the_orders_call() {
         );
     }
 }
+
+// ---- wallet transactions ----
+
+fn transaction(id: i64, unit_price: f64, is_buy: bool) -> serde_json::Value {
+    json!({
+        "transaction_id": id, "date": "2026-10-11T12:00:00Z", "type_id": 34,
+        "location_id": 60003760, "quantity": 10, "unit_price": unit_price,
+        "is_buy": is_buy, "is_personal": true, "client_id": 9, "journal_ref_id": id,
+    })
+}
+
+#[tokio::test]
+async fn transactions_are_read_with_unit_prices_in_exact_cents_and_their_expiry() {
+    let h = common::esi_harness().await;
+    let token = h.token(90000001);
+    h.control("esi-expires", json!({"seconds": 300})).await;
+    // 0.29 and 1234567.89 are not exact in binary floating point.
+    h.control(
+        "transactions",
+        json!({"character_id": 90000001, "transactions": [
+            transaction(3, 100.25, true), transaction(2, 0.29, false),
+            transaction(1, 1234567.89, true),
+        ]}),
+    )
+    .await;
+
+    let response = h
+        .client
+        .wallet_transactions(90000001, &token, None)
+        .await
+        .unwrap();
+
+    let cents: Vec<(i64, i64)> = response
+        .body
+        .iter()
+        .map(|t| (t.transaction_id, t.unit_price_cents))
+        .collect();
+    assert_eq!(cents, [(3, 10_025), (2, 29), (1, 123_456_789)]);
+    let first = &response.body[0];
+    assert_eq!(
+        (first.type_id, first.location_id, first.quantity),
+        (34, 60003760, 10)
+    );
+    assert!(first.is_buy && first.is_personal);
+    assert_eq!(
+        first.bought_at,
+        time::macros::datetime!(2026-10-11 12:00 UTC)
+    );
+    let ahead = response.expires_at.unwrap() - h.clock.now();
+    assert!(ahead >= Duration::seconds(299), "{ahead}");
+}
+
+#[tokio::test]
+async fn the_from_id_is_sent_as_a_query_and_asks_for_older_transactions() {
+    let h = common::esi_harness().await;
+    let token = h.token(90000001);
+    h.control(
+        "transactions",
+        json!({"character_id": 90000001, "limit": 2, "transactions": [
+            transaction(1, 1.0, true), transaction(2, 1.0, true), transaction(3, 1.0, true),
+            transaction(4, 1.0, true),
+        ]}),
+    )
+    .await;
+
+    let ids = |r: sekondo::esi::EsiResponse<Vec<sekondo::esi::EsiTransaction>>| -> Vec<i64> {
+        r.body.iter().map(|t| t.transaction_id).collect()
+    };
+    let newest = h.client.wallet_transactions(90000001, &token, None).await;
+    assert_eq!(ids(newest.unwrap()), [4, 3]);
+    let older = h
+        .client
+        .wallet_transactions(90000001, &token, Some(2))
+        .await;
+    assert_eq!(ids(older.unwrap()), [2, 1]);
+}
+
+#[tokio::test]
+async fn the_transactions_call_maps_errors_and_shares_the_wallet_rate_limit_group() {
+    let h = common::esi_harness().await;
+    let token = h.token(90000001);
+    // The gate learns a route's rate-limit group from its first answer.
+    h.client.wallet(90000001, &token).await.unwrap();
+    assert!(matches!(
+        h.client
+            .wallet_transactions(90000001, &h.token(90000002), None)
+            .await,
+        Err(EsiError::Forbidden)
+    ));
+    h.control(
+        "esi-fail-next",
+        json!({"route": "transactions", "status": 503}),
+    )
+    .await;
+    assert!(matches!(
+        h.client.wallet_transactions(90000001, &token, None).await,
+        Err(EsiError::Temporary(_))
+    ));
+
+    h.control(
+        "esi-fail-next",
+        json!({"route": "transactions", "status": 429,
+               "headers": {"retry-after": "30", "x-ratelimit-group": "char-wallet"}}),
+    )
+    .await;
+    assert!(matches!(
+        h.client.wallet_transactions(90000001, &token, None).await,
+        Err(EsiError::Deferred { .. })
+    ));
+    // The balance is in the same group, so it waits too; another group does not.
+    assert!(matches!(
+        h.client.wallet(90000001, &token).await,
+        Err(EsiError::Deferred { .. })
+    ));
+    assert!(h.client.assets(90000001, &token).await.is_ok());
+}
