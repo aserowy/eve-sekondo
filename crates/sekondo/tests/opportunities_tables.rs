@@ -122,13 +122,10 @@ impl Item {
 /// The table of one kind (`classic`, `trend`, ...) of the fragment.
 fn table<'a>(html: &'a str, id: &str) -> &'a str {
     let start = html
-        .find(&format!(r#"id="opportunity-{id}""#))
+        .find(&format!(r#"<section id="{id}""#))
         .unwrap_or_else(|| panic!("no {id} section"));
     let rest = &html[start..];
-    let end = rest[1..]
-        .find(r#"<section id="opportunity-"#)
-        .map_or(rest.len(), |e| e + 1);
-    &rest[..end]
+    &rest[..rest.find("</section>").unwrap_or(rest.len())]
 }
 
 /// The text of a cell of one row.

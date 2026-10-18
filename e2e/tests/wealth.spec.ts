@@ -17,15 +17,15 @@ test('the wealth page opens from the dashboard with the narrowed selection and s
   await twoCharacters(page);
   await wealthPoll(page, 90000001, 'wallet');
   await wealthPoll(page, 90000001, 'assets');
-  await page.getByRole('navigation').getByRole('link', { name: 'Dashboard' }).click();
+  await page.locator('#main-nav').getByRole('link', { name: 'Dashboard' }).click();
   await page.getByRole('checkbox', { name: 'Bob Bravo' }).uncheck();
   await expect(page).toHaveURL(/chars=90000001$/);
 
-  await page.getByRole('navigation').getByRole('link', { name: 'Wealth' }).click();
+  await page.locator('#main-nav').getByRole('link', { name: 'Wealth' }).click();
 
   await expect(page).toHaveURL(/\/wealth\?chars=90000001$/);
   await expect(page.locator('#wealth-items')).toBeVisible();
-  await expect(page.getByRole('navigation').getByRole('link', { name: 'Wealth' })).toHaveAttribute('aria-current', 'page');
+  await expect(page.locator('#main-nav').getByRole('link', { name: 'Wealth' })).toHaveAttribute('aria-current', 'page');
   await unfoldFreshness(page);
   const freshness = page.locator('#wealth-freshness');
   await expect(freshness).toContainText('Alice Alpha');
@@ -40,7 +40,7 @@ test('the wealth page opens from the dashboard with the narrowed selection and s
 
 test('narrowing the selection on the wealth page keeps the page and leaves the default sorting out of the URL', async ({ page }) => {
   await twoCharacters(page);
-  await page.getByRole('navigation').getByRole('link', { name: 'Wealth' }).click();
+  await page.locator('#main-nav').getByRole('link', { name: 'Wealth' }).click();
   await expect(page).toHaveURL(/\/wealth$/);
   await unfoldFreshness(page);
 
@@ -209,7 +209,7 @@ test('the dashboard range is not carried to the wealth page', async ({ page }) =
   await aliceWithEverything(page);
   await page.goto('/dashboard?range=30d');
 
-  await page.getByRole('navigation').getByRole('link', { name: 'Wealth' }).click();
+  await page.locator('#main-nav').getByRole('link', { name: 'Wealth' }).click();
 
   await expect(page).toHaveURL(/\/wealth$/);
   await expect(page.locator('#wealth-range-control [aria-current="true"]')).toHaveText('7 days');
@@ -229,7 +229,7 @@ test('the range chosen on the graph survives a change of the selection', async (
   await openCharacters(page);
   await page.getByRole('button', { name: 'Add character' }).click();
   await page.getByRole('link', { name: 'Bob Bravo' }).click();
-  await page.getByRole('navigation').getByRole('link', { name: 'Wealth' }).click();
+  await page.locator('#main-nav').getByRole('link', { name: 'Wealth' }).click();
 
   await page.locator('#wealth-range-control').getByRole('link', { name: '90 days' }).click();
   await expect(page).toHaveURL(/range=90d$/);

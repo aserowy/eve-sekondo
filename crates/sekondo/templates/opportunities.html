@@ -6,28 +6,36 @@
 <script src="/static/chart.umd.min.js"></script>
 {% endblock %}
 
-{% block controls %}
-<form id="character-filter" data-character-filter data-opportunity-sorts hx-get="/opportunities" hx-trigger="change" hx-target="#opportunities-view" hx-select="#opportunities-view" hx-select-oob="#main-nav" hx-swap="outerHTML" hx-push-url="true">
+{% block subnav %}
+{% let oob = false %}
+{% include "opportunities_section_nav.html" %}
+{% endblock %}
+
+{% block filters %}
+{% let oob = false %}
+<div class="filter-box" id="filter-box">
+<form id="character-filter" data-character-filter data-opportunity-sorts hx-get="/opportunities" hx-trigger="change" hx-target="#opportunities-view" hx-select="#opportunities-view" hx-select-oob="#main-nav, #filter-box, #section-nav" hx-swap="outerHTML" hx-push-url="true">
   {% let characters = view.characters %}
   {% include "character_filter.html" %}
   {% for (name, value) in view.filters.sorts %}
   <input type="hidden" name="{{ name }}" value="{{ value }}">
   {% endfor %}
 </form>
+{% include "opportunities_filters.html" %}
+{% include "opportunities_filter_error.html" %}
+{% include "opportunities_filter_context.html" %}
+</div>
 {% endblock %}
 
 {% block content %}
 <div hx-ext="sse" sse-connect="/events">
 <div id="opportunities-view">
-  <h2 class="station-title">{{ view.station_name }}</h2>
-  {% include "opportunities_filters.html" %}
-  <section id="opportunity-freshness" class="panel" hx-get="{{ view.freshness_url }}" hx-trigger="sse:opportunities-updated, sse:orders-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
-    {% include "opportunities_freshness.html" %}
-  </section>
   <div id="opportunity-tables" hx-get="{{ view.tables_url }}" hx-trigger="sse:opportunities-updated, sse:orders-updated, sse:fees-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
     {% include "opportunities_tables.html" %}
   </div>
+  <section id="opportunity-freshness" class="panel" data-freshness hx-get="{{ view.freshness_url }}" hx-trigger="sse:opportunities-updated, sse:orders-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
+    {% include "opportunities_freshness.html" %}
+  </section>
 </div>
-<aside id="opportunity-detail" role="dialog" aria-modal="false" aria-labelledby="opportunity-detail-title" hidden></aside>
 </div>
 {% endblock %}

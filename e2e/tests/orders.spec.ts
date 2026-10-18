@@ -5,7 +5,7 @@ import {
 
 test('sell and buy orders show up after a poll, sortable, with exact amounts on hover', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
-  await page.getByRole('navigation').getByRole('link', { name: 'Orders' }).click();
+  await page.locator('#main-nav').getByRole('link', { name: 'Orders' }).click();
   await expect(page).toHaveURL(/\/orders$/);
 
   // Nothing has been polled yet.

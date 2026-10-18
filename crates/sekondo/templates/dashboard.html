@@ -6,16 +6,29 @@
 <script src="/static/chart.umd.min.js"></script>
 {% endblock %}
 
-{% block controls %}
-<form id="character-filter" data-character-filter hx-get="/dashboard" hx-trigger="change" hx-target="#dashboard-view" hx-select="#dashboard-view" hx-select-oob="#main-nav" hx-swap="outerHTML" hx-push-url="true">
+{% block filters %}
+<div class="filter-box" id="filter-box">
+<form id="character-filter" data-character-filter hx-get="/dashboard" hx-trigger="change" hx-target="#dashboard-view" hx-select="#dashboard-view" hx-select-oob="#main-nav, #filter-box" hx-swap="outerHTML" hx-push-url="true">
   {% include "character_filter.html" %}
   <input type="hidden" name="range" value="{{ range_name }}">
 </form>
 <div id="range-control" class="range-control" role="group" aria-label="Time range">
   {% for r in view.ranges %}
-  <a href="{{ r.href }}" hx-get="{{ r.href }}" hx-target="#dashboard-view" hx-select="#dashboard-view" hx-select-oob="#main-nav" hx-swap="outerHTML" hx-push-url="true"{% if r.current %} aria-current="true"{% endif %}>{{ r.label }}</a>
+  <a href="{{ r.href }}" hx-get="{{ r.href }}" hx-target="#dashboard-view" hx-select="#dashboard-view" hx-select-oob="#main-nav, #filter-box" hx-swap="outerHTML" hx-push-url="true"{% if r.current %} aria-current="true"{% endif %}>{{ r.label }}</a>
   {% endfor %}
 </div>
+</div>
+{% endblock %}
+
+{% block subnav %}
+<nav class="section-nav" id="section-nav" aria-label="Sections">
+  <a href="#totals">Totals</a>
+  <a href="#characters">Characters</a>
+  <a href="#split">Split &amp; top items</a>
+  <a href="#value">Value</a>
+  <a href="#orders">Orders</a>
+  <a href="#wealth">Wealth</a>
+</nav>
 {% endblock %}
 
 {% block content %}

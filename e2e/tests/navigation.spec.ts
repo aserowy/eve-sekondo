@@ -2,7 +2,7 @@ import { expect, loginWith, test } from '../support/fixtures';
 
 test('navigate between the signed-in pages, and sign out from the navigation', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
-  const nav = page.getByRole('navigation');
+  const nav = page.locator('#main-nav');
 
   // The dashboard is the landing page and shows the totals; the other pages are one navigation link away.
   await expect(page.getByRole('heading', { level: 1 })).toHaveCount(0);
@@ -34,13 +34,13 @@ test('navigate between the signed-in pages, and sign out from the navigation', a
   await nav.getByRole('button', { name: 'Sign out' }).click();
   await expect(page).toHaveURL(/localhost:\d+\/$/);
   await expect(page.getByRole('button', { name: 'Log in with EVE Online' })).toBeVisible();
-  await expect(page.getByRole('navigation')).toHaveCount(0);
+  await expect(page.locator('#main-nav')).toHaveCount(0);
 });
 
 test('characters and sign out are icon-only controls in a single thin top bar', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
   await page.setViewportSize({ width: 1920, height: 1080 });
-  const nav = page.getByRole('navigation');
+  const nav = page.locator('#main-nav');
 
   for (const name of ['Characters', 'Sign out']) {
     const control = nav.getByRole(name === 'Characters' ? 'link' : 'button', { name });

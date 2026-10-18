@@ -1351,7 +1351,7 @@ async fn the_range_changes_only_the_over_time_graphs(pool: PgPool) {
     let week = page(&app, &browser, "/dashboard/summary").await;
     let quarter = page(&app, &browser, "/dashboard/summary?range=90d").await;
 
-    for id in ["tiles", "breakdown"] {
+    for id in ["totals", "breakdown"] {
         let part = |html: &str| between(html, &format!(r#"id="{id}""#), "</section>").to_owned();
         assert_eq!(part(&week), part(&quarter), "{id}");
     }
@@ -1444,7 +1444,7 @@ async fn the_filter_lists_every_character_with_the_selected_ones_checked_and_kee
     );
     assert!(
         form.contains(r##"hx-target="#dashboard-view""##)
-            && form.contains(r##"hx-select-oob="#main-nav""##),
+            && form.contains(r##"hx-select-oob="#main-nav, #filter-box""##),
         "{form}"
     );
     let alice = between(form, "Alice Alpha", "</label>");

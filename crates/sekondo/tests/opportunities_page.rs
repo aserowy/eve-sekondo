@@ -27,7 +27,7 @@ fn freshness(html: &str) -> &str {
         .find(r#"id="opportunity-freshness""#)
         .expect("a freshness section");
     let rest = &html[start..];
-    &rest[..rest.find(r#"id="opportunity-tables""#).unwrap()]
+    &rest[..rest.find("</section>").unwrap()]
 }
 
 async fn book_sync(pool: &PgPool, last_success: Option<OffsetDateTime>, error: Option<&str>) {
@@ -57,7 +57,7 @@ async fn an_unauthenticated_request_is_redirected_to_the_landing_page(pool: PgPo
 }
 
 #[sqlx::test]
-async fn the_page_names_the_station_and_lists_the_freshness_and_the_four_tables_in_order(
+async fn the_page_names_the_station_and_lists_the_four_tables_in_order_with_the_freshness_beside_them(
     pool: PgPool,
 ) {
     let (app, browser) = setup(pool).await;
@@ -65,16 +65,17 @@ async fn the_page_names_the_station_and_lists_the_freshness_and_the_four_tables_
     let html = get(&app, &browser, "/opportunities").await;
 
     assert!(html.contains(STATION_NAME));
+    assert!(!html.contains("<h1"), "no page heading");
     let at = |needle: &str| {
         html.find(needle)
             .unwrap_or_else(|| panic!("{needle} missing"))
     };
     let positions = [
+        at(r#"id="expansion""#),
+        at(r#"id="classic""#),
+        at(r#"id="reversion""#),
+        at(r#"id="trend""#),
         at(r#"id="opportunity-freshness""#),
-        at("Recurring spread expansion"),
-        at("Classic spread trade"),
-        at("Mean reversion"),
-        at(">Trend<"),
     ];
     assert!(positions.windows(2).all(|w| w[0] < w[1]), "{positions:?}");
 }

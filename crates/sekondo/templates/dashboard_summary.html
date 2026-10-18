@@ -1,4 +1,4 @@
-<section class="tiles" id="tiles">
+<section class="tiles" id="totals">
   <article id="tile-sell-value">
     <h2>Sell value</h2>
     <p class="amount" title="{{ view.sell.total.exact }}">{{ view.sell.total.short }}</p>
@@ -26,10 +26,10 @@
     <p class="amount">{{ view.buy_count }}</p>
   </article>
 </section>
-<section class="panel breakdown">
+<section class="panel breakdown" id="characters">
   <h2 class="panel-title">Characters</h2>
   <div class="scroll" data-scroll-key="breakdown">
-  <table class="orders" id="breakdown">
+  <table class="data" id="breakdown">
     <thead>
       <tr>
         <th scope="col">Character</th>
@@ -60,7 +60,7 @@
   </table>
   </div>
 </section>
-<section class="panel split">
+<section class="panel split" id="split">
   <h2 class="panel-title">Per character</h2>
   <div class="chart"><canvas data-chart="split" data-series="{{ view.split_series }}" role="img" aria-label="{{ view.split_label }}"></canvas></div>
 </section>
@@ -81,21 +81,21 @@
   {% endif %}
 </section>
 {% if let Some(history) = view.history %}
-<section class="panel history-value">
+<section class="panel history-value" id="value">
   <h2 class="panel-title">Over time: value</h2>
   <div class="chart"><canvas data-chart="value-history" data-series="{{ history.value.series }}" role="img" aria-label="{{ history.value.label }}"></canvas></div>
 </section>
-<section class="panel history-count">
+<section class="panel history-count" id="orders">
   <h2 class="panel-title">Over time: orders</h2>
   <div class="chart"><canvas data-chart="count-history" data-series="{{ history.count.series }}" role="img" aria-label="{{ history.count.label }}"></canvas></div>
 </section>
 {% else %}
-<section class="panel history-value history-count">
-  <h2 class="panel-title">Over time</h2>
+<section class="panel history-value history-count" id="value">
+  <h2 class="panel-title" id="orders">Over time</h2>
   <p>No history yet.</p>
 </section>
 {% endif %}
-<section class="panel history-wealth">
+<section class="panel history-wealth" id="wealth">
   <h2 class="panel-title">Over time: wealth</h2>
   {% if let Some(wealth) = view.wealth_history %}
   <div class="chart"><canvas data-chart="wealth-history" data-series="{{ wealth.series }}" role="img" aria-label="{{ wealth.label }}"></canvas></div>

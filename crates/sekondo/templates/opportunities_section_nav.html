@@ -1,0 +1,5 @@
+<nav class="section-nav" id="section-nav" aria-label="Sections"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {% for table in view.tables %}
+  <a href="#{{ table.id }}">{{ table.title }} <span class="count">{{ table.rows.len() }}</span></a>
+  {% endfor %}
+</nav>

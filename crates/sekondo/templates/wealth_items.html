@@ -4,11 +4,11 @@
 {% else %}
 <p class="inventory-total">Total value: <strong title="{{ view.items.total_exact }}">{{ view.items.total }}</strong>{% if view.items.unpriced > 0 %} · {{ view.items.unpriced }} unpriced{% endif %}</p>
 <div class="scroll" data-scroll-key="inventory">
-<table class="orders" id="inventory">
+<table class="data" id="inventory">
   <thead>
     <tr>
       {% for h in view.items.headers %}
-      <th scope="col"{% if !h.aria_sort.is_empty() %} aria-sort="{{ h.aria_sort }}"{% endif %}><a href="{{ h.href }}" hx-get="{{ h.href }}" hx-target="#wealth-view" hx-select="#wealth-view" hx-select-oob="#main-nav" hx-swap="outerHTML" hx-push-url="true">{{ h.label }}{{ h.arrow }}</a></th>
+      <th scope="col"{% if !h.aria_sort.is_empty() %} aria-sort="{{ h.aria_sort }}"{% endif %}><a href="{{ h.href }}" hx-get="{{ h.href }}" hx-target="#wealth-view" hx-select="#wealth-view" hx-select-oob="#main-nav, #filter-box" hx-swap="outerHTML" hx-push-url="true">{{ h.label }}{{ h.arrow }}</a></th>
       {% endfor %}
     </tr>
   </thead>

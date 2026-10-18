@@ -6,18 +6,22 @@
 <script src="/static/chart.umd.min.js"></script>
 {% endblock %}
 
-{% block controls %}
-<form id="character-filter" data-character-filter data-default-sort="value" data-default-dir="desc" hx-get="/wealth" hx-trigger="change" hx-target="#wealth-view" hx-select="#wealth-view" hx-select-oob="#main-nav" hx-swap="outerHTML" hx-push-url="true">
+{% block page_type %}page-window{% endblock %}
+
+{% block filters %}
+<div class="filter-box" id="filter-box">
+<form id="character-filter" data-character-filter data-default-sort="value" data-default-dir="desc" hx-get="/wealth" hx-trigger="change" hx-target="#wealth-view" hx-select="#wealth-view" hx-select-oob="#main-nav, #filter-box" hx-swap="outerHTML" hx-push-url="true">
   {% let characters = view.characters %}
   {% include "character_filter.html" %}
   <input type="hidden" name="sort" value="{{ view.sort.key.name() }}">
   <input type="hidden" name="dir" value="{{ view.sort.dir.name() }}">
   <input type="hidden" id="wealth-range" name="range" value="{{ view.range.name() }}">
 </form>
+</div>
 {% endblock %}
 
 {% block content %}
-<div class="fill" hx-ext="sse" sse-connect="/events">
+<div hx-ext="sse" sse-connect="/events">
 <div id="wealth-view">
   <section id="wealth-freshness" class="panel" data-freshness hx-get="{{ view.freshness_url }}" hx-trigger="sse:wealth-updated, sse:orders-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
     {% include "wealth_freshness.html" %}

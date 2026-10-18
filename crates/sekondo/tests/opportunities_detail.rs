@@ -75,7 +75,7 @@ async fn an_unknown_table_is_not_found(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn the_window_shows_the_fees_the_prices_and_how_the_figures_follow(pool: PgPool) {
+async fn the_page_shows_the_fees_the_prices_and_how_the_figures_follow(pool: PgPool) {
     let (app, browser) = setup(pool.clone()).await;
     item(&pool, 34, "Tritanium", "130.00", 100_000_000.0).await;
 
@@ -112,7 +112,7 @@ async fn the_window_shows_the_fees_the_prices_and_how_the_figures_follow(pool: P
 }
 
 #[sqlx::test]
-async fn the_window_names_the_character_whose_fees_are_used(pool: PgPool) {
+async fn the_page_names_the_character_whose_fees_are_used(pool: PgPool) {
     let (app, browser) = setup(pool.clone()).await;
     item(&pool, 34, "Tritanium", "130.00", 100_000_000.0).await;
     for kind in ["skills", "standings"] {
@@ -150,7 +150,7 @@ async fn the_window_names_the_character_whose_fees_are_used(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn an_item_that_dropped_out_is_still_shown_and_the_window_says_so(pool: PgPool) {
+async fn an_item_that_dropped_out_is_still_shown_and_the_page_says_so(pool: PgPool) {
     let (app, browser) = setup(pool.clone()).await;
     // Nothing trades any more: the item is in no table, but its figures are known.
     item(&pool, 34, "Tritanium", "130.00", 0.0).await;
@@ -168,7 +168,7 @@ async fn an_item_that_dropped_out_is_still_shown_and_the_window_says_so(pool: Pg
 }
 
 #[sqlx::test]
-async fn an_item_the_station_no_longer_trades_gets_a_window_that_says_so(pool: PgPool) {
+async fn an_item_the_station_no_longer_trades_gets_a_page_that_says_so(pool: PgPool) {
     let (app, browser) = setup(pool.clone()).await;
     sqlx::query("INSERT INTO names (id, category, name, resolved_at) VALUES (34, 'inventory_type', 'Tritanium', now())")
         .execute(&pool)
@@ -215,7 +215,7 @@ async fn an_item_in_the_table_but_not_in_its_top_fifty_counts_as_not_listed(pool
 }
 
 #[sqlx::test]
-async fn the_page_has_one_fixed_window_that_is_hidden_until_a_row_is_clicked(pool: PgPool) {
+async fn the_opportunities_page_has_no_floating_window_and_its_rows_open_pages(pool: PgPool) {
     let (app, browser) = setup(pool.clone()).await;
     item(&pool, 34, "Tritanium", "130.00", 100_000_000.0).await;
 
@@ -226,28 +226,21 @@ async fn the_page_has_one_fixed_window_that_is_hidden_until_a_row_is_clicked(poo
         .await
         .unwrap();
 
-    let aside = page
-        .split_once(r#"<aside id="opportunity-detail""#)
-        .expect("the window")
-        .1;
-    let tag = aside.split_once('>').unwrap().0;
+    assert!(!page.contains("<aside"), "{page}");
+    assert!(!page.contains(r#"role="dialog""#), "{page}");
+    // A row opens the detail page of its own table and item, and its item is a real link.
     assert!(
-        tag.contains(r#"role="dialog""#) && tag.contains(r#"aria-modal="false""#),
-        "{tag}"
-    );
-    assert!(tag.contains("hidden"), "{tag}");
-    assert!(!tag.contains("draggable"), "{tag}");
-    assert_eq!(page.matches(r#"id="opportunity-detail""#).count(), 1);
-    // Rows load the window for their own table and item.
-    assert!(
-        page.contains(r#"hx-get="/opportunities/detail/classic/34""#),
+        page.contains(r#"data-href="/opportunities/classic/34""#),
         "{page}"
     );
-    assert!(page.contains(r##"hx-target="#opportunity-detail""##));
+    assert!(
+        page.contains(r#"<a href="/opportunities/classic/34">Tritanium</a>"#),
+        "{page}"
+    );
 }
 
 #[sqlx::test]
-async fn rows_carry_the_selection_and_sorting_to_the_window(pool: PgPool) {
+async fn rows_carry_the_selection_and_sorting_to_the_detail_page(pool: PgPool) {
     let (app, browser) = setup(pool.clone()).await;
     browser.sso_round_trip(&app, "/auth/add", 90000002).await;
     item(&pool, 34, "Tritanium", "130.00", 100_000_000.0).await;
@@ -262,12 +255,102 @@ async fn rows_carry_the_selection_and_sorting_to_the_window(pool: PgPool) {
         .replace("&amp;", "&");
 
     assert!(
-        page.contains(r#"hx-get="/opportunities/detail/classic/34?chars=90000002&cs=item&cd=asc""#),
+        page.contains(r#"data-href="/opportunities/classic/34?chars=90000002&cs=item&cd=asc""#),
         "{page}"
     );
 }
 
-// ---- the charts of the window ----
+// ---- the detail page ----
+
+#[sqlx::test]
+async fn the_detail_page_redirects_a_signed_out_request_to_the_landing_page(pool: PgPool) {
+    let app = AppBuilder::new(pool).with_stub().spawn().await;
+
+    let res = app
+        .browser()
+        .get(&app.url("/opportunities/classic/34"))
+        .await;
+
+    assert!(res.status().is_redirection());
+    assert_eq!(Browser::location(&res), "/");
+}
+
+#[sqlx::test]
+async fn the_detail_page_of_an_unknown_table_is_not_found(pool: PgPool) {
+    let (app, browser) = setup(pool).await;
+
+    let res = detail(&app, &browser, "/opportunities/bogus/34").await;
+
+    assert_eq!(res.status(), 404);
+}
+
+#[sqlx::test]
+async fn the_detail_page_is_a_full_page_with_the_filter_box_the_sub_menu_and_the_figures(
+    pool: PgPool,
+) {
+    let (app, browser) = setup(pool.clone()).await;
+    browser.sso_round_trip(&app, "/auth/add", 90000002).await;
+    item(&pool, 34, "Tritanium", "130.00", 100_000_000.0).await;
+
+    let html = detail(
+        &app,
+        &browser,
+        "/opportunities/classic/34?chars=90000002&cs=item&cd=asc",
+    )
+    .await
+    .text()
+    .await
+    .unwrap()
+    .replace("&#38;", "&")
+    .replace("&amp;", "&");
+
+    assert!(html.contains("<html"), "a page");
+    assert!(!html.contains("<h1"), "no page heading");
+    assert!(html.contains(r#"id="filter-box""#) && html.contains(r#"id="character-filter""#));
+    assert!(html.contains(r#"id="filter-context""#) && html.contains("base rates"));
+    // The sub-menu leads back with the selection and sorting, then to the rows of the page.
+    assert!(
+        html.contains(r#"<a href="/opportunities?chars=90000002&cs=item&cd=asc">"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r##"<a href="#figures">Figures</a>"##),
+        "{html}"
+    );
+    assert!(html.contains(r#"id="figures""#) && html.contains("Tritanium"));
+    // The navigation marks Opportunities as the current page.
+    let current = html.split_once(r#"aria-current="page""#).unwrap().0;
+    assert!(
+        current
+            .rsplit_once("<a ")
+            .unwrap()
+            .1
+            .contains("/opportunities"),
+        "{html}"
+    );
+    assert_eq!(figure(&html, "sell"), "129.90");
+}
+
+#[sqlx::test]
+async fn the_detail_fragment_brings_the_sub_menu_and_the_context_text_out_of_band(pool: PgPool) {
+    let (app, browser) = setup(pool.clone()).await;
+    item(&pool, 34, "Tritanium", "130.00", 100_000_000.0).await;
+
+    let html = detail(&app, &browser, "/opportunities/detail/classic/34")
+        .await
+        .text()
+        .await
+        .unwrap();
+
+    assert!(!html.contains("<html"), "a fragment");
+    assert!(
+        html.contains(r#"id="section-nav""#) && html.contains(r#"id="filter-context""#),
+        "{html}"
+    );
+    assert_eq!(html.matches(r#"hx-swap-oob="true""#).count(), 2, "{html}");
+}
+
+// ---- the charts of the page ----
 
 /// The JSON a canvas of this kind carries.
 fn chart(html: &str, kind: &str) -> serde_json::Value {

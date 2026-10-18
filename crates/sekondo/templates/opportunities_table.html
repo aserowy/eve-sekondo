@@ -1,17 +1,17 @@
 <div class="scroll" data-scroll-key="opportunity-{{ table.id }}">
-<table class="opportunities" data-table="{{ table.id }}">
+<table class="data" data-table="{{ table.id }}">
   <thead>
     <tr>
       {% for h in table.headers %}
-      <th scope="col"{% if h.numeric %} class="num"{% endif %}{% if !h.aria_sort.is_empty() %} aria-sort="{{ h.aria_sort }}"{% endif %}><a href="{{ h.href }}" hx-get="{{ h.href }}" hx-target="#opportunities-view" hx-select="#opportunities-view" hx-select-oob="#main-nav" hx-swap="outerHTML" hx-push-url="true">{{ h.label }}{{ h.arrow }}</a></th>
+      <th scope="col"{% if h.numeric %} class="num"{% endif %}{% if !h.aria_sort.is_empty() %} aria-sort="{{ h.aria_sort }}"{% endif %}><a href="{{ h.href }}" hx-get="{{ h.href }}" hx-target="#opportunities-view" hx-select="#opportunities-view" hx-select-oob="#main-nav, #filter-box" hx-swap="outerHTML" hx-push-url="true">{{ h.label }}{{ h.arrow }}</a></th>
       {% endfor %}
     </tr>
   </thead>
   <tbody>
     {% for r in table.rows %}
-    <tr data-type-id="{{ r.type_id }}" hx-get="{{ r.detail_url }}" hx-target="#opportunity-detail" hx-swap="innerHTML" hx-trigger="click" class="clickable">
+    <tr data-type-id="{{ r.type_id }}" data-href="{{ r.href }}">
       {% for c in r.cells %}
-      <td data-col="{{ c.col }}"{% if c.numeric %} class="num"{% endif %}{% if !c.title.is_empty() %} title="{{ c.title }}"{% endif %}>{{ c.text }}{% if c.col == "item" %}{% if r.own_sell %} <mark class="badge corp">own sell</mark>{% endif %}{% if r.own_buy %} <mark class="badge corp">own buy</mark>{% endif %}{% endif %}</td>
+      <td data-col="{{ c.col }}"{% if c.numeric %} class="num"{% endif %}{% if !c.title.is_empty() %} title="{{ c.title }}"{% endif %}>{% if c.col == "item" %}<a href="{{ r.href }}">{{ c.text }}</a>{% else %}{{ c.text }}{% endif %}{% if c.col == "item" %}{% if r.own_sell %} <mark class="badge corp">own sell</mark>{% endif %}{% if r.own_buy %} <mark class="badge corp">own buy</mark>{% endif %}{% endif %}</td>
       {% endfor %}
     </tr>
     {% endfor %}

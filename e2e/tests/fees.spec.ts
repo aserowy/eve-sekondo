@@ -13,7 +13,7 @@ async function aliceTrained(page: Page) {
   await stubControl('skills', { character_id: ALICE, skills: stubTradeSkills(5, 5) });
   expect(await pollCharacter(page, ALICE)).toBe('200 updated');
   expect(await feePoll(page)).toBe('200 ok');
-  await page.getByRole('navigation').getByRole('link', { name: 'Orders' }).click();
+  await page.locator('#main-nav').getByRole('link', { name: 'Orders' }).click();
   await expect(page).toHaveURL(/\/orders$/);
   await unfoldFreshness(page);
 }
@@ -55,7 +55,7 @@ test('a station and a structure are listed side by side, the structure with an u
 test('a character whose skills were not polled yet shows dashes', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
   expect(await pollCharacter(page, ALICE)).toBe('200 updated');
-  await page.getByRole('navigation').getByRole('link', { name: 'Orders' }).click();
+  await page.locator('#main-nav').getByRole('link', { name: 'Orders' }).click();
   await unfoldFreshness(page);
 
   const jita = row(page, JITA);
@@ -74,7 +74,7 @@ test('narrowing the selection narrows the locations and fees', async ({ page }) 
   await stubControl('skills', { character_id: BOB, skills: stubTradeSkills(3, 2) });
   for (const id of [ALICE, BOB]) expect(await pollCharacter(page, id)).toBe('200 updated');
   expect(await feePoll(page)).toBe('200 ok');
-  await page.getByRole('navigation').getByRole('link', { name: 'Orders' }).click();
+  await page.locator('#main-nav').getByRole('link', { name: 'Orders' }).click();
   await unfoldFreshness(page);
 
   const alice = page.locator('#freshness li').filter({ hasText: 'Alice Alpha' });
@@ -101,7 +101,7 @@ test('a trained skill updates the sales tax without a reload and re-fetches the 
     page.waitForResponse((r) => new URL(r.url()).pathname === '/orders/freshness'),
     page.waitForResponse((r) => new URL(r.url()).pathname === '/orders/tables'),
   ]);
-  await page.getByRole('navigation').getByRole('link', { name: 'Orders' }).click();
+  await page.locator('#main-nav').getByRole('link', { name: 'Orders' }).click();
   await opened;
   await unfoldFreshness(page);
   const tax = row(page, JITA).locator('[data-fee="sales-tax"]');

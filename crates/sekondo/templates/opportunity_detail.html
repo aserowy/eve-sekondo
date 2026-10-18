@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+
+{% block title %}{{ view.name }} · Opportunities · Sekondo{% endblock %}
+
+{% block head %}
+<script src="/static/chart.umd.min.js"></script>
+{% endblock %}
+
+{% block subnav %}
+{% let oob = false %}
+{% include "opportunity_detail_section_nav.html" %}
+{% endblock %}
+
+{% block filters %}
+{% let oob = false %}
+<div class="filter-box" id="filter-box">
+<form id="character-filter" data-character-filter data-opportunity-sorts hx-get="{{ view.page_url }}" hx-trigger="change" hx-target="#opportunity-detail-content" hx-select="#opportunity-detail-content" hx-select-oob="#main-nav, #filter-box, #section-nav" hx-swap="outerHTML" hx-push-url="true">
+  {% let characters = view.characters %}
+  {% include "character_filter.html" %}
+  {% for (name, value) in view.sorts %}
+  <input type="hidden" name="{{ name }}" value="{{ value }}">
+  {% endfor %}
+</form>
+{% include "opportunities_filter_context.html" %}
+</div>
+{% endblock %}
+
+{% block content %}
+<div hx-ext="sse" sse-connect="/events">
+<div id="opportunity-detail-content" hx-get="{{ view.refresh_url }}" hx-trigger="sse:opportunities-updated, sse:orders-updated, sse:fees-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
+  {% include "opportunities_detail.html" %}
+</div>
+</div>
+{% endblock %}

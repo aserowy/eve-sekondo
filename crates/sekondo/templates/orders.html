@@ -2,12 +2,16 @@
 
 {% block title %}Orders · Sekondo{% endblock %}
 
-{% block controls %}
+{% block page_type %}page-window{% endblock %}
+
+{% block filters %}
+<div class="filter-box" id="filter-box">
 {% include "orders_filter.html" %}
+</div>
 {% endblock %}
 
 {% block content %}
-<div class="fill" hx-ext="sse" sse-connect="/events">
+<div hx-ext="sse" sse-connect="/events">
 <div id="orders-view">
   <section id="freshness" class="panel" data-freshness hx-get="{{ view.freshness_url }}" hx-trigger="sse:orders-updated, sse:fees-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
     {% include "orders_freshness.html" %}

@@ -95,12 +95,10 @@ async fn item(pool: &PgPool, type_id: i64, name: &str, volume: f64) {
 
 fn rows(html: &str, table: &str) -> Vec<i64> {
     let start = html
-        .find(&format!(r#"id="opportunity-{table}""#))
+        .find(&format!(r#"<section id="{table}""#))
         .unwrap_or_else(|| panic!("no {table} section in {html}"));
     let rest = &html[start..];
-    let section = &rest[..rest[1..]
-        .find(r#"<section id="opportunity-"#)
-        .map_or(rest.len(), |e| e + 1)];
+    let section = &rest[..rest.find("</section>").unwrap_or(rest.len())];
     section
         .split(r#"data-type-id=""#)
         .skip(1)
@@ -159,11 +157,15 @@ async fn saving_stores_the_settings_per_account_and_answers_the_tables(pool: PgP
 
     assert_eq!(res.status(), 200);
     let html = res.text().await.unwrap();
-    assert!(
-        html.contains(r#"id="opportunity-classic""#),
-        "the tables are answered"
-    );
+    assert!(html.contains(r#"id="classic""#), "the tables are answered");
     assert!(!html.contains("<html"), "a fragment");
+    // Out of band: the sub-menu with the new counts, the context text, and the cleared error text.
+    assert!(html.contains(r#"id="section-nav""#), "{html}");
+    assert!(html.contains(r#"id="filter-context""#), "{html}");
+    assert!(
+        html.contains(r#"<span id="filter-error" class="filter-error" role="alert" hx-swap-oob="true"></span>"#),
+        "{html}"
+    );
     assert_eq!(
         stored(&pool).await,
         [(
@@ -244,9 +246,14 @@ async fn a_capital_of_zero_is_rejected_with_a_message_and_the_stored_settings_st
         html.contains("capital") && html.contains("positive"),
         "{html}"
     );
-    // The rejected form is shown again as typed, and nothing was stored.
-    assert!(html.contains(r#"name="min_margin" value="9""#), "{html}");
+    // The answer is the error text of the filter box alone (the form keeps what was typed), and
+    // nothing was stored.
+    assert!(html.contains(r#"id="filter-error""#), "{html}");
     assert!(html.contains(r#"role="alert""#));
+    assert!(
+        !html.contains("<form") && !html.contains(r#"id="classic""#),
+        "{html}"
+    );
     assert_eq!(stored(&pool).await, before);
 }
 
@@ -415,5 +422,36 @@ async fn the_answer_keeps_the_selection_and_the_sorting_of_the_view(pool: PgPool
         rows(&html, "classic"),
         [34, 35],
         "sorted by name, descending"
+    );
+}
+
+#[sqlx::test]
+async fn the_live_tables_answer_brings_the_sub_menu_and_context_but_leaves_the_error_text(
+    pool: PgPool,
+) {
+    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+    let browser = signed_in(&app, ALICE).await;
+    item(&pool, 34, "Tritanium", 10_000_000.0).await;
+
+    let html = browser
+        .get(&app.url("/opportunities/tables"))
+        .await
+        .text()
+        .await
+        .unwrap();
+
+    assert!(html.contains(r#"id="section-nav""#), "{html}");
+    assert!(html.contains(r#"id="filter-context""#), "{html}");
+    assert!(!html.contains(r#"id="filter-error""#), "{html}");
+    // The sub-menu counts the rows of every table.
+    let nav = html.split_once(r#"id="section-nav""#).unwrap().1;
+    let classic = nav.split_once(r##"href="#classic""##).unwrap().1;
+    assert!(
+        classic
+            .split("</a>")
+            .next()
+            .unwrap()
+            .contains(r#"<span class="count">1</span>"#),
+        "{classic}"
     );
 }

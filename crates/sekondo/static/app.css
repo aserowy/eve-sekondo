@@ -15,7 +15,7 @@
   --row: 20px;
   --gap: 4px;
   --radius: 2px;
-  --bar: 31px;
+  --bars-height: 31px;
 }
 
 /* Reset */
@@ -63,6 +63,18 @@ th a { color: inherit; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 td[title] { cursor: help; }
 
+/* One style for every data table: dense rows, striped, highlighted on hover, never wrapping. A table
+   that is wider than its panel scrolls sideways inside the panel's .scroll box. */
+table.data { width: max-content; min-width: 100%; }
+table.data th, table.data td { height: var(--row); padding: 0 6px; line-height: var(--row); white-space: nowrap; }
+table.data:not(.records) tbody tr:nth-child(even) { background: var(--panel-alt); }
+table.data:not(.records) tbody tr:hover { background: var(--hover); }
+table.data tbody tr[data-href] { cursor: pointer; }
+/* The orders tables keep two rows per order, so the stripe is per order. */
+table.data.records tbody.order:nth-of-type(even) { background: var(--panel-alt); }
+table.data.records tbody.order:hover { background: var(--hover); }
+table.data.records tr.details td { color: var(--ink-dim); font-size: 0.92em; }
+
 /* Badges */
 mark.badge {
   display: inline-block;
@@ -109,10 +121,29 @@ mark.badge.top, mark.badge.success { background: var(--success); color: #0b1410;
 .card { max-width: 32rem; margin: 2rem auto; padding: 12px 16px; gap: 6px; align-items: flex-start; }
 .card h1 { font-size: 1.4rem; }
 
+/* Bars: the top bar, the section sub-menu and the filter box stay together at the top of the window. */
+.bars { position: sticky; top: 0; z-index: 10; background: var(--panel); }
+.filter-box {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 12px;
+  min-height: 24px;
+  padding: 2px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.filter-box #filter-context { margin-left: auto; color: var(--ink-dim); }
+
+/* Section sub-menu: one link per row of a scrolling page; the row in view is marked aria-current="location". */
+.section-nav { display: flex; align-items: center; gap: 12px; height: 24px; padding: 0 8px; border-bottom: 1px solid var(--border); background: var(--panel); overflow-x: auto; white-space: nowrap; }
+.section-nav a { color: var(--ink-dim); }
+.section-nav a[aria-current="location"] { color: var(--ink); font-weight: 600; }
+.page-scroll section[id] { scroll-margin-top: calc(var(--bars-height) + 4px); }
+
 /* Navigation */
 .main-nav { display: flex; align-items: center; gap: 12px; height: 30px; padding: 0 8px; border-bottom: 1px solid var(--border); background: var(--panel); }
-.main-nav .links { display: flex; align-items: center; gap: 12px; }
-.main-nav .controls { display: flex; align-items: center; gap: 12px; margin-left: auto; min-width: 0; overflow-x: auto; }
+.main-nav .links { display: flex; flex: 1 1 auto; align-items: center; gap: 12px; }
 .main-nav a[aria-current="page"] { color: var(--ink); font-weight: 600; }
 .icon-control { display: inline-flex; align-items: center; padding: 2px 4px; border: 0; background: none; color: var(--ink-dim); }
 .icon-control:hover, .icon-control[aria-current="page"] { background: none; color: var(--ink); }
@@ -140,10 +171,6 @@ mark.badge.top, mark.badge.success { background: var(--success); color: #0b1410;
 .freshness { display: flex; flex-direction: column; gap: 6px; padding: 4px 6px; }
 .freshness table.fees { width: auto; margin: 2px 0 2px 6px; }
 .freshness table.fees th, .freshness table.fees td { padding: 0 8px 0 0; }
-table.orders th a, table.orders td { white-space: nowrap; }
-table.orders tbody.order:nth-of-type(even) { background: var(--panel-alt); }
-table.orders tbody.order:hover { background: var(--hover); }
-table.orders tr.details td { padding-top: 0; color: var(--ink-dim); font-size: 0.92em; white-space: normal; }
 a.relogin { display: inline-flex; align-items: center; gap: 4px; }
 
 /* Wealth page */
@@ -153,8 +180,15 @@ a.relogin { display: inline-flex; align-items: center; gap: 4px; }
 #wealth-freshness { grid-column: 2; grid-row: 1 / span 2; }
 .inventory-total { padding: 2px 6px; }
 
-/* Pages that fill the window */
-.fill { height: calc(100dvh - var(--bar) - 12px); min-height: 0; }
+/* Window pages fill the window below the bars and never scroll as a whole; scrolling pages stack rows.
+   --bars-height is set by app.js from the bars' measured height. */
+.page-window { height: calc(100dvh - var(--bars-height)); min-height: 0; }
+.page-window > [hx-ext] { height: 100%; }
+/* A table on a scrolling page shows 20 rows (and the header), then scrolls inside its panel. */
+.page-scroll .scroll { flex: 0 1 auto; max-height: calc(var(--row) * 21 + 1px); }
+[data-freshness] .scroll { flex: 1 1 auto; max-height: none; }
+/* On a scrolling page the freshness column stays in place and is as tall as the window below the bars. */
+.page-scroll [data-freshness] { position: sticky; top: calc(var(--bars-height) + var(--gap)); height: calc(100dvh - var(--bars-height) - 12px); }
 
 /* Dashboard: rows, the page scrolls */
 #dashboard-summary {
@@ -169,7 +203,6 @@ a.relogin { display: inline-flex; align-items: center; gap: 4px; }
 .tiles .amount { font-size: 1.6rem; line-height: 1.2; font-variant-numeric: tabular-nums; }
 .tiles .amount[title], .corp-share span[title] { cursor: help; }
 .breakdown { grid-column: 1 / -1; }
-.breakdown .scroll { flex: 0 1 auto; max-height: 20rem; }
 .split, .top-sell, .top-buy { height: 22rem; }
 .history-value, .history-count, .history-wealth { grid-column: 1 / -1; height: 40dvh; min-height: 16rem; }
 
@@ -193,40 +226,21 @@ a.relogin { display: inline-flex; align-items: center; gap: 4px; }
 .range-control a[aria-current="true"] { font-weight: 600; text-decoration: none; color: var(--ink); }
 
 /* Opportunities */
-#opportunities-view { display: flex; flex-direction: column; gap: var(--gap); }
-.station-title { padding: 2px 6px; }
-#opportunities-view .freshness { flex-direction: row; flex-wrap: wrap; gap: 4px 18px; }
-#opportunities-view small.error { color: var(--error); }
-.filters { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px 14px; padding: 3px 6px; }
-.filters input[type="text"], .filters input[type="search"] { width: 9rem; }
-.filters input[name="min_margin"] { width: 4rem; }
-.filters .alert { margin: 0; flex: 1 1 100%; }
-.fees-note, .note { padding: 2px 6px; color: var(--ink-dim); }
+#opportunities-view { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--gap); align-items: start; }
+#opportunity-tables { grid-column: 1; grid-row: 1; display: flex; flex-direction: column; gap: var(--gap); min-width: 0; }
+#opportunity-freshness { grid-column: 2; grid-row: 1; }
+.freshness small.error { color: var(--error); }
+.filter-box form { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; }
+.filter-box input[type="text"], .filter-box input[type="search"] { width: 9rem; padding: 0 4px; }
+.filter-box input[name="min_margin"] { width: 4rem; }
+.filter-box .filter-error { color: var(--error); }
+.filter-box .filter-error:empty { display: none; }
+.section-nav .count { margin-left: 2px; color: var(--ink-dim); font-variant-numeric: tabular-nums; }
+.note { padding: 2px 6px; color: var(--ink-dim); }
 
-/* The opportunity detail window: fixed, never dragged, never blocking. */
-#opportunity-detail {
-  position: fixed;
-  top: calc(var(--bar) + 8px);
-  right: 8px;
-  z-index: 20;
-  width: min(40vw, 36rem);
-  max-height: calc(100dvh - var(--bar) - 16px);
-  overflow: auto;
-  border: 1px solid var(--border);
-  background: var(--panel);
-  box-shadow: 0 4px 16px rgb(0 0 0 / 40%);
-}
-#opportunity-detail[hidden] { display: none; }
-.detail-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-right: 4px; }
-.detail-head .panel-title { flex: 1 1 auto; }
+/* The opportunity detail page: the figures, then each chart on a row of its own. */
+#opportunity-detail-content { display: flex; flex-direction: column; gap: var(--gap); }
+.chart-row { height: 16rem; }
 .figures th { text-align: left; font-weight: 500; }
 .figures td.how { color: var(--ink-dim); font-size: 0.92em; }
-table.opportunities tbody tr.clickable { cursor: pointer; }
-table.opportunities tbody tr.clickable:hover { background: var(--hover); }
-/* While the window is open the page makes room for it, so it never covers a control. */
-body:has(#opportunity-detail:not([hidden])) #opportunities-view { margin-right: calc(min(40vw, 36rem) + 12px); }
-.detail-chart { margin: 0; padding: 2px 6px 6px; }
-.detail-chart figcaption { color: var(--ink-dim); padding: 2px 0; }
-.detail-chart .chart { height: 10rem; }
 .next-occurrences { padding: 2px 6px; }
-.next-occurrences h3 { color: var(--ink-dim); font-weight: 500; }

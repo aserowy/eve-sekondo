@@ -1,6 +1,5 @@
-<p id="opportunity-fees" class="fees-note">{{ view.fees_note }}</p>
 {% for table in view.tables %}
-<section id="opportunity-{{ table.id }}" class="panel">
+<section id="{{ table.id }}" class="panel">
   <h2 class="panel-title">{{ table.title }}</h2>
   {% if table.id == "expansion" && view.freshness.own_days < view.freshness.own_days_needed as i64 %}
   <p class="note">Collecting hourly data ({{ view.freshness.own_days }}/{{ view.freshness.own_days_needed }} days)</p>

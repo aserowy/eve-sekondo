@@ -12,7 +12,7 @@ async function twoCharacters(page: Page) {
 }
 
 async function openDashboard(page: Page) {
-  await page.getByRole('navigation').getByRole('link', { name: 'Dashboard' }).click();
+  await page.locator('#main-nav').getByRole('link', { name: 'Dashboard' }).click();
   await expect(page).toHaveURL(/\/dashboard$/);
 }
 
@@ -199,7 +199,7 @@ test('narrowing the selection keeps the range, and the selection travels to the 
   // The selection is carried by the navigation to the orders page.
   await page.getByRole('checkbox', { name: 'Alice Alpha' }).uncheck();
   await expect(page).toHaveURL(/chars=90000002&range=30d$/);
-  await page.getByRole('navigation').getByRole('link', { name: 'Orders' }).click();
+  await page.locator('#main-nav').getByRole('link', { name: 'Orders' }).click();
   await expect(page).toHaveURL(/\/orders\?chars=90000002$/);
   await expect(page.locator('#sell-orders tbody.order')).toHaveCount(1);
   await expect(page.locator('#order-2')).toBeVisible();

@@ -4,6 +4,96 @@ htmx.config.includeIndicatorStyles = false;
 // No eval: the CSP forbids it, and nothing here needs hx-on or hx-vals javascript.
 htmx.config.allowEval = false;
 
+// ---- bars ----
+// The top bar, the sub-menu and the filter box share one wrapper (header.bars). Its height changes
+// when the filter box wraps, so it is measured and published as --bars-height: window pages are
+// that much shorter than the window, and sticky columns and jump targets sit below it.
+function watchBars() {
+  const bars = document.getElementById('bars');
+  if (!bars) return;
+  const publish = () => document.documentElement.style.setProperty('--bars-height', `${bars.getBoundingClientRect().height}px`);
+  publish();
+  new ResizeObserver(publish).observe(bars);
+}
+
+document.addEventListener('DOMContentLoaded', watchBars);
+
+// ---- section sub-menu ----
+// The links of #section-nav jump to the rows of a scrolling page through plain URL fragments. The
+// link of the row being read is marked aria-current="location": right after a jump it is the row
+// jumped to (until the user scrolls on their own, with wheel, keys, touch or the scrollbar);
+// otherwise it is the last row whose top has reached the bottom edge of the bars, or the last row
+// once the page is scrolled to its end. Only the marker changes: scrolling never touches the URL.
+let jumpTarget = null;
+
+function markSection() {
+  const links = [...document.querySelectorAll('#section-nav a[href^="#"]')]
+    .map((link) => ({ link, row: document.getElementById(link.hash.slice(1)) }))
+    .filter((entry) => entry.row);
+  if (links.length === 0) return;
+
+  let current = jumpTarget && links.find((entry) => entry.row.id === jumpTarget);
+  if (!current) {
+    const root = document.documentElement;
+    const scrolls = root.scrollHeight > window.innerHeight + 1;
+    if (scrolls && window.scrollY + window.innerHeight >= root.scrollHeight - 1) {
+      current = links[links.length - 1];
+    } else {
+      const line = document.getElementById('bars').getBoundingClientRect().bottom + 1;
+      current = links.filter((entry) => entry.row.getBoundingClientRect().top <= line).pop() ?? links[0];
+    }
+  }
+  for (const entry of links) {
+    if (entry === current) entry.link.setAttribute('aria-current', 'location');
+    else entry.link.removeAttribute('aria-current');
+  }
+}
+
+let markScheduled = false;
+function scheduleMark() {
+  if (markScheduled) return;
+  markScheduled = true;
+  requestAnimationFrame(() => {
+    markScheduled = false;
+    markSection();
+  });
+}
+
+const SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ']);
+function userScrolled() {
+  jumpTarget = null;
+  scheduleMark();
+}
+
+window.addEventListener('scroll', scheduleMark, { passive: true });
+window.addEventListener('resize', scheduleMark);
+window.addEventListener('load', scheduleMark);
+window.addEventListener('hashchange', () => {
+  jumpTarget = location.hash.slice(1) || null;
+  scheduleMark();
+});
+window.addEventListener('wheel', userScrolled, { passive: true });
+window.addEventListener('touchmove', userScrolled, { passive: true });
+window.addEventListener('keydown', (event) => {
+  if (SCROLL_KEYS.has(event.key)) userScrolled();
+});
+document.addEventListener('pointerdown', (event) => {
+  // A press on the page's own scrollbar targets the root element.
+  if (event.target === document.documentElement) userScrolled();
+});
+document.addEventListener('click', (event) => {
+  const link = event.target instanceof Element && event.target.closest('#section-nav a[href^="#"]');
+  if (!link) return;
+  jumpTarget = link.hash.slice(1);
+  scheduleMark();
+});
+document.addEventListener('DOMContentLoaded', () => {
+  jumpTarget = location.hash.slice(1) || null;
+  markSection();
+});
+// Swapped markup (a live refresh, a new sub-menu) gets its marker back.
+document.addEventListener('htmx:load', scheduleMark);
+
 // The character filter is a list of checkboxes, but the URL carries one comma-separated `chars`
 // value (and none at all when every character is selected), plus whatever else the page's view
 // state holds, only when it is not the default: the orders page's sorting, the dashboard's range.
@@ -236,7 +326,7 @@ const COLORS = {
   Inventory: INVENTORY_COLOR,
   // The total is not a component: a neutral line that stands out from every component colour.
   Wealth: TOTAL_COLOR,
-  // The opportunity detail window.
+  // The opportunity detail page.
   'Best buy': BUY_COLOR,
   'Best sell': SELL_COLOR,
   Average: TOTAL_COLOR,
@@ -457,7 +547,7 @@ function barsConfig(data, yAxis) {
 }
 
 const CHART_KINDS = {
-  // The opportunity detail window.
+  // The opportunity detail page.
   'trend-price': (data) => lineConfig(data, priceAxis()),
   'reversion-price': (data) => lineConfig(data, priceAxis()),
   'classic-prices': (data) => lineConfig(data, priceAxis()),
@@ -497,25 +587,13 @@ document.addEventListener('htmx:load', (event) => {
   if (typeof Chart !== 'undefined' && event.detail.elt instanceof Element) drawCharts(event.detail.elt);
 });
 
-// ---- the opportunity detail window ----
-// One fixed window beside the tables: a row click loads it (htmx), it is shown once it has content,
-// and Escape or its close button empties and hides it. It has no drag handling at all.
-function closeOpportunityDetail() {
-  const window = document.getElementById('opportunity-detail');
-  if (!window) return;
-  window.replaceChildren();
-  window.hidden = true;
-}
-
-document.addEventListener('htmx:afterSwap', (event) => {
-  const target = event.detail.target;
-  if (target instanceof HTMLElement && target.id === 'opportunity-detail') target.hidden = false;
-});
-
+// ---- rows that open a page ----
+// A table row with a data-href opens that page when clicked anywhere on it. Its item cell also holds a
+// real link, so keyboards, middle clicks and "open in a new tab" work without this handler; clicks
+// on links and controls inside the row, and clicks with a modifier key, are left to the browser.
 document.addEventListener('click', (event) => {
-  if (event.target instanceof Element && event.target.closest('[data-close-detail]')) closeOpportunityDetail();
-});
-
-document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') closeOpportunityDetail();
+  if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  if (!(event.target instanceof Element) || event.target.closest('a, button, input, select, textarea, label')) return;
+  const row = event.target.closest('tr[data-href]');
+  if (row) location.assign(row.dataset.href);
 });

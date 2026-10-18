@@ -74,6 +74,16 @@ async fn own_snapshot_days(pool: &PgPool) -> Result<i64, sqlx::Error> {
     .await
 }
 
+impl FreshnessView {
+    /// What the collapsed freshness strip counts: a stale book, a failed last book refresh and a
+    /// failed last history run, one each.
+    pub fn warnings(&self) -> usize {
+        usize::from(self.book_stale)
+            + usize::from(self.book_error.is_some())
+            + usize::from(self.history_error.is_some())
+    }
+}
+
 pub async fn freshness(pool: &PgPool, now: OffsetDateTime) -> Result<FreshnessView, sqlx::Error> {
     let rows: Vec<SyncRow> = sqlx::query_as(
         "SELECT kind, last_success_at, last_error FROM station_sync
@@ -124,8 +134,8 @@ pub struct CellView {
 
 pub struct RowView {
     pub type_id: i64,
-    /// Where the detail window of the row loads from.
-    pub detail_url: String,
+    /// The detail page of the row's item in its table.
+    pub href: String,
     pub cells: Vec<CellView>,
     pub own_buy: bool,
     pub own_sell: bool,
@@ -138,7 +148,7 @@ pub struct TableView {
     pub rows: Vec<RowView>,
 }
 
-/// The filter bar: the stored (or just rejected) values, and the view state it carries along so
+/// The filter box: the stored (or just rejected) values, and the view state it carries along so
 /// that saving keeps the selection and the sorting.
 pub struct FiltersView {
     pub form: Form,
@@ -207,7 +217,7 @@ impl ViewState {
         }
     }
 
-    /// The hidden inputs of the filter bar: every table's sorting, whatever it is.
+    /// The hidden inputs of the filter box: every table's sorting, whatever it is.
     fn hidden_sorts(&self) -> Vec<(&'static str, String)> {
         let mut hidden = Vec::new();
         for table in Table::ALL {
@@ -515,11 +525,7 @@ fn row_view(table: Table, row: &Row, page_query: &str) -> RowView {
     };
     RowView {
         type_id: row.type_id,
-        detail_url: format!(
-            "/opportunities/detail/{}/{}{page_query}",
-            table.id(),
-            row.type_id
-        ),
+        href: format!("/opportunities/{}/{}{page_query}", table.id(), row.type_id),
         cells: table.keys().into_iter().map(cell).collect(),
         own_buy: row.own_buy,
         own_sell: row.own_sell,
@@ -534,9 +540,10 @@ struct OpportunitiesPage {
     view: OpportunitiesView,
 }
 
+/// The filter box's error text alone: the answer to a rejected filter form.
 #[derive(Template)]
-#[template(path = "opportunities_filters.html")]
-struct FiltersFragment {
+#[template(path = "opportunities_filter_error_fragment.html")]
+struct FilterErrorFragment {
     view: OpportunitiesView,
 }
 
@@ -546,10 +553,13 @@ struct FreshnessFragment {
     view: OpportunitiesView,
 }
 
+/// The four tables, and out of band the sub-menu (with the row counts) and the filter box's
+/// context text. A saved filter also clears the box's error text.
 #[derive(Template)]
-#[template(path = "opportunities_tables.html")]
+#[template(path = "opportunities_tables_fragment.html")]
 struct TablesFragment {
     view: OpportunitiesView,
+    clear_error: bool,
 }
 
 async fn load(
@@ -621,14 +631,17 @@ pub async fn tables(
     query: ViewQuery,
 ) -> Response {
     match load(&state, account, &session, &query).await {
-        Ok((view, _)) => pages::render(&TablesFragment { view }),
+        Ok((view, _)) => pages::render(&TablesFragment {
+            view,
+            clear_error: false,
+        }),
         Err(response) => *response,
     }
 }
 
-/// Saves the filter bar. The form carries the view state (selection and sorting) as hidden
+/// Saves the filter box. The form carries the view state (selection and sorting) as hidden
 /// fields, so the answer is the tables of the view the user is looking at; a rejected form gets
-/// the filter bar back with the reason and nothing is stored.
+/// the reason for the filter box's error text and nothing is stored.
 pub async fn save_settings(
     State(state): State<AppState>,
     account: CurrentAccount,
@@ -643,23 +656,27 @@ pub async fn save_settings(
                 return pages::internal_error(e);
             }
             match load(&state, account, &session, &query).await {
-                Ok((view, _)) => pages::render(&TablesFragment { view }),
+                Ok((view, _)) => pages::render(&TablesFragment {
+                    view,
+                    clear_error: true,
+                }),
                 Err(response) => *response,
             }
         }
         Err(message) => {
             let rejected = Rejected { form, message };
             match load_with(&state, account, &session, &query, Some(rejected)).await {
-                Ok((view, _)) => {
-                    pages::render_with(StatusCode::UNPROCESSABLE_ENTITY, &FiltersFragment { view })
-                }
+                Ok((view, _)) => pages::render_with(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    &FilterErrorFragment { view },
+                ),
                 Err(response) => *response,
             }
         }
     }
 }
 
-// ---- the detail window ----
+// ---- the detail page ----
 
 pub struct FigureView {
     pub key: &'static str,
@@ -669,16 +686,31 @@ pub struct FigureView {
     pub how: String,
 }
 
-/// One chart of the window: its kind (how the script draws it), a title, and its data as JSON.
+/// One chart row of the page: its kind (how the script draws it), a title, and its data as JSON.
 pub struct ChartView {
     pub kind: &'static str,
     pub title: &'static str,
     pub json: String,
 }
 
+/// One link of the detail page's sub-menu: the id of a row and its label.
+pub struct SectionView {
+    pub id: String,
+    pub label: String,
+}
+
 pub struct DetailView {
     pub name: String,
     pub table_title: &'static str,
+    pub station_name: &'static str,
+    pub characters: Vec<FilterEntry>,
+    /// `(name, value)` of the hidden inputs of the character filter: every table's sorting.
+    pub sorts: Vec<(&'static str, String)>,
+    /// The opportunities page with this view's selection and sorting.
+    pub back_url: String,
+    /// The detail page itself, which the character filter loads again.
+    pub page_url: String,
+    pub sections: Vec<SectionView>,
     pub charts: Vec<ChartView>,
     /// The starts of the next occurrences of the window of an expansion row.
     pub next_occurrences: Vec<String>,
@@ -686,7 +718,7 @@ pub struct DetailView {
     pub reason: Option<String>,
     pub fees_note: String,
     pub figures: Vec<FigureView>,
-    /// Where this window's content loads from, so a live refresh can fetch it again.
+    /// Where this page's content loads from, so a live refresh can fetch it again.
     pub refresh_url: String,
 }
 
@@ -1085,15 +1117,126 @@ async fn detail_charts(
     Ok((views, next_occurrences))
 }
 
+/// The rows of the detail page, and out of band its sub-menu and context text.
 #[derive(Template)]
-#[template(path = "opportunities_detail.html")]
+#[template(path = "opportunities_detail_fragment.html")]
 struct DetailFragment {
     view: DetailView,
 }
 
-/// The detail window of one item in one table: the fees, the shared figures with how they
-/// follow, and whether the table lists the item right now. An item that dropped out is still
-/// shown, from what is known of it.
+#[derive(Template)]
+#[template(path = "opportunity_detail.html")]
+struct DetailPage {
+    csrf_token: String,
+    nav: Option<Nav>,
+    view: DetailView,
+}
+
+/// What the detail page and its fragment show of one item in one table: the fees, the shared
+/// figures with how they follow, the charts, and whether the table lists the item right now. An
+/// item that dropped out is still shown, from what is known of it.
+async fn build_detail(
+    state: &AppState,
+    account: CurrentAccount,
+    session: &Session,
+    table_id: &str,
+    type_id: i64,
+    query: &ViewQuery,
+) -> Result<(DetailView, CharacterSelection), Box<Response>> {
+    let Some(table) = Table::from_id(table_id) else {
+        return Err(Box::new(StatusCode::NOT_FOUND.into_response()));
+    };
+    let env = match environment(state, account.id, query).await {
+        Ok(Some(env)) => env,
+        Ok(None) => {
+            let _ = session.flush().await;
+            return Err(Box::new(Redirect::to("/").into_response()));
+        }
+        Err(e) => return Err(Box::new(pages::internal_error(e))),
+    };
+    let context = env.context();
+    let sort = env.view_state.sort(table);
+    let page_query = env.view_state.query();
+    let refresh_url = format!("/opportunities/detail/{}/{type_id}{page_query}", table.id());
+    let fees_note = fees_note(&env.fee_choice, |id| env.character_name(id));
+    let (name, charts, next_occurrences, reason, figures) =
+        match tables::detail(table, type_id, &env.stats, &context, sort) {
+            Some(detail) => {
+                let (charts, next_occurrences) =
+                    match detail_charts(&state.pool, table, detail.stats, env.now).await {
+                        Ok(drawn) => drawn,
+                        Err(e) => return Err(Box::new(pages::internal_error(e))),
+                    };
+                (
+                    detail.stats.display_name(),
+                    charts,
+                    next_occurrences,
+                    detail.reason.clone(),
+                    detail_figures(table, &detail, &context),
+                )
+            }
+            None => {
+                let name: Option<String> =
+                    match sqlx::query_scalar("SELECT name FROM names WHERE id = $1")
+                        .bind(type_id)
+                        .fetch_optional(&state.pool)
+                        .await
+                    {
+                        Ok(name) => name.flatten(),
+                        Err(e) => return Err(Box::new(pages::internal_error(e))),
+                    };
+                (
+                    name.unwrap_or_else(|| format!("Type {type_id}")),
+                    Vec::new(),
+                    Vec::new(),
+                    Some("The station no longer trades it.".to_owned()),
+                    Vec::new(),
+                )
+            }
+        };
+    let mut sections = vec![SectionView {
+        id: "figures".to_owned(),
+        label: "Figures".to_owned(),
+    }];
+    sections.extend(charts.iter().map(|chart| SectionView {
+        id: chart.kind.to_owned(),
+        label: chart.title.to_owned(),
+    }));
+    if !next_occurrences.is_empty() {
+        sections.push(SectionView {
+            id: "next".to_owned(),
+            label: "Next occurrences".to_owned(),
+        });
+    }
+    let view = DetailView {
+        name,
+        table_title: table.title(),
+        station_name: STATION_NAME,
+        characters: env
+            .characters
+            .iter()
+            .map(|(id, name)| FilterEntry {
+                id: *id,
+                name: name.clone(),
+                checked: env.selection.contains(*id),
+            })
+            .collect(),
+        sorts: env.view_state.hidden_sorts(),
+        back_url: format!("/opportunities{page_query}"),
+        page_url: format!("/opportunities/{}/{type_id}", table.id()),
+        sections,
+        charts,
+        next_occurrences,
+        reason,
+        fees_note,
+        figures,
+        refresh_url,
+    };
+    Ok((view, env.selection.clone()))
+}
+
+/// The rows of the detail page only, for live refreshes (and the sub-menu and context text out of
+/// band).
 pub async fn detail(
     State(state): State<AppState>,
     account: CurrentAccount,
@@ -1101,64 +1244,77 @@ pub async fn detail(
     Path((table_id, type_id)): Path<(String, i64)>,
     query: ViewQuery,
 ) -> Response {
-    let Some(table) = Table::from_id(&table_id) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let env = match environment(&state, account.id, &query).await {
-        Ok(Some(env)) => env,
-        Ok(None) => {
-            let _ = session.flush().await;
-            return Redirect::to("/").into_response();
-        }
+    match build_detail(&state, account, &session, &table_id, type_id, &query).await {
+        Ok((view, _)) => pages::render(&DetailFragment { view }),
+        Err(response) => *response,
+    }
+}
+
+/// The detail page of one item in one table.
+pub async fn detail_page(
+    State(state): State<AppState>,
+    account: CurrentAccount,
+    session: Session,
+    Path((table_id, type_id)): Path<(String, i64)>,
+    query: ViewQuery,
+) -> Response {
+    let (view, selection) =
+        match build_detail(&state, account, &session, &table_id, type_id, &query).await {
+            Ok(loaded) => loaded,
+            Err(response) => return *response,
+        };
+    let csrf_token = match csrf::token(&session).await {
+        Ok(token) => token,
         Err(e) => return pages::internal_error(e),
     };
-    let context = env.context();
-    let sort = env.view_state.sort(table);
-    let refresh_url = format!(
-        "/opportunities/detail/{}/{type_id}{}",
-        table.id(),
-        env.view_state.query()
-    );
-    let fees_note = fees_note(&env.fee_choice, |id| env.character_name(id));
-    let view = match tables::detail(table, type_id, &env.stats, &context, sort) {
-        Some(detail) => {
-            let (charts, next_occurrences) =
-                match detail_charts(&state.pool, table, detail.stats, env.now).await {
-                    Ok(drawn) => drawn,
-                    Err(e) => return pages::internal_error(e),
-                };
-            DetailView {
-                name: detail.stats.display_name(),
-                table_title: table.title(),
-                charts,
-                next_occurrences,
-                reason: detail.reason.clone(),
-                fees_note,
-                figures: detail_figures(table, &detail, &context),
-                refresh_url,
-            }
+    pages::render(&DetailPage {
+        csrf_token,
+        nav: Some(Nav::new(Page::Opportunities).with_chars_query(selection.query())),
+        view,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FreshnessView;
+
+    fn healthy() -> FreshnessView {
+        FreshnessView {
+            book_last: Some("2026-10-18 10:00".to_owned()),
+            book_stale: false,
+            book_waiting: false,
+            book_error: None,
+            history_last: Some("2026-10-18 09:00".to_owned()),
+            history_error: None,
+            own_days: 7,
+            own_days_needed: 7,
+            own_days_text: "7 days of own snapshots".to_owned(),
         }
-        None => {
-            let name: Option<String> =
-                match sqlx::query_scalar("SELECT name FROM names WHERE id = $1")
-                    .bind(type_id)
-                    .fetch_optional(&state.pool)
-                    .await
-                {
-                    Ok(name) => name.flatten(),
-                    Err(e) => return pages::internal_error(e),
-                };
-            DetailView {
-                name: name.unwrap_or_else(|| format!("Type {type_id}")),
-                table_title: table.title(),
-                charts: Vec::new(),
-                next_occurrences: Vec::new(),
-                reason: Some("The station no longer trades it.".to_owned()),
-                fees_note,
-                figures: Vec::new(),
-                refresh_url,
-            }
-        }
-    };
-    pages::render(&DetailFragment { view })
+    }
+
+    #[test]
+    fn a_healthy_station_sync_has_no_warnings() {
+        assert_eq!(healthy().warnings(), 0);
+    }
+
+    #[test]
+    fn a_stale_book_with_a_failed_refresh_counts_twice() {
+        let view = FreshnessView {
+            book_stale: true,
+            book_error: Some("503".to_owned()),
+            ..healthy()
+        };
+        assert_eq!(view.warnings(), 2);
+    }
+
+    #[test]
+    fn a_failed_history_run_counts_once_more() {
+        let view = FreshnessView {
+            book_stale: true,
+            book_error: Some("503".to_owned()),
+            history_error: Some("timeout".to_owned()),
+            ..healthy()
+        };
+        assert_eq!(view.warnings(), 3);
+    }
 }

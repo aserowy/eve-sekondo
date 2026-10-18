@@ -3,22 +3,16 @@ schema: spec-driven
 context: |
   Tech stack: Rust, axum, htmx, PostgreSQL, and TimescaleDB
   Domain: eve online tooling
+  Planning workflow: when exploring, proposing or reviewing a change, use the grilling skill to settle open decisions with the user before writing artifacts or conclusions.
 
 rules:
+  proposal:
+    - Use the grilling skill to settle open decisions with the user before writing the proposal
   tasks:
     - Break tasks into chunks of max 2 hours
     - Every UI task includes a Playwright test
 
 operations:
-  explore:
-    guidance:
-      - Use the grilling skill
-  propose:
-    guidance:
-      - Use the grilling skill
-  review:
-    guidance:
-      - Use the grilling skill
   apply:
     guidance:
       - Keep test summaries concise

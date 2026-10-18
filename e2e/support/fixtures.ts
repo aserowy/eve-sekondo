@@ -277,7 +277,7 @@ export async function loginWith(page: Page, characterName: string): Promise<void
 
 /** Follow the navigation to the characters page. */
 export async function openCharacters(page: Page): Promise<void> {
-  await page.getByRole('navigation').getByRole('link', { name: 'Characters' }).click();
+  await page.locator('#main-nav').getByRole('link', { name: 'Characters' }).click();
   await expect(page).toHaveURL(/\/characters$/);
 }
 

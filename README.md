@@ -163,19 +163,34 @@ sync can be switched off with `STATION_SYNC=off`.
   figures after every refresh, the indicators (volume, volatility, SMA 5/20, Bollinger %B, RSI 14, the
   fresh SMA crossing) after a history pass, and the recurring spread window when the hourly rollup
   advanced. All maths are pure functions in `crates/sekondo/src/opportunities/analysis.rs`.
-- **The page** shows four tables, each at most 50 rows, sorted by ISK/day unless you sort a column (each
-  table keeps its own sorting in the URL: `xs`/`xd`, `cs`/`cd`, `ms`/`md`, `ts`/`td`): recurring spread
-  expansion, classic spread trade, mean reversion and trend. For every row the request works out the cost
+- **The page** stacks four tables, each at most 50 rows and 20 of them visible before it scrolls inside
+  its panel, sorted by ISK/day unless you sort a column (each table keeps its own sorting in the URL:
+  `xs`/`xd`, `cs`/`cd`, `ms`/`md`, `ts`/`td`): recurring spread expansion, classic spread trade, mean
+  reversion and trend. A sub-menu below the top bar jumps to each table and shows its row count, and a
+  collapsible freshness column on the right holds the station sync's status and a warning count. For every row the request works out the cost
   `c = B (1 + b)`, the revenue `r = S (1 - b - t)`, the margin `m`, the order size, the fill time, the
   allowed holding time `min(3, (m / 2σ)^2)` days and ISK/day, with the fees of the selected character that
   has the lowest minimum margin at the station (base rates of 3% and 7.5% while none is known). An item
   whose fill time exceeds its holding time, whose margin is not positive, or that has fewer than 10 daily
-  returns is in no table. The filter bar (minimum margin, minimum ISK/day, an item name search and the
-  capital per item) is stored per account. A click on a row opens a fixed window with the fees, every
-  figure and how it follows from the others, and the charts of the table.
+  returns is in no table. The filter box (the character filter, then minimum margin, minimum ISK/day, an
+  item name search and the capital per item, which are saved per account as soon as one changes) also
+  names the station and the fees in use on its right. A click on a row opens the detail page
+  `/opportunities/<table>/<type id>` with the fees, every figure and how it follows from the others, and
+  each chart of the table on a row of its own; its sub-menu leads back to the tables with the selection
+  and sorting kept.
 - The owner of the station is looked up once, for every account, so a character has fees there whether or
   not it has an order in Jita.
 - The design and the specifications are in `openspec/changes/station-trading-opportunities/`.
+
+## Page layout
+
+Every signed-in page follows the layout guidelines in `openspec/specs/ui-layout/spec.md`: a window page
+(orders, wealth) fills the window and never scrolls as a whole, a scrolling page (dashboard,
+characters, opportunities and their detail page) stacks full-width rows. A top bar holds the
+navigation, a sub-menu jumps to the rows of a scrolling page, and a filter box holds the filters that
+affect more than one block; these three stay at the top. Every block is a titled panel, every table
+uses the one `table.data` style, and details open on a page of their own. Read the spec before adding a
+page.
 
 ## 4. Run with Compose
 

@@ -1,4 +1,4 @@
-<form id="character-filter" data-character-filter hx-get="/orders" hx-trigger="change" hx-target="#orders-view" hx-select="#orders-view" hx-select-oob="#main-nav" hx-swap="outerHTML" hx-push-url="true">
+<form id="character-filter" data-character-filter hx-get="/orders" hx-trigger="change" hx-target="#orders-view" hx-select="#orders-view" hx-select-oob="#main-nav, #filter-box" hx-swap="outerHTML" hx-push-url="true">
   {% let characters = view.characters %}
   {% include "character_filter.html" %}
   <input type="hidden" name="sort" value="{{ view.sell_sort.key.name() }}">

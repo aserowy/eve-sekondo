@@ -1,9 +1,9 @@
 <div class="scroll" data-scroll-key="{{ scroll_key }}">
-<table class="orders">
+<table class="data records">
   <thead>
     <tr>
       {% for h in table.headers %}
-      <th scope="col"{% if !h.aria_sort.is_empty() %} aria-sort="{{ h.aria_sort }}"{% endif %}><a href="{{ h.href }}" hx-get="{{ h.href }}" hx-target="#orders-view" hx-select="#orders-view" hx-select-oob="#main-nav" hx-swap="outerHTML" hx-push-url="true">{{ h.label }}{{ h.arrow }}</a></th>
+      <th scope="col"{% if !h.aria_sort.is_empty() %} aria-sort="{{ h.aria_sort }}"{% endif %}><a href="{{ h.href }}" hx-get="{{ h.href }}" hx-target="#orders-view" hx-select="#orders-view" hx-select-oob="#main-nav, #filter-box" hx-swap="outerHTML" hx-push-url="true">{{ h.label }}{{ h.arrow }}</a></th>
       {% endfor %}
     </tr>
   </thead>

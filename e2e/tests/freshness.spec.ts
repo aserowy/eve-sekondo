@@ -112,7 +112,7 @@ test('the wealth freshness starts collapsed without a badge and survives a filte
     await wealthPoll(page, id, 'wallet');
     await wealthPoll(page, id, 'assets');
   }
-  await page.getByRole('navigation').getByRole('link', { name: 'Wealth' }).click();
+  await page.locator('#main-nav').getByRole('link', { name: 'Wealth' }).click();
   await expect(page).toHaveURL(/\/wealth$/);
 
   await expect(toggle(page)).toHaveAttribute('aria-expanded', 'false');

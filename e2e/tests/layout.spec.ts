@@ -1,4 +1,4 @@
-import { expect, loginWith, openCharacters, pollCharacter, query, stubControl, stubOrder, test, unfoldFreshness } from '../support/fixtures';
+import { expect, loginWith, openCharacters, pollCharacter, priceRefresh, query, stubAsset, stubControl, stubOrder, test, unfoldFreshness, wealthPoll } from '../support/fixtures';
 import { chartDrawn } from '../support/charts';
 import { expectInsideViewport, horizontalOverflow, verticalOverflow } from '../support/layout';
 
@@ -46,23 +46,27 @@ test('the dashboard does not scroll horizontally at 1024px', async ({ page }) =>
   expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
 });
 
-test('the character filter lives in the top bar of dashboard, orders and wealth, not on the characters page', async ({ page }) => {
+test('the filter box holds the character filter on dashboard, orders and wealth, and the characters page has none', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
   for (const path of ['/dashboard', '/orders', '/wealth']) {
     await page.goto(path);
-    const filter = page.getByRole('navigation').getByRole('group', { name: 'Characters' });
+    const box = page.locator('header.bars #filter-box');
+    await expect(box, path).toBeVisible();
+    const filter = box.getByRole('group', { name: 'Characters' });
     await expect(filter, path).toBeVisible();
     await expect(filter.getByRole('checkbox', { name: 'Alice Alpha' }), path).toBeChecked();
+    await expect(page.locator('#main-nav #character-filter'), path).toHaveCount(0);
     await expect(page.locator('main #character-filter'), path).toHaveCount(0);
   }
   await page.goto('/characters');
   await expect(page.locator('#character-filter')).toHaveCount(0);
+  await expect(page.locator('#filter-box')).toHaveCount(0);
 });
 
-test('the dashboard time range control sits in the top bar', async ({ page }) => {
+test('the dashboard time range control sits in the filter box', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
-  await expect(page.getByRole('navigation').locator('#range-control')).toBeVisible();
-  await expect(page.locator('main #range-control')).toHaveCount(0);
+  await expect(page.locator('#filter-box #range-control')).toBeVisible();
+  await expect(page.locator('#main-nav #range-control')).toHaveCount(0);
 });
 
 async function threeCharactersWithOrders(page: import('@playwright/test').Page) {
@@ -79,6 +83,102 @@ async function threeCharactersWithOrders(page: import('@playwright/test').Page) 
   }
 }
 
+test('the filter box is a single thin line right below the top bar', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await threeCharactersWithOrders(page);
+  for (const path of ['/orders', '/wealth', '/dashboard']) {
+    await page.goto(path);
+    // The bar above the filter box: the top bar, or the sub-menu on a page that has one.
+    const above = await page.locator('#filter-box').evaluate((el) => el.previousElementSibling!.getBoundingClientRect().bottom);
+    const box = (await page.locator('#filter-box').boundingBox())!;
+    expect(box.height, path).toBeLessThanOrEqual(28);
+    expect(Math.abs(box.y - above), path).toBeLessThanOrEqual(1);
+    expect(box.width, path).toBeGreaterThanOrEqual(1270);
+  }
+});
+
+test('no page scrolls horizontally at 1024px', async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await threeCharactersWithOrders(page);
+  for (const path of ['/dashboard', '/orders', '/wealth', '/characters']) {
+    await page.goto(path);
+    await page.waitForTimeout(300);
+    expect(await horizontalOverflow(page), path).toBeLessThanOrEqual(0);
+  }
+});
+
+test('the top bar holds only the brand, the navigation and the icons, and the bars stay put while the dashboard scrolls', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 600 });
+  await threeCharactersWithOrders(page);
+  await page.goto('/dashboard');
+  await expect(page.locator('canvas[data-chart]')).toHaveCount(6);
+
+  const bar = page.locator('#main-nav');
+  await expect(bar.locator('#character-filter, #range-control')).toHaveCount(0);
+  await expect(bar.locator(':scope > .brand, :scope > .links, :scope > .icon-control')).toHaveCount(4);
+  await expect(bar.locator(':scope > *')).toHaveCount(4);
+  expect((await bar.boundingBox())!.height).toBeLessThanOrEqual(36);
+
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(300);
+  expect((await page.locator('header.bars').boundingBox())!.y).toBe(0);
+  expect((await bar.boundingBox())!.y).toBe(0);
+});
+
+test('the breakdown, the inventory and the orders share one table style', async ({ page }) => {
+  await threeCharactersWithOrders(page);
+  await stubControl('assets', { character_id: 90000001, assets: [stubAsset(1, { type: 34, quantity: 10 }), stubAsset(2, { type: 35, quantity: 5 })] });
+  await wealthPoll(page, 90000001, 'assets');
+  await priceRefresh(page);
+
+  // Live refreshes swap the tables once the stream opens, so styles are read until they settle.
+  const background = (page: import('@playwright/test').Page, row: string) =>
+    page.locator(row).evaluate((tr) => getComputedStyle(tr).backgroundColor).catch(() => '');
+
+  await page.goto('/dashboard');
+  await expect(page.locator('#breakdown tbody tr:nth-child(2)')).toBeVisible();
+  await expect.poll(() => background(page, '#breakdown tbody tr:nth-child(1)')).not.toBe('');
+  const striped = await page.locator('#breakdown tbody tr:nth-child(2)').evaluate((tr) => getComputedStyle(tr).backgroundColor);
+  expect(striped).not.toBe(await page.locator('#breakdown tbody tr:nth-child(1)').evaluate((tr) => getComputedStyle(tr).backgroundColor));
+
+  await page.goto('/wealth');
+  await expect(page.locator('#inventory tbody tr:nth-child(2)')).toBeVisible();
+  await expect.poll(() => background(page, '#inventory tbody tr:nth-child(2)')).toBe(striped);
+
+  await page.goto('/orders');
+  await expect(page.locator('#sell-orders tbody.order').first()).toBeVisible();
+  await expect(async () => {
+    const row = await page.locator('#sell-orders tbody.order tr:not(.details)').first().boundingBox();
+    expect(row!.height).toBeLessThanOrEqual(22);
+  }).toPass();
+  await expect(page.locator('#sell-orders table.data.records')).toHaveCount(1);
+});
+
+test('a table on a scrolling page shows at most twenty rows and scrolls sideways inside itself', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await loginWith(page, 'Alice Alpha');
+  await query(
+    `INSERT INTO characters (character_id, account_id, name, owner_hash)
+     SELECT 91000000 + n, (SELECT account_id FROM characters WHERE character_id = 90000001), 'Extra Character ' || n, 'hash-' || n
+     FROM generate_series(1, 29) AS n`,
+  );
+  await page.goto('/dashboard');
+  await expect(page.locator('#breakdown tbody tr')).toHaveCount(30);
+
+  await expect(async () => {
+    const scroller = page.locator('.breakdown .scroll');
+    const box = (await scroller.boundingBox())!;
+    const rows = await page.locator('#breakdown tbody tr').evaluateAll(
+      (trs, bottom) => trs.filter((tr) => tr.getBoundingClientRect().bottom <= bottom + 0.5).length,
+      box.y + box.height,
+    );
+    expect(rows).toBe(20);
+    const { scrollHeight, clientHeight } = await scroller.evaluate((el) => ({ scrollHeight: el.scrollHeight, clientHeight: el.clientHeight }));
+    expect(scrollHeight).toBeGreaterThan(clientHeight);
+  }).toPass();
+  expect(await verticalOverflow(page)).toBeGreaterThan(0);
+});
+
 test('the dashboard lays out tiles, breakdown, one row of three graphs, then each over-time graph on its own row', async ({ page }) => {
   await page.setViewportSize({ width: 1920, height: 1080 });
   await threeCharactersWithOrders(page);
@@ -94,7 +194,7 @@ test('the dashboard lays out tiles, breakdown, one row of three graphs, then eac
     for (const kind of ['split', 'top-sell', 'top-buy']) await expectInsideViewport(page, canvas(kind));
 
     const box = async (selector: string) => (await page.locator(selector).boundingBox())!;
-    const tiles = await box('#tiles');
+    const tiles = await box('#totals');
     const breakdown = await box('.breakdown');
     expect(Math.abs(breakdown.width - tiles.width), 'breakdown as wide as the tiles').toBeLessThanOrEqual(2);
     expect(breakdown.y).toBeGreaterThanOrEqual(tiles.y + tiles.height - 1);
@@ -117,18 +217,18 @@ test('the dashboard lays out tiles, breakdown, one row of three graphs, then eac
   }).toPass();
 });
 
-test('with twenty characters the breakdown scrolls inside itself, keeps its header, and the graph row stays on the first screen', async ({ page }) => {
+test('with thirty characters the breakdown shows twenty rows, scrolls inside itself, keeps its header, and the graph row stays on the first screen', async ({ page }) => {
   await page.setViewportSize({ width: 1920, height: 1080 });
   await loginWith(page, 'Alice Alpha');
-  // The stub only knows three characters, so the other nineteen are linked straight in the database.
+  // The stub only knows three characters, so the other twenty-nine are linked straight in the database.
   await query(
     `INSERT INTO characters (character_id, account_id, name, owner_hash)
      SELECT 91000000 + n, (SELECT account_id FROM characters WHERE character_id = 90000001), 'Extra Character ' || n, 'hash-' || n
-     FROM generate_series(1, 19) AS n`,
+     FROM generate_series(1, 29) AS n`,
   );
   const refreshed = page.waitForResponse((r) => r.url().includes('/dashboard/summary'));
   await page.goto('/dashboard');
-  await expect(page.locator('#breakdown tbody tr')).toHaveCount(20);
+  await expect(page.locator('#breakdown tbody tr')).toHaveCount(30);
   // The event stream opening refreshes the summary once; scrolling before that would be undone by it.
   await refreshed;
   await page.waitForTimeout(300);
@@ -140,7 +240,7 @@ test('with twenty characters the breakdown scrolls inside itself, keeps its head
   }).toPass();
 
   await scroller.evaluate((el) => (el.scrollTop = el.scrollHeight));
-  await expect(page.locator('#character-91000019')).toBeVisible();
+  await expect(page.locator('#character-91000029')).toBeVisible();
   const box = (await scroller.boundingBox())!;
   const header = (await page.locator('#breakdown thead th').first().boundingBox())!;
   expect(header.y).toBeGreaterThanOrEqual(box.y - 1);
@@ -294,13 +394,14 @@ test('charts use small, dimmed axis text, grid lines and compact legends', async
 test('walking through every signed-in page raises no policy violation', async ({ page }) => {
   // The cspGuard fixture fails the test on any violation the console reports while this runs.
   await threeCharactersWithOrders(page);
-  const nav = page.getByRole('navigation');
+  const nav = page.locator('#main-nav');
+  const filters = page.locator('#filter-box');
 
   await page.goto('/dashboard');
   await expect(page.locator('canvas[data-chart]')).toHaveCount(6);
-  await nav.locator('#range-control').getByRole('link', { name: '30 days' }).click();
+  await filters.locator('#range-control').getByRole('link', { name: '30 days' }).click();
   await expect(page).toHaveURL(/range=30d$/);
-  await nav.getByRole('checkbox', { name: 'Carol Charlie' }).uncheck();
+  await filters.getByRole('checkbox', { name: 'Carol Charlie' }).uncheck();
   await expect(page).toHaveURL(/chars=90000001,90000002&range=30d$/);
 
   await nav.getByRole('link', { name: 'Orders' }).click();
@@ -309,7 +410,7 @@ test('walking through every signed-in page raises no policy violation', async ({
   await unfoldFreshness(page);
   await page.locator('#sell-orders').getByRole('link', { name: 'Price' }).click();
   await expect(page).toHaveURL(/sort=price&dir=asc/);
-  await nav.getByRole('checkbox', { name: 'Bob Bravo' }).uncheck();
+  await filters.getByRole('checkbox', { name: 'Bob Bravo' }).uncheck();
   await expect(page.locator('#sell-orders tbody.order')).toHaveCount(1);
 
   await nav.getByRole('link', { name: 'Wealth' }).click();
@@ -317,7 +418,23 @@ test('walking through every signed-in page raises no policy violation', async ({
   await unfoldFreshness(page);
   await page.locator('#wealth-range-control').getByRole('link', { name: '30 days' }).click();
   await expect(page.locator('#wealth-range-control [aria-current="true"]')).toHaveText('30 days');
-  await nav.getByRole('checkbox', { name: 'Bob Bravo' }).check();
+  await filters.getByRole('checkbox', { name: 'Bob Bravo' }).check();
+
+  await nav.getByRole('link', { name: 'Opportunities' }).click();
+  await expect(page).toHaveURL(/\/opportunities/);
+  await page.locator('#section-nav').getByRole('link', { name: 'Trend' }).click();
+  await expect(page).toHaveURL(/#trend$/);
+  await page.locator('#opportunity-filters').getByLabel('Minimum margin (%)').fill('7');
+  await page.locator('#opportunity-filters').getByLabel('Item name').press('Tab');
+  await expect(page.locator('#section-nav')).toBeVisible();
+  await page.goto('/opportunities/classic/34');
+  await expect(page.locator('#figures')).toBeVisible();
+  await page.locator('#section-nav').getByRole('link', { name: 'Figures' }).click();
+  await expect(page).toHaveURL(/#figures$/);
+
+  await page.goto('/dashboard');
+  await page.locator('#section-nav').getByRole('link', { name: 'Wealth' }).click();
+  await expect(page).toHaveURL(/#wealth$/);
 
   await nav.getByRole('link', { name: 'Characters' }).click();
   await expect(page).toHaveURL(/\/characters(\?.*)?$/);

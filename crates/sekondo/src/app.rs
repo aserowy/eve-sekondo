@@ -235,6 +235,10 @@ pub fn router(state: AppState, extra_routes: Router<AppState>) -> Router {
             "/opportunities/settings",
             post(opportunities::page::save_settings),
         )
+        .route(
+            "/opportunities/{table}/{type_id}",
+            get(opportunities::page::detail_page),
+        )
         .route("/characters", get(pages::characters))
         .route("/characters/{id}/unlink", post(characters::unlink))
         .route("/events", get(sse::stream))

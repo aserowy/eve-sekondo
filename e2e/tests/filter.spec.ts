@@ -22,7 +22,7 @@ async function threeCharacters(page: Page) {
 
 test('narrow the selection, bookmark it, and carry it across pages', async ({ page, browser }) => {
   await threeCharacters(page);
-  await page.getByRole('navigation').getByRole('link', { name: 'Orders' }).click();
+  await page.locator('#main-nav').getByRole('link', { name: 'Orders' }).click();
   await expect(page.locator('#sell-orders tbody.order')).toHaveCount(3);
   await expect(page.getByRole('checkbox')).toHaveCount(3);
   await expect(page.getByRole('checkbox', { checked: true })).toHaveCount(3);
@@ -48,7 +48,7 @@ test('narrow the selection, bookmark it, and carry it across pages', async ({ pa
   // The selection carries across pages: orders -> dashboard -> orders.
   await page.getByRole('checkbox', { name: 'Alice Alpha' }).uncheck();
   await expect(page).toHaveURL(/chars=90000002,90000003$/);
-  const nav = page.getByRole('navigation');
+  const nav = page.locator('#main-nav');
   await nav.getByRole('link', { name: 'Dashboard' }).click();
   await expect(page).toHaveURL(/\/dashboard\?chars=90000002,90000003$/);
   await nav.getByRole('link', { name: 'Orders' }).click();

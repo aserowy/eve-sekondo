@@ -1,4 +1,4 @@
-<form id="opportunity-filters" class="panel filters" data-invalid-target="#opportunity-filters" hx-post="/opportunities/settings" hx-trigger="change, submit" hx-target="#opportunity-tables" hx-swap="innerHTML">
+<form id="opportunity-filters" class="filters" data-invalid-target="#filter-error" hx-post="/opportunities/settings" hx-trigger="change" hx-target="#opportunity-tables" hx-swap="innerHTML">
   <input type="hidden" name="chars" value="{{ view.filters.chars }}">
   {% for (name, value) in view.filters.sorts %}
   <input type="hidden" name="{{ name }}" value="{{ value }}">
@@ -7,6 +7,4 @@
   <label>Minimum ISK/day <input type="text" inputmode="decimal" name="min_isk_per_day" value="{{ view.filters.form.min_isk_per_day }}"></label>
   <label>Item name <input type="search" name="search" value="{{ view.filters.form.search }}" maxlength="100"></label>
   <label>Capital per item (ISK) <input type="text" inputmode="decimal" name="capital" value="{{ view.filters.form.capital }}"></label>
-  <button type="submit">Apply</button>
-  {% if let Some(error) = view.filters.error %}<p id="opportunity-filter-error" class="alert" role="alert">{{ error }}</p>{% endif %}
 </form>

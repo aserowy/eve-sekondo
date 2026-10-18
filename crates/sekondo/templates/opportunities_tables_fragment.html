@@ -1,0 +1,7 @@
+{% include "opportunities_tables.html" %}
+{% let oob = true %}
+{% include "opportunities_section_nav.html" %}
+{% include "opportunities_filter_context.html" %}
+{% if clear_error %}
+<span id="filter-error" class="filter-error" role="alert" hx-swap-oob="true"></span>
+{% endif %}

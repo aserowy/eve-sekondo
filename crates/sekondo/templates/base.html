@@ -13,7 +13,8 @@
 </head>
 <body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
   {% if let Some(nav) = nav %}
-  <nav class="main-nav" id="main-nav">
+  <header class="bars" id="bars">
+  <nav class="main-nav" id="main-nav" aria-label="Main">
     <strong class="brand">Sekondo</strong>
     <ul class="links">
       <li><a href="{{ nav.dashboard_href() }}"{% if nav.dashboard_current() %} aria-current="page"{% endif %}>Dashboard</a></li>
@@ -21,12 +22,14 @@
       <li><a href="{{ nav.wealth_href() }}"{% if nav.wealth_current() %} aria-current="page"{% endif %}>Wealth</a></li>
       <li><a href="{{ nav.opportunities_href() }}"{% if nav.opportunities_current() %} aria-current="page"{% endif %}>Opportunities</a></li>
     </ul>
-    <div class="controls">{% block controls %}{% endblock %}</div>
     <a class="icon-control" href="{{ nav.characters_href() }}" aria-label="Characters" title="Characters"{% if nav.characters_current() %} aria-current="page"{% endif %}>{% include "icons/users.html" %}</a>
     <button class="icon-control" hx-post="/auth/logout" aria-label="Sign out" title="Sign out">{% include "icons/log-out.html" %}</button>
   </nav>
+  {% block subnav %}{% endblock %}
+  {% block filters %}{% endblock %}
+  </header>
   {% endif %}
-  <main>
+  <main class="{% block page_type %}page-scroll{% endblock %}">
     {% block content %}{% endblock %}
   </main>
 </body>

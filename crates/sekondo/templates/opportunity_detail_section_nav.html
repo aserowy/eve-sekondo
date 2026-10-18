@@ -1,0 +1,6 @@
+<nav class="section-nav" id="section-nav" aria-label="Sections"{% if oob %} hx-swap-oob="true"{% endif %}>
+  <a href="{{ view.back_url }}">&larr; Opportunities</a>
+  {% for section in view.sections %}
+  <a href="#{{ section.id }}">{{ section.label }}</a>
+  {% endfor %}
+</nav>

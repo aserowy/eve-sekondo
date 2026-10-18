@@ -110,24 +110,24 @@ test('changing the character filter shows the filtered table from the top', asyn
   await expect(page.locator('#sell-orders tbody.order')).toHaveCount(200);
   await scrollTo(page, 'sell-orders', 0.5);
 
-  await page.getByRole('navigation').getByRole('checkbox', { name: 'Bob Bravo' }).uncheck();
+  await page.locator('header.bars').getByRole('checkbox', { name: 'Bob Bravo' }).uncheck();
   await expect(page).toHaveURL(/chars=90000001$/);
   expect(await scrollTop(page, 'sell-orders')).toBe(0);
 });
 
-/** Alice plus nineteen characters linked straight in the database (the stub only knows three). */
-async function twentyCharacters(page: Page) {
+/** Alice plus twenty-nine characters linked straight in the database (the stub only knows three). */
+async function thirtyCharacters(page: Page) {
   await page.setViewportSize({ width: 1920, height: 1080 });
   await loginWith(page, 'Alice Alpha');
   await query(
     `INSERT INTO characters (character_id, account_id, name, owner_hash)
      SELECT 91000000 + n, (SELECT account_id FROM characters WHERE character_id = 90000001), 'Extra Character ' || n, 'hash-' || n
-     FROM generate_series(1, 19) AS n`,
+     FROM generate_series(1, 29) AS n`,
   );
 }
 
 test('an orders signal keeps the scroll position of the dashboard breakdown', async ({ page }) => {
-  await twentyCharacters(page);
+  await thirtyCharacters(page);
   const opened = page.waitForResponse((r) => r.url().includes('/dashboard/summary'));
   await page.goto('/dashboard');
   await opened;
@@ -159,7 +159,7 @@ test('a wealth signal keeps the scroll position of the items table', async ({ pa
 });
 
 test('a fees signal keeps the scroll position of the freshness column', async ({ page }) => {
-  await twentyCharacters(page);
+  await thirtyCharacters(page);
   await stubControl('skills', { character_id: 90000001, skills: stubTradeSkills(5, 5) });
   expect(await pollCharacter(page, 90000001)).toBe('200 updated');
   await feePoll(page);
