@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 
 {% block title %}Characters · Sekondo{% endblock %}
+{% block page_title %}Characters{% endblock %}
 
 {% block content %}
 {% if let Some(message) = flash %}
@@ -8,7 +9,6 @@
 {% endif %}
 
 <section id="characters">
-  <h2>Characters</h2>
   {% for c in characters %}
   <div class="character" id="character-{{ c.id }}">
     <img src="https://images.evetech.net/characters/{{ c.id }}/portrait?size=64" width="32" height="32" alt="Portrait of {{ c.name }}">

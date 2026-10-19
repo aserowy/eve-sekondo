@@ -1,6 +1,6 @@
 import { expect, loginWith, test } from '../support/fixtures';
 
-test('every page loads Pico and the app stylesheet from the app origin, and the body uses Pico\'s font size', async ({ page }) => {
+test('every page loads Pico and the app stylesheet from the app origin', async ({ page }) => {
   const sheets: string[] = [];
   const violations: string[] = [];
   page.on('response', (r) => {
@@ -11,16 +11,23 @@ test('every page loads Pico and the app stylesheet from the app origin, and the 
   });
   await loginWith(page, 'Alice Alpha');
   await page.goto('/characters');
-  await expect(page.locator('main.container-fluid')).toBeVisible();
+  await expect(page.locator('.page.container-fluid > main')).toBeVisible();
 
   const origin = new URL(page.url()).origin;
   expect(new Set(sheets)).toEqual(new Set([`${origin}/static/pico.min.css`, `${origin}/static/app.css`]));
   expect(violations).toEqual([]);
 
-  const sizes = await page.evaluate(() => ({
-    body: parseFloat(getComputedStyle(document.body).fontSize),
-    pico: getComputedStyle(document.documentElement).getPropertyValue('--pico-font-size').trim(),
-  }));
-  expect(sizes.pico).toMatch(/%$/);
-  expect(sizes.body).toBeCloseTo((parseFloat(sizes.pico) / 100) * 16, 1);
+});
+
+test('the base font stays at 16px however wide the window is', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  for (const width of [1024, 1280, 1920]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto('/characters');
+    const sizes = await page.evaluate(() => ({
+      root: getComputedStyle(document.documentElement).fontSize,
+      body: getComputedStyle(document.body).fontSize,
+    }));
+    expect(sizes, `at ${width}px`).toEqual({ root: '16px', body: '16px' });
+  }
 });

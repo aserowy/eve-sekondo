@@ -4,7 +4,7 @@ test('the sidebar lists the pages in order, navigates between them, and signs ou
   await loginWith(page, 'Alice Alpha');
   const nav = page.locator('aside.sidebar #main-nav');
 
-  await expect(page.getByRole('heading', { level: 1 })).toHaveCount(0);
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText(['Dashboard']);
   await expect(nav.locator('a, button')).toHaveText([
     'Dashboard', 'Characters', 'Wealth', 'Trades', 'Orders', 'Opportunities', 'Sign out',
   ]);

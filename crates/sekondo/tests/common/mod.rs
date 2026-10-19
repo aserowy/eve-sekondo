@@ -624,7 +624,7 @@ pub fn kpi(html: &str, id: &str) -> Card {
         .split('"')
         .next()
         .unwrap();
-    let detail = card.find("<small").map(|at| {
+    let detail = card.find(r#"<small class="detail""#).map(|at| {
         let small = &card[at..];
         small[small.find('>').unwrap() + 1..]
             .split("</small>")

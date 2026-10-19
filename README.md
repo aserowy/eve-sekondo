@@ -198,7 +198,7 @@ sync can be switched off with `STATION_SYNC=off`.
   `/opportunities/reversion` and `/opportunities/trend` (`/opportunities` goes to the first). A sub-menu
   switches between them without row counts, and every table lists every item that passes its rules,
   paged 50 at a time after sorting by ISK/day unless you sort a column (each table keeps its own sorting
-  in the URL: `xs`/`xd`, `cs`/`cd`, `ms`/`md`, `ts`/`td`). The freshness at the end of the page holds the
+  in the URL: `xs`/`xd`, `cs`/`cd`, `ms`/`md`, `ts`/`td`). The freshness footer holds the
   station sync's status. For every row the request works out the cost
   `c = B (1 + b)`, the revenue `r = S (1 - b - t)`, the margin `m`, the order size, the fill time, the
   allowed holding time `min(3, (m / 2σ)^2)` days and ISK/day, with the fees of the selected character that
@@ -218,10 +218,12 @@ sync can be switched off with `STATION_SYNC=off`.
 
 Every signed-in page follows the layout guidelines in `openspec/specs/ui-layout/spec.md`, styled with
 Pico CSS (vendored in `crates/sekondo/static/`) and a small stylesheet of our own. A collapsible sidebar
-holds the main menu (icons and text, icons only when collapsed; the state is kept per browser). A table
-page shows, top to bottom, its sub-menu (if it has siblings), the filter section, the KPI cards, **one**
-table with its pagination (page size 25, 50, 100 or 200, in the URL as `page` and `per_page`) and the
-freshness. Sorting, filters, ranges and pages are server-rendered and swapped in place; a live refresh
+holds the main menu (icons and text, icons only when collapsed; the state is kept per browser). The text
+stays at Pico's unscaled 16px on every screen. Every page starts with its title, then its tab-style
+sub-menu (if it has siblings or sections; it sticks to the top of the window) and the filter section. A
+table page continues with the KPI cards, **one** table with its pagination (page size 25, 50, 100 or 200,
+in the URL as `page` and `per_page`) and ends with the freshness as a quiet footer: at the bottom of the
+window on a short page, after the content on a long one. Sorting, filters, ranges and pages are server-rendered and swapped in place; a live refresh
 keeps the page, the sorting and the scroll position. The orders are split into `/orders/sell` and
 `/orders/buy` (`/orders` goes to the sell page), the fee cards show each selected character's fees at the
 station it is docked in (Jita 4-4 until its location is known). Read the spec before adding a page.

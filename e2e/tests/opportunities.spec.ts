@@ -327,6 +327,7 @@ test('a row click navigates to the detail page of that table and item, with no f
   await expect(page).toHaveURL(/\/opportunities\/classic\/34$/);
   await expect(page.locator('#opportunity-detail')).toHaveCount(0);
   await expect(page.locator('[role="dialog"], aside:not(.sidebar)')).toHaveCount(0);
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText(['Tritanium']);
   await expect(page.locator('#figures h2')).toContainText('Tritanium');
   await expect(page.locator('#figures h2')).toContainText('Classic spread trade');
   await expect(page.locator('#main-nav a[aria-current="page"]')).toHaveAttribute('aria-label', 'Opportunities');
@@ -335,7 +336,6 @@ test('a row click navigates to the detail page of that table and item, with no f
   await expect(page.locator('[data-figure="buy"] [data-value]')).toHaveText('100.00');
   await expect(page.locator('[data-figure="sell"] [data-value]')).toHaveText('129.90');
   await expect(page.locator('[data-figure="margin"]')).toContainText('(r − c) / c');
-  await expect(page.locator('h1')).toHaveCount(0);
 });
 
 test('a row of the trend table opens the trend page, and the item name is a real link', async ({ page }) => {
@@ -357,7 +357,7 @@ test('the detail page has a sub-menu with a way back that keeps the sorting, the
   await page.locator('#classic tr[data-type-id="34"]').click();
   await expect(page).toHaveURL(/\/opportunities\/classic\/34\?.*cs=item&cd=asc/);
 
-  const menu = page.locator('main > nav.sub-menu#section-nav');
+  const menu = page.locator('.page > nav.sub-menu#section-nav');
   await expect(menu.getByRole('link')).toHaveText([
     '← Classic spread trade', 'Figures', 'Best buy and best sell', 'Spread', 'Units within 1% of the best price',
   ]);
@@ -387,7 +387,7 @@ test('the charts of the detail page sit on rows of their own', async ({ page }) 
       above = row;
     }
   }).toPass();
-  await expect(page.locator('h1')).toHaveCount(0);
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText(['Tritanium']);
 });
 
 test('deselecting a character recomputes the fees on the detail page, and only the content is swapped', async ({ page }) => {

@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 
 {% block title %}{{ view.name }} · Opportunities · Sekondo{% endblock %}
+{% block page_title %}{{ view.name }}{% endblock %}
 
 {% block head %}
 <script src="/static/chart.umd.min.js"></script>
@@ -25,10 +26,10 @@
 </div>
 {% endblock %}
 
+{% block page_attrs %} hx-ext="sse" sse-connect="/events"{% endblock %}
+
 {% block content %}
-<div hx-ext="sse" sse-connect="/events">
 <div id="opportunity-detail-content" data-live="{{ view.refresh_path }}" hx-get="{{ view.refresh_url }}" hx-trigger="sse:opportunities-updated, sse:orders-updated, sse:fees-updated, htmx:sseOpen from:body" hx-swap="innerHTML" hx-sync="this:queue last">
   {% include "opportunities_detail.html" %}
-</div>
 </div>
 {% endblock %}

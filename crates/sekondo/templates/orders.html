@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 
 {% block title %}{% if view.side == Side::Sell %}Sell orders{% else %}Buy orders{% endif %} · Sekondo{% endblock %}
+{% block page_title %}{% if view.side == Side::Sell %}Sell orders{% else %}Buy orders{% endif %}{% endblock %}
 
 {% block subnav %}
 {% let oob = false %}
@@ -13,13 +14,18 @@
 </div>
 {% endblock %}
 
+{% block page_attrs %} hx-ext="sse" sse-connect="/events"{% endblock %}
+
 {% block content %}
-<div hx-ext="sse" sse-connect="/events">
   <section id="content" data-live="{{ view.content_path }}" hx-get="{{ view.content_url }}" hx-trigger="sse:orders-updated, sse:market-updated, sse:fees-updated, htmx:sseOpen from:body" hx-swap="innerHTML" hx-sync="this:queue last">
     {% include "orders_content.html" %}
   </section>
+{% endblock %}
+
+{% block footer %}
+<footer class="page-footer">
   <section id="freshness" data-live="/orders/freshness" hx-get="{{ view.freshness_url }}" hx-trigger="sse:orders-updated, sse:fees-updated, htmx:sseOpen from:body" hx-swap="innerHTML" hx-sync="this:queue last">
     {% include "orders_freshness.html" %}
   </section>
-</div>
+</footer>
 {% endblock %}

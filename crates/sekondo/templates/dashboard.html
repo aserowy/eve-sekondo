@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 
 {% block title %}Dashboard · Sekondo{% endblock %}
+{% block page_title %}Dashboard{% endblock %}
 
 {% block head %}
 <script src="/static/chart.umd.min.js"></script>
@@ -31,12 +32,12 @@
 </nav>
 {% endblock %}
 
+{% block page_attrs %} hx-ext="sse" sse-connect="/events"{% endblock %}
+
 {% block content %}
-<div hx-ext="sse" sse-connect="/events">
 <div id="dashboard-view">
   <section id="dashboard-summary" data-live="/dashboard/summary" hx-get="{{ view.summary_url }}" hx-trigger="sse:orders-updated, sse:wealth-updated, htmx:sseOpen from:body" hx-swap="innerHTML" hx-sync="this:queue last">
     {% include "dashboard_summary.html" %}
   </section>
-</div>
 </div>
 {% endblock %}

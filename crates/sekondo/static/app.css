@@ -9,6 +9,8 @@
   --pico-icon-time: url("/static/pico-icons/time.svg");
   --pico-icon-valid: url("/static/pico-icons/valid.svg");
   --pico-icon-invalid: url("/static/pico-icons/invalid.svg");
+  /* Pico grows the root font up to 131% on wide windows; Sekondo keeps the unscaled base everywhere. */
+  --pico-font-size: 100%;
 }
 
 /* htmx indicator styles (htmx.config.includeIndicatorStyles is off because of the CSP). */
@@ -34,7 +36,13 @@
 
 /* Shell: the sidebar and the page. */
 .shell { display: grid; grid-template-columns: auto minmax(0, 1fr); min-height: 100vh; }
-.shell > main { min-width: 0; padding-block: var(--pico-spacing); }
+/* The page column: header, main and footer. main takes the spare height, so a footer sits at the
+   bottom edge of the window on a short page and follows the content on a long one. */
+.shell > .page { display: flex; flex-direction: column; min-width: 0; min-height: 100dvh; padding-block: var(--pico-spacing) 0; }
+.page > main { flex: 1 0 auto; padding-bottom: var(--pico-spacing); }
+/* Headings: a modest page title, and section titles a step below it. */
+.page-header h1 { --pico-font-size: 1.5rem; margin-bottom: calc(var(--pico-spacing) * 0.75); }
+.page main h2 { --pico-font-size: 1.125rem; margin-bottom: calc(var(--pico-spacing) * 0.5); }
 .sidebar {
   position: sticky;
   top: 0;
@@ -89,41 +97,48 @@ table.records tbody tr > * { background-color: transparent; }
 table.records tbody.order:nth-of-type(even) > tr > * { background-color: var(--pico-table-row-stripped-background-color); }
 table.records tbody.order:hover > tr > * { background-color: var(--pico-secondary-focus); }
 
-/* Sub-menu: text links to the sibling pages, or to the rows of a long page; sticks to the window top. */
+/* Sub-menu: a tab bar of text links to the sibling pages, or to the rows of a long page, above a
+   divider; the current tab is underlined in the primary colour. It sticks to the window top. */
 .sub-menu {
   position: sticky;
   top: 0;
   z-index: 5;
   display: flex;
-  align-items: center;
-  gap: 1.25rem;
+  align-items: flex-end;
+  gap: 1.5rem;
   margin-bottom: var(--pico-spacing);
-  padding: 0.2rem 0;
   border-bottom: 1px solid var(--pico-muted-border-color);
   background: var(--pico-background-color);
   overflow-x: auto;
   white-space: nowrap;
 }
-.sub-menu a { color: var(--pico-muted-color); text-decoration: none; }
-.sub-menu a[aria-current] { color: var(--pico-color); font-weight: 600; }
+.sub-menu a {
+  padding: 0.4rem 0 calc(0.4rem - 2px);
+  border-bottom: 2px solid transparent;
+  color: var(--pico-muted-color);
+  text-decoration: none;
+}
+.sub-menu a:hover { color: var(--pico-color); }
+.sub-menu a[aria-current] { border-bottom-color: var(--pico-primary); color: var(--pico-color); font-weight: 600; }
 [id] { scroll-margin-top: calc(var(--sub-menu-height, 0px) + 0.5rem); }
 
-/* KPI cards: a grid of square cards of one size; long detail lines are clipped after three lines. */
-.kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr)); gap: var(--pico-grid-column-gap); margin-bottom: var(--pico-spacing); }
-.kpi { display: flex; flex-direction: column; aspect-ratio: 1; min-width: 0; margin: 0; overflow: hidden; }
-.kpi > header { margin: 0; padding: 0.4rem 0.75rem; color: var(--pico-muted-color); font-size: 0.875rem; }
-.kpi .value { margin: 0.5rem 0.75rem 0.25rem; font-size: 1.5rem; font-variant-numeric: tabular-nums; line-height: 1.2; }
+/* KPI cards: compact stat cards of one width and natural height, wrapping onto further rows; long
+   detail lines are clipped after three lines. */
+.kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr)); gap: var(--pico-grid-column-gap); margin-bottom: var(--pico-spacing); }
+.kpi { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; margin: 0; padding: 0.75rem 1rem; overflow: hidden; }
+.kpi .name { color: var(--pico-muted-color); font-size: 0.875rem; }
+.kpi .value { margin: 0; font-size: 1.5rem; font-variant-numeric: tabular-nums; line-height: 1.2; }
 .kpi .value[title] { cursor: help; }
 .kpi .detail {
   display: -webkit-box;
-  margin: 0 0.75rem;
+  margin: 0;
   overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
   line-clamp: 3;
   overflow-wrap: anywhere;
 }
-.kpi > a { margin: auto 0.75rem 0.5rem; font-size: 0.875rem; }
+.kpi > a { margin-top: auto; font-size: 0.875rem; }
 .kpi.error .value { color: var(--pico-del-color); }
 
 /* Pagination bar under a table. */
@@ -156,6 +171,20 @@ table.records tr.details td { color: var(--pico-muted-color); font-size: 0.8125r
 .graph-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr)); gap: var(--pico-grid-column-gap); }
 .graph-row > section { min-width: 0; }
 
+/* Page footer: the page's freshness as quiet, small, dimmed lines below a divider. */
+.page-footer {
+  padding-block: 0.5rem;
+  border-top: 1px solid var(--pico-muted-border-color);
+  color: var(--pico-muted-color);
+  font-size: 0.875rem;
+}
+.page-footer strong { color: var(--pico-color); }
+.page-footer ul.freshness { margin: 0; padding: 0; }
+.page-footer ul.freshness li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 0.75rem; margin: 0; list-style: none; }
+.page-footer ul.freshness li > div { display: contents; }
+.page-footer small { font-size: inherit; }
+.page-footer mark.badge { padding: 0 0.35rem; font-size: 0.75rem; }
+
 /* Characters page, landing and error pages. */
 .character { display: flex; align-items: center; gap: 0.75rem; padding: 0.35rem 0; border-bottom: 1px solid var(--pico-muted-border-color); }
 .character img { border-radius: 50%; }
@@ -168,4 +197,4 @@ a.relogin { display: inline-flex; align-items: center; gap: 0.35rem; }
 
 /* The page sits right of the sidebar; without a sidebar (landing, error) it has the whole width. */
 .shell > .sidebar { grid-column: 1; }
-.shell > main { grid-column: 2; }
+.shell > .page { grid-column: 2; }

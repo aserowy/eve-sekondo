@@ -243,7 +243,7 @@ test('the cards read the current figures, wealth first, with the unpriced rows c
   await aliceWithEverything(page);
   await page.goto('/wealth');
 
-  await expect(page.locator('.kpis .kpi header')).toHaveText(['Wealth', 'Wallet', 'Sell orders', 'Buy escrow', 'Inventory']);
+  await expect(page.locator('.kpis .kpi .name')).toHaveText(['Wealth', 'Wallet', 'Sell orders', 'Buy escrow', 'Inventory']);
   await expect(page.locator('.kpi .value')).toHaveText(['200m', '100m', '30m', '20m', '50m']);
   await expect(page.locator('#kpi-wealth .value')).toHaveAttribute('title', '200,000,000.00 ISK');
   await expect(page.locator('#kpi-inventory .detail')).toHaveCount(0);

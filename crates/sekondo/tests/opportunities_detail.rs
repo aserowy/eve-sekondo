@@ -307,7 +307,10 @@ async fn the_detail_page_is_a_full_page_with_the_filter_box_the_sub_menu_and_the
     .replace("&amp;", "&");
 
     assert!(html.contains("<html"), "a page");
-    assert!(!html.contains("<h1"), "no page heading");
+    assert!(
+        html.contains("<h1>Tritanium</h1>"),
+        "the item names the page"
+    );
     assert!(html.contains(r#"id="filter-box""#) && html.contains(r#"id="character-filter""#));
     assert!(html.contains(r#"id="filter-context""#) && html.contains("base rates"));
     // The sub-menu leads back with the selection and sorting, then to the rows of the page.

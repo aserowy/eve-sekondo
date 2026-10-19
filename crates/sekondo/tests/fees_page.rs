@@ -163,7 +163,7 @@ fn fees_of(html: &str, character: i64) -> Vec<Fee> {
                 .nth(1)
                 .map(|t| t.split('"').next().unwrap().to_owned())
                 .filter(|t| !t.is_empty());
-            let detail = &card[card.find("<small").unwrap()..];
+            let detail = &card[card.find(r#"<small class="detail""#).unwrap()..];
             let detail = detail[detail.find('>').unwrap() + 1..]
                 .split("</small>")
                 .next()
@@ -207,7 +207,10 @@ async fn an_npc_station_gives_its_rates_with_the_inputs_on_hover_and_names_chara
         assert!(!fee.relogin);
     }
     for card in ["Sales tax", "Broker fee", "Min. margin"] {
-        assert!(html.contains(&format!("<header>{card}</header>")), "{card}");
+        assert!(
+            html.contains(&format!(r#"<small class="name">{card}</small>"#)),
+            "{card}"
+        );
     }
 }
 
@@ -344,7 +347,7 @@ async fn the_freshness_does_not_list_fees(pool: PgPool) {
 
     for path in ["/orders/freshness", "/orders/sell"] {
         let html = page(&app, &browser, path).await;
-        let freshness = &html[html.find("<h2>Freshness</h2>").unwrap()..];
+        let freshness = &html[html.find(r#"<ul class="freshness">"#).unwrap()..];
         assert!(freshness.contains("Alice Alpha"));
         assert!(!freshness.contains("<table"), "{path}: {freshness}");
         assert!(!freshness.contains("Sales tax"), "{path}");

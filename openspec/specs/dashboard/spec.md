@@ -183,7 +183,7 @@ The dashboard SHALL show a "Wealth" KPI card with the current total wealth of th
 
 #### Scenario: Tiles are cards
 - **WHEN** a signed-in user opens the dashboard
-- **THEN** the sell value, buy escrow, wealth, sell order and buy order figures are each a square KPI card of the same size
+- **THEN** the sell value, buy escrow, wealth, sell order and buy order figures are each a KPI card of the same width, each wider than it is high
 
 ### Requirement: Wealth over time on the dashboard
 The dashboard SHALL show a graph of total wealth over the selected time range as a single line. At every point, the line SHALL equal the top edge of the wealth page's graph for the same selection and range. Its last point SHALL equal the wealth tile. When there is no wealth history in the range, the graph SHALL say that there is no history yet.

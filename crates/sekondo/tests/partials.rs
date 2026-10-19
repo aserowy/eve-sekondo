@@ -40,11 +40,11 @@ fn a_card_shows_its_name_and_value_with_the_exact_value_on_hover() {
     let html = card(Kpi::new("Sell value", "1.5m", "1,500,000.00"));
 
     assert!(html.contains(r#"<article class="kpi">"#), "{html}");
-    assert!(html.contains("Sell value"));
+    assert!(html.contains(r#"<small class="name">Sell value</small>"#));
     assert!(html.contains(r#"title="1,500,000.00""#));
     assert!(html.contains(">1.5m<"));
     assert!(
-        !html.contains("<small"),
+        !html.contains(r#"class="detail""#),
         "no detail line without a detail: {html}"
     );
     assert!(!html.contains("<a "), "no link without a link: {html}");

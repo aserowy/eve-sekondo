@@ -99,7 +99,7 @@ async fn unauthenticated_requests_are_redirected_to_the_landing_page(pool: PgPoo
 }
 
 #[sqlx::test]
-async fn the_page_has_the_character_filter_and_the_range_in_the_filter_section_and_no_heading(
+async fn the_page_has_its_title_and_the_character_filter_and_the_range_in_the_filter_section(
     pool: PgPool,
 ) {
     let app = app(pool).await;
@@ -107,7 +107,8 @@ async fn the_page_has_the_character_filter_and_the_range_in_the_filter_section_a
 
     let html = get(&app, &browser, "/trades").await;
 
-    assert!(!html.contains("<h1"), "the navigation names the page");
+    assert!(html.contains("<h1>Trades</h1>"), "one page title");
+    assert_eq!(html.matches("<h1").count(), 1);
     assert!(!html.contains("panel"), "no self-made panels");
     assert!(html.contains(r#"data-character-filter"#));
     assert!(html.contains(r#"hx-get="/trades""#));

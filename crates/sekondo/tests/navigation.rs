@@ -241,7 +241,7 @@ async fn every_entry_has_an_icon_a_label_and_keeps_its_name_when_the_label_is_hi
             7,
             "{path}: one icon per entry"
         );
-        assert!(!html.contains("<h1"), "{path} has a page heading");
+        assert_eq!(html.matches("<h1").count(), 1, "{path} has one page title");
     }
 }
 

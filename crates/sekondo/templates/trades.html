@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 
 {% block title %}Trades · Sekondo{% endblock %}
+{% block page_title %}Trades{% endblock %}
 
 {% block filters %}
 <div class="filter-box" id="filter-box">
@@ -15,13 +16,18 @@
 </div>
 {% endblock %}
 
+{% block page_attrs %} hx-ext="sse" sse-connect="/events"{% endblock %}
+
 {% block content %}
-<div hx-ext="sse" sse-connect="/events">
   <section id="content" data-live="/trades/table" hx-get="{{ view.table_url }}" hx-trigger="sse:trades-updated, sse:fees-updated, htmx:sseOpen from:body" hx-swap="innerHTML" hx-sync="this:queue last">
     {% include "trades_content.html" %}
   </section>
+{% endblock %}
+
+{% block footer %}
+<footer class="page-footer">
   <section id="freshness" data-live="/trades/freshness" hx-get="{{ view.freshness_url }}" hx-trigger="sse:trades-updated, htmx:sseOpen from:body" hx-swap="innerHTML" hx-sync="this:queue last">
     {% include "trades_freshness.html" %}
   </section>
-</div>
+</footer>
 {% endblock %}

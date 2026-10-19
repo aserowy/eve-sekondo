@@ -1,5 +1,4 @@
 <section id="{{ view.table.id }}">
-  <h2>{{ view.table.title }}</h2>
   {% if view.table.id == "expansion" && view.freshness.own_days < view.freshness.own_days_needed as i64 %}
   <p class="note">Collecting hourly data ({{ view.freshness.own_days }}/{{ view.freshness.own_days_needed }} days)</p>
   {% endif %}

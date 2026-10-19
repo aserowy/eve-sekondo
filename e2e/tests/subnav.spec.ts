@@ -36,7 +36,7 @@ test('the dashboard sub-menu lists its six rows in order at the top of the page 
   await page.goto('/dashboard');
   await expect(page.locator('canvas[data-chart]')).toHaveCount(6);
 
-  const menu = page.locator('main > nav.sub-menu#section-nav');
+  const menu = page.locator('.page > nav.sub-menu#section-nav');
   await expect(menu.getByRole('link')).toHaveText(['Totals', 'Characters', 'Split & top items', 'Value', 'Orders', 'Wealth']);
   await expect(menu.locator('svg, .count')).toHaveCount(0);
   const top = (await menu.boundingBox())!;
@@ -44,7 +44,7 @@ test('the dashboard sub-menu lists its six rows in order at the top of the page 
 
   await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(300);
-  expect((await menu.boundingBox())!.y).toBe(0);
+  expect(Math.abs((await menu.boundingBox())!.y)).toBeLessThan(1);
   const height = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--sub-menu-height'));
   expect(parseFloat(height)).toBeCloseTo((await menu.boundingBox())!.height, 0);
 });
@@ -145,4 +145,49 @@ test('the marker survives a live refresh of the dashboard', async ({ page }) => 
 
   await expect(current(page)).toHaveText('Value');
   expect(await page.evaluate(() => location.hash)).toBe('');
+});
+
+test('the sub-menu is a tab bar: the current tab is underlined in the primary colour, the others are dimmed', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  await page.goto('/orders/buy');
+
+  const tabs = await page.locator('nav.sub-menu a').evaluateAll((links) => {
+    const probe = document.createElement('span');
+    probe.style.color = 'var(--pico-primary)';
+    document.body.append(probe);
+    const primary = getComputedStyle(probe).color;
+    const muted = getComputedStyle(document.documentElement).getPropertyValue('--pico-muted-color').trim();
+    probe.style.color = muted;
+    const dimmed = getComputedStyle(probe).color;
+    probe.remove();
+    return links.map((a) => {
+      const s = getComputedStyle(a);
+      return {
+        text: a.textContent!.trim(),
+        underlined: parseFloat(s.borderBottomWidth) >= 2 && s.borderBottomColor === primary,
+        dimmed: s.color === dimmed,
+      };
+    });
+  });
+  expect(tabs).toEqual([
+    { text: 'Sell', underlined: false, dimmed: true },
+    { text: 'Buy', underlined: true, dimmed: false },
+  ]);
+  const divider = await page.locator('nav.sub-menu').evaluate((el) => getComputedStyle(el).borderBottomStyle);
+  expect(divider).toBe('solid');
+});
+
+test('only the sub-menu stays at the top: the page title scrolls out of view', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 400 });
+  await loginWith(page, 'Alice Alpha');
+  await stubControl('orders', { character_id: 90000001, orders: Array.from({ length: 100 }, (_, i) => stubOrder(i + 1)) });
+  await pollCharacter(page, 90000001);
+  await page.goto('/orders/sell');
+  await expect(page.locator('#sell-orders tbody.order')).toHaveCount(50);
+
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(300);
+
+  expect(Math.abs((await page.locator('nav.sub-menu').boundingBox())!.y)).toBeLessThan(1);
+  await expect(page.getByRole('heading', { level: 1 })).not.toBeInViewport();
 });

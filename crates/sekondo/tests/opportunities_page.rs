@@ -104,7 +104,11 @@ async fn each_page_shows_one_table_below_the_sub_menu_and_the_filters_with_the_f
         let html = get(&app, &browser, &format!("/opportunities/{table}")).await;
 
         assert!(html.contains(STATION_NAME), "{table}");
-        assert!(!html.contains("<h1"), "no page heading");
+        assert!(
+            html.contains(&format!("<h1>{title}</h1>")),
+            "{table}: the table names the page"
+        );
+        assert_eq!(html.matches("<h1").count(), 1, "{table}");
         assert!(!html.contains("panel"), "no self-made panels");
         let at = |needle: &str| {
             html.find(needle)
@@ -120,7 +124,10 @@ async fn each_page_shows_one_table_below_the_sub_menu_and_the_filters_with_the_f
             positions.windows(2).all(|w| w[0] < w[1]),
             "{table}: {positions:?}"
         );
-        assert!(html.contains(&format!("<h2>{title}</h2>")), "{table}");
+        assert!(
+            !html.contains(&format!("<h2>{title}</h2>")),
+            "{table}: titled once, by the page title"
+        );
         for other in ["expansion", "classic", "reversion", "trend"] {
             if other != table {
                 assert!(

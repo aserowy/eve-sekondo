@@ -56,7 +56,7 @@ test('the time ranges sit in the filter section of the dashboard, the wealth pag
     await page.goto(path);
     await expect(page.locator(`#filter-box ${control}`), path).toBeVisible();
     await expect(page.locator(`#main-nav ${control}`), path).toHaveCount(0);
-    await expect(page.locator(`main ${control}`), path).toHaveCount(1);
+    await expect(page.locator(`.page ${control}`), path).toHaveCount(1);
   }
 });
 
@@ -89,8 +89,9 @@ test('the sidebar and the sub-menu stay at the top of the window while the page 
   await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(300);
 
-  expect((await page.locator('aside.sidebar').boundingBox())!.y).toBe(0);
-  expect((await page.locator('nav.sub-menu').boundingBox())!.y).toBe(0);
+  // Within a pixel: a page of fractional height ends a subpixel above the last full scroll step.
+  expect(Math.abs((await page.locator('aside.sidebar').boundingBox())!.y)).toBeLessThan(1);
+  expect(Math.abs((await page.locator('nav.sub-menu').boundingBox())!.y)).toBeLessThan(1);
   expect(await page.evaluate(() => window.scrollX)).toBe(0);
 });
 

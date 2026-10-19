@@ -62,7 +62,8 @@ async fn the_page_shows_the_filter_and_the_wealth_link_as_current(pool: PgPool) 
 
     let html = get(&app, &browser, "/wealth").await;
 
-    assert!(!html.contains("<h1"), "the navigation names the page");
+    assert!(html.contains("<h1>Wealth</h1>"), "one page title");
+    assert_eq!(html.matches("<h1").count(), 1);
     assert!(html.contains(r#"data-character-filter"#));
     assert!(html.contains(r#"hx-get="/wealth""#));
     let filter = html.split(r#"id="filter-box""#).nth(1).unwrap();
@@ -572,7 +573,10 @@ async fn the_cards_read_the_current_figures_and_count_the_unpriced_rows(pool: Pg
         ("kpi-inventory", "Inventory", "30m"),
     ] {
         assert_eq!(kpi(&html, id).value, value, "{name}");
-        assert!(html.contains(&format!("<header>{name}</header>")), "{name}");
+        assert!(
+            html.contains(&format!(r#"<small class="name">{name}</small>"#)),
+            "{name}"
+        );
     }
     assert_eq!(
         kpi(&html, "kpi-inventory").detail.as_deref(),

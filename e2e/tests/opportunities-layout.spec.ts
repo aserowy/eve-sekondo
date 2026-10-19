@@ -31,13 +31,13 @@ async function setFilter(page: Page, label: string, value: string) {
   await input.press('Tab');
 }
 
-test('the page has no loose text, shows its one table, and its filter section holds the filters and the context', async ({ page }) => {
+test('the page is titled by its one table, and its filter section holds the filters and the context', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openOpportunities(page);
 
-  await expect(page.locator('h1')).toHaveCount(0);
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText(['Classic spread trade']);
   await expect(page.locator('main .station-title')).toHaveCount(0);
-  await expect(page.locator('#classic h2')).toHaveText('Classic spread trade');
+  await expect(page.locator('#classic h2')).toHaveCount(0);
   for (const [id] of TABLES.filter(([id]) => id !== 'classic')) await expect(page.locator(`main #${id}`)).toHaveCount(0);
 
   const box = filterBox(page);

@@ -362,7 +362,7 @@ test('without a wealth figure the dashboard says there is no wealth history', as
   await expect(page.locator('canvas[data-chart="wealth-history"]')).toHaveCount(0);
 });
 
-test('the tiles are square cards of one size, in a row above the breakdown', async ({ page }) => {
+test('the tiles are cards of one width that fit their content, in a row above the breakdown', async ({ page }) => {
   await page.setViewportSize({ width: 1920, height: 1080 });
   await loginWith(page, 'Alice Alpha');
   await stubControl('orders', { character_id: 90000001, orders: [stubOrder(1)] });
@@ -376,7 +376,7 @@ test('the tiles are square cards of one size, in a row above the breakdown', asy
   const ids = ['#tile-sell-value', '#tile-escrow', '#tile-wealth', '#tile-sell-count', '#tile-buy-count'];
   const boxes = await Promise.all(ids.map(async (id) => (await page.locator(id).boundingBox())!));
   for (const box of boxes) {
-    expect(Math.abs(box.width - box.height), 'square').toBeLessThanOrEqual(1);
+    expect(box.width, 'wider than high').toBeGreaterThan(box.height);
     expect(Math.abs(box.width - boxes[0].width), 'one size').toBeLessThanOrEqual(1);
     expect(Math.abs(box.y - boxes[0].y), 'one row').toBeLessThanOrEqual(1);
   }
@@ -384,6 +384,7 @@ test('the tiles are square cards of one size, in a row above the breakdown', asy
   expect(boxes.map((b) => b.x)).toEqual([...boxes.map((b) => b.x)].sort((a, b) => a - b));
   expect(boxes[0].y + boxes[0].height).toBeLessThanOrEqual((await page.locator('#breakdown').boundingBox())!.y);
   await expect(page.locator('#tile-wealth').getByRole('link', { name: 'Wealth' })).toHaveAttribute('href', '/wealth');
+  await expect(page.locator('.kpi header')).toHaveCount(0);
 });
 
 test('the rows follow each other: tiles, breakdown, three graphs side by side, then value, orders and wealth alone', async ({ page }) => {

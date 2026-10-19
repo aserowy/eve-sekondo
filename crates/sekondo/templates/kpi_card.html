@@ -1,5 +1,5 @@
 <article class="kpi{% if kpi.error %} error{% endif %}"{% if let Some(id) = kpi.id %} id="{{ id }}"{% endif %}>
-  <header>{{ kpi.name }}</header>
+  <small class="name">{{ kpi.name }}</small>
   <p class="value" title="{{ kpi.exact }}">{{ kpi.value }}</p>
   {% if let Some(detail) = kpi.detail %}<small class="detail" title="{% if let Some(title) = kpi.detail_title %}{{ title }}{% else %}{{ detail }}{% endif %}">{{ detail }}</small>{% endif %}
   {% if let Some(link) = kpi.link %}<a href="{{ link.href }}">{% if link.log_in_icon %}{% include "icons/log-in.html" %}{% endif %}{{ link.label }}</a>{% endif %}
