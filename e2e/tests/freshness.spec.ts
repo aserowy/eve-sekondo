@@ -134,3 +134,29 @@ test('the wealth page shows a warning count for a character needing re-login', a
   await page.goto('/wealth');
   await expect(page.locator('#wealth-freshness .badge.warnings')).toHaveText('1');
 });
+
+test('the trades freshness counts the characters whose transactions are stale and links to log in again', async ({ page }) => {
+  await twoCharacters(page);
+  await wealthPoll(page, 90000001, 'transactions');
+  await wealthPoll(page, 90000002, 'transactions');
+  await page.goto('/trades');
+  await expect(page.locator('#trades-freshness .badge.warnings')).toHaveCount(0);
+
+  await query(
+    "UPDATE wealth_sync SET last_success_at = now() - interval '3 hours' WHERE kind = 'transactions' AND character_id = 90000002",
+  );
+  await page.goto('/trades');
+
+  await expect(page.locator('#trades-freshness .badge.warnings')).toHaveText('1');
+  await expect(toggle(page)).toHaveAccessibleDescription('1 character needs attention');
+  await expect(page.locator('#trades-freshness-body')).toBeHidden();
+  await toggle(page).click();
+  await expect(page.locator('#trades-freshness')).toContainText('Bob Bravo');
+  await expect(page.locator('#trades-freshness li', { hasText: 'Bob Bravo' }).getByText('Stale')).toBeVisible();
+
+  await query('UPDATE characters SET needs_relogin = true WHERE character_id = 90000001');
+  await page.goto('/trades');
+  await expect(page.locator('#trades-freshness .badge.warnings')).toHaveText('2');
+  await toggle(page).click();
+  await expect(page.getByRole('link', { name: 'Log in again' })).toBeVisible();
+});

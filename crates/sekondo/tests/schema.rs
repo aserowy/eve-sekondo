@@ -762,6 +762,91 @@ async fn a_transactions_sync_row_is_allowed_and_an_unknown_kind_is_not(pool: PgP
     assert!(insert("journal").execute(&pool).await.is_err());
 }
 
+/// Everything in the trades migration after the `-- full read` marker.
+fn full_read_statement() -> &'static str {
+    include_str!("../migrations/20261019000001_trades.sql")
+        .split_once("-- full read\n")
+        .expect("a `-- full read` marker in the migration")
+        .1
+}
+
+#[sqlx::test]
+async fn the_full_read_flag_is_set_for_existing_transactions_rows_only(pool: PgPool) {
+    let account = insert_account(&pool).await;
+    insert_character(&pool, account, 1).await;
+    for kind in ["wallet", "assets", "transactions"] {
+        sqlx::query(
+            "INSERT INTO wealth_sync (character_id, kind, next_poll_at) VALUES (1, $1, now())",
+        )
+        .bind(kind)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    async fn flags(pool: &PgPool) -> Result<Vec<(String, bool)>, sqlx::Error> {
+        sqlx::query_as("SELECT kind, full_read FROM wealth_sync ORDER BY kind")
+            .fetch_all(pool)
+            .await
+    }
+    assert_eq!(
+        flags(&pool).await.unwrap(),
+        [
+            ("assets".to_owned(), false),
+            ("transactions".to_owned(), false),
+            ("wallet".to_owned(), false)
+        ],
+        "a new row is created without the flag"
+    );
+
+    sqlx::query(full_read_statement())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        flags(&pool).await.unwrap(),
+        [
+            ("assets".to_owned(), false),
+            ("transactions".to_owned(), true),
+            ("wallet".to_owned(), false)
+        ]
+    );
+}
+
+#[sqlx::test]
+async fn sales_and_their_costs_are_keyed_indexed_and_cascade(pool: PgPool) {
+    let account = insert_account(&pool).await;
+    insert_character(&pool, account, 1).await;
+    let sale = "INSERT INTO sales (transaction_id, character_id, type_id, location_id, quantity, \
+                unit_price, sold_at) VALUES (7, 1, 34, 60003760, 10, 150.25, now())";
+    sqlx::query(sale).execute(&pool).await.unwrap();
+    assert!(
+        sqlx::query(sale).execute(&pool).await.is_err(),
+        "transaction_id is the key"
+    );
+    sqlx::query("INSERT INTO sale_costs (transaction_id, covered_units, cost) VALUES (7, 10, 1000.00)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let indexes: Vec<String> =
+        sqlx::query_scalar("SELECT indexdef FROM pg_indexes WHERE tablename = 'sales'")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    for columns in [
+        "(character_id, type_id, sold_at, transaction_id)",
+        "(character_id, sold_at)",
+    ] {
+        assert!(indexes.iter().any(|d| d.contains(columns)), "{columns}: {indexes:?}");
+    }
+
+    sqlx::query("DELETE FROM sales WHERE transaction_id = 7")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "sale_costs").await, 0, "costs go with the sale");
+}
+
 async fn columns_of(pool: &PgPool, table: &str) -> Vec<String> {
     sqlx::query_scalar(
         "SELECT column_name::text FROM information_schema.columns \

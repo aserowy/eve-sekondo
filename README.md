@@ -118,8 +118,8 @@ the **margin** of each sell order: what its remaining units earn after fees, min
   wallet transactions. It uses the wallet scope the app already has, so no new login is needed. A poll
   reads from the newest transaction back until an answer holds a transaction it already stored, ESI
   returns nothing older, or 50 answers were read. Every personal purchase is stored permanently as a
-  purchase lot, so the history grows beyond ESI's window of about 30 days. Sales and corporation
-  purchases are not stored.
+  purchase lot, so the history grows beyond ESI's window of about 30 days. Personal sales are stored
+  the same way (see "Trades"); corporation transactions are not stored.
 - **First in, first out.** Every personal sell order is remembered with the time it was first issued and
   its total volume, also after it closes (a reprice does not change it). Per character and item, the
   orders in the order they were first issued take units from the oldest lots bought at or before the order
@@ -137,6 +137,37 @@ the **margin** of each sell order: what its remaining units earn after fees, min
   later sell order may get older, cheaper lots than it really did. By decision there is no attempt to
   tell those sales apart.
 - The design and the specifications are in `openspec/changes/order-undercut-volume-and-margin/`.
+
+## Trades
+
+The **Trades** page (`/trades`, between Wealth and Opportunities) lists the personal wallet transactions
+of the selected characters, newest first: date (EVE time), character, item, location, buy/sell,
+quantity, unit price, value (quantity × unit price, before fees) and margin. The range control in the
+table's title (`24h`, `7d` default, `30d`, `90d`) limits the rows, and a sticky totals row shows the bought
+value, the sold value and the sum of the margins that are known (hover it for how many sales it leaves
+out). The page refreshes live when a transactions poll stores something or a fee changes.
+
+- **Storing sales.** The transactions poll above also stores every personal sale permanently, like the
+  purchases (`sales` next to `purchases`). It stops at a transaction it already stored, whether a
+  purchase or a sale.
+- **First in, first out for sales.** Per character and item, the sales in the order of their date (the
+  transaction ID breaking ties) take units from the oldest purchase lots bought at or before the sale
+  that earlier sales did not take, at any location. This is separate from the sell-order allocation: a
+  unit one takes is still free for the other, so a sale's cost and a sell order's cost are not additive.
+  It is redone from all lots and sales whenever either changes.
+- **Sale margin formula.** `quantity × unit price × (1 − sales tax − broker fee) − known cost`, with the
+  character's current fees at the sale's location, rounded half up to the cent and negative when the sale
+  lost money. It reads "—" when the known cost does not cover the whole quantity (hover: "cost known for X
+  of Y units") or when the fees are not known (including in a player structure). A purchase has no
+  margin. Fee changes show in old sales too, because the margin is worked out when the page is read.
+- **Instant sales pay a broker fee here.** The wallet transactions do not tell a sale into a buy order
+  from a sell-order fill, so the broker fee is charged on every sale and the margin of an instant sale is
+  understated by `broker fee × value`. By decision there is no attempt to tell them apart.
+- **One-time full read.** Sales were not stored before this page existed. After the upgrade each existing
+  character's next transactions poll reads back through everything ESI still offers (about 30 days, at
+  most 50 answers) once, ignoring what is stored, to fill in the sales in that window. Older sales are
+  gone, so the table can show purchases without their sales.
+- The design and the specifications are in `openspec/changes/trades-overview/`.
 
 ## Station trading opportunities
 
@@ -185,7 +216,7 @@ sync can be switched off with `STATION_SYNC=off`.
 ## Page layout
 
 Every signed-in page follows the layout guidelines in `openspec/specs/ui-layout/spec.md`: a window page
-(orders, wealth) fills the window and never scrolls as a whole, a scrolling page (dashboard,
+(orders, wealth, trades) fills the window and never scrolls as a whole, a scrolling page (dashboard,
 characters, opportunities and their detail page) stacks full-width rows. A top bar holds the
 navigation, a sub-menu jumps to the rows of a scrolling page, and a filter box holds the filters that
 affect more than one block; these three stay at the top. Every block is a titled panel, every table

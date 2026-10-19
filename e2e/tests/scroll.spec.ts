@@ -1,6 +1,6 @@
 import type { Page } from '@playwright/test';
 import {
-  expect, loginWith, marketPoll, openCharacters, pollCharacter, query, stubControl, stubMarket, stubMarketOrder, stubOrder, test, wealthPoll, stubAsset, feePoll, stubTradeSkills, unfoldFreshness,
+  expect, loginWith, marketPoll, openCharacters, pollCharacter, query, stubControl, stubMarket, stubMarketOrder, stubOrder, test, wealthPoll, stubAsset, feePoll, stubTradeSkills, stubTransaction, unfoldFreshness,
 } from '../support/fixtures';
 
 const scroller = (page: Page, key: string) => page.locator(`[data-scroll-key="${key}"]`);
@@ -178,4 +178,32 @@ test('a fees signal keeps the scroll position of the freshness column', async ({
   });
 
   expect(Math.abs((await scrollTop(page, 'freshness')) - top)).toBeLessThanOrEqual(1);
+});
+
+test('a scrolled trades table keeps its position on trades-updated', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await loginWith(page, 'Alice Alpha');
+  const transactions = Array.from({ length: 200 }, (_, i) =>
+    stubTransaction(i + 1, { type: 34, quantity: 1, price: 100 + i, daysAgo: 1 + i / 100 }),
+  );
+  await stubControl('transactions', { character_id: 90000001, transactions });
+  expect(await wealthPoll(page, 90000001, 'transactions')).toBe('200 updated');
+  const opened = page.waitForResponse((r) => r.url().includes('/trades/table'));
+  await page.goto('/trades');
+  await opened;
+  await page.waitForTimeout(300);
+  await page.evaluate(() => ((window as unknown as { marker: string }).marker = 'same page'));
+  const position = await scrollTo(page, 'trades', 0.5);
+  expect(position).toBeGreaterThan(0);
+
+  await afterRefresh(page, 'trades', '/trades/table', async () => {
+    await stubControl('transactions', {
+      character_id: 90000001,
+      transactions: [...transactions, stubTransaction(500, { type: 35, quantity: 1, price: 10, daysAgo: 0 })],
+    });
+    expect(await wealthPoll(page, 90000001, 'transactions')).toBe('200 updated');
+  });
+
+  expect(Math.abs((await scrollTop(page, 'trades')) - position)).toBeLessThanOrEqual(1);
+  expect(await page.evaluate(() => (window as unknown as { marker: string }).marker)).toBe('same page');
 });

@@ -1,4 +1,4 @@
-import { expect, loginWith, openCharacters, pollCharacter, priceRefresh, query, stubAsset, stubControl, stubOrder, test, unfoldFreshness, wealthPoll } from '../support/fixtures';
+import { expect, loginWith, openCharacters, pollCharacter, priceRefresh, query, stubAsset, stubControl, stubOrder, stubTransaction, test, unfoldFreshness, wealthPoll } from '../support/fixtures';
 import { chartDrawn } from '../support/charts';
 import { expectInsideViewport, horizontalOverflow, verticalOverflow } from '../support/layout';
 
@@ -46,9 +46,9 @@ test('the dashboard does not scroll horizontally at 1024px', async ({ page }) =>
   expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
 });
 
-test('the filter box holds the character filter on dashboard, orders and wealth, and the characters page has none', async ({ page }) => {
+test('the filter box holds the character filter on dashboard, orders, wealth and trades, and the characters page has none', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
-  for (const path of ['/dashboard', '/orders', '/wealth']) {
+  for (const path of ['/dashboard', '/orders', '/wealth', '/trades']) {
     await page.goto(path);
     const box = page.locator('header.bars #filter-box');
     await expect(box, path).toBeVisible();
@@ -336,6 +336,59 @@ test('wealth page: freshness right of the graph and the items, items below the g
   expect(control.y + control.height).toBeLessThanOrEqual(title.y + title.height);
 });
 
+/** Alice with 300 transactions in the last week, on the trades page at 1920x1080. */
+async function manyTrades(page: import('@playwright/test').Page) {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await loginWith(page, 'Alice Alpha');
+  await stubControl('transactions', {
+    character_id: 90000001,
+    transactions: Array.from({ length: 300 }, (_, i) =>
+      stubTransaction(i + 1, { type: 34, quantity: 1, price: 100 + i, buy: i % 2 === 0, daysAgo: 1 + i / 60 }),
+    ),
+  });
+  expect(await wealthPoll(page, 90000001, 'transactions')).toBe('200 updated');
+  await page.goto('/trades');
+  await expect(page.locator('#trades tbody tr').first()).toBeVisible();
+}
+
+test('trades page: no page scroll, the table scrolls with its header and totals in view, freshness right of the table', async ({ page }) => {
+  await manyTrades(page);
+  await unfoldFreshness(page);
+
+  // The panels refresh themselves once the event stream opens, so geometry is read until it settles.
+  await expect(async () => {
+    const table = (await page.locator('#trades-table').boundingBox())!;
+    const side = (await page.locator('#trades-freshness').boundingBox())!;
+    expect(side.x).toBeGreaterThanOrEqual(table.x + table.width);
+    expect(await verticalOverflow(page)).toBeLessThanOrEqual(0);
+  }).toPass();
+
+  const scroller = page.locator('#trades-table .scroll');
+  await scroller.evaluate((el) => (el.scrollTop = el.scrollHeight));
+  const panel = (await page.locator('#trades-table').boundingBox())!;
+  const head = (await page.locator('#trades thead th').first().boundingBox())!;
+  const totals = (await page.locator('#trades tfoot td').first().boundingBox())!;
+  expect(head.y).toBeGreaterThanOrEqual(panel.y);
+  expect(head.y + head.height).toBeLessThanOrEqual(panel.y + panel.height);
+  expect(totals.y + totals.height).toBeLessThanOrEqual(panel.y + panel.height + 1);
+  await expect(page.locator('#trades tfoot td').first()).toBeInViewport();
+  await scroller.evaluate((el) => (el.scrollTop = 0));
+  await expect(page.locator('#trades tfoot td').first()).toBeInViewport();
+  expect(await verticalOverflow(page)).toBeLessThanOrEqual(0);
+});
+
+test('trades page: the range control is in the table title, the character filter in the filter box, and there is no h1', async ({ page }) => {
+  await manyTrades(page);
+
+  const title = (await page.locator('#trades-table .panel-title').boundingBox())!;
+  const control = (await page.locator('#trades-range-control').boundingBox())!;
+  expect(control.y).toBeGreaterThanOrEqual(title.y);
+  expect(control.y + control.height).toBeLessThanOrEqual(title.y + title.height);
+  await expect(page.locator('header.bars #filter-box').getByRole('group', { name: 'Characters' })).toBeVisible();
+  await expect(page.locator('header.bars #filter-box #trades-range-control')).toHaveCount(0);
+  await expect(page.getByRole('heading', { level: 1 })).toHaveCount(0);
+});
+
 test('the wealth page Log in again link keeps its text and carries an icon', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
   expect(await pollCharacter(page, 90000001)).toBe('200 updated');
@@ -418,6 +471,13 @@ test('walking through every signed-in page raises no policy violation', async ({
   await unfoldFreshness(page);
   await page.locator('#wealth-range-control').getByRole('link', { name: '30 days' }).click();
   await expect(page.locator('#wealth-range-control [aria-current="true"]')).toHaveText('30 days');
+  await filters.getByRole('checkbox', { name: 'Bob Bravo' }).check();
+
+  await nav.getByRole('link', { name: 'Trades' }).click();
+  await expect(page).toHaveURL(/\/trades\?chars=90000001/);
+  await unfoldFreshness(page);
+  await page.locator('#trades-range-control').getByRole('link', { name: '30 days' }).click();
+  await expect(page.locator('#trades-range-control [aria-current="true"]')).toHaveText('30 days');
   await filters.getByRole('checkbox', { name: 'Bob Bravo' }).check();
 
   await nav.getByRole('link', { name: 'Opportunities' }).click();

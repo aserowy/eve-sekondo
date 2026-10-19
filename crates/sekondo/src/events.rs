@@ -21,6 +21,8 @@ pub enum Event {
     /// The station book was refreshed or a history pass stored rows. Sent to every account: the
     /// station market is public. Only the opportunities page listens to it.
     OpportunitiesUpdated,
+    /// A transactions poll stored a new purchase or sale, so the trades page has a new row.
+    TradesUpdated,
 }
 
 impl Event {
@@ -32,6 +34,7 @@ impl Event {
             Self::WealthUpdated => "wealth-updated",
             Self::FeesUpdated => "fees-updated",
             Self::OpportunitiesUpdated => "opportunities-updated",
+            Self::TradesUpdated => "trades-updated",
         }
     }
 }

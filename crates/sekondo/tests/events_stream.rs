@@ -345,6 +345,72 @@ async fn a_transactions_poll_that_stores_a_purchase_sends_orders_updated_and_not
     assert!(!text.contains("wealth-updated"), "{text:?}");
 }
 
+fn one_sale() -> serde_json::Value {
+    serde_json::json!({
+        "character_id": ALICE,
+        "transactions": [{
+            "transaction_id": 2, "date": "2026-10-01T12:00:00Z", "type_id": 34,
+            "location_id": 60003760, "quantity": 10, "unit_price": 150.0,
+            "is_buy": false, "is_personal": true,
+        }],
+    })
+}
+
+#[sqlx::test]
+async fn a_new_sale_sends_trades_updated_and_no_orders_updated(pool: PgPool) {
+    let app = app(pool).await;
+    let alice = signed_in(&app, ALICE).await;
+    app.stub_control("transactions", one_sale()).await;
+    let mut stream = open_stream(&app, &alice).await;
+
+    app.state
+        .wealth
+        .poll(ALICE, sekondo::wealth_poller::Kind::Transactions)
+        .await;
+
+    let (text, _) = read_for(&mut stream, Duration::from_millis(600)).await;
+    assert!(text.contains("event: trades-updated"), "{text:?}");
+    assert!(!text.contains("orders-updated"), "{text:?}");
+    assert!(!text.contains("wealth-updated"), "{text:?}");
+}
+
+#[sqlx::test]
+async fn a_new_purchase_sends_trades_updated_and_orders_updated(pool: PgPool) {
+    let app = app(pool).await;
+    let alice = signed_in(&app, ALICE).await;
+    app.stub_control("transactions", one_purchase()).await;
+    let mut stream = open_stream(&app, &alice).await;
+
+    app.state
+        .wealth
+        .poll(ALICE, sekondo::wealth_poller::Kind::Transactions)
+        .await;
+
+    let (text, _) = read_for(&mut stream, Duration::from_millis(600)).await;
+    assert!(text.contains("event: trades-updated"), "{text:?}");
+    assert!(text.contains("event: orders-updated"), "{text:?}");
+}
+
+#[sqlx::test]
+async fn trades_updated_stays_within_the_account(pool: PgPool) {
+    let app = app(pool).await;
+    let alice = signed_in(&app, ALICE).await;
+    let bob = signed_in(&app, BOB).await;
+    app.stub_control("transactions", one_sale()).await;
+    let mut alice_stream = open_stream(&app, &alice).await;
+    let mut bob_stream = open_stream(&app, &bob).await;
+
+    app.state
+        .wealth
+        .poll(ALICE, sekondo::wealth_poller::Kind::Transactions)
+        .await;
+
+    let (alice_text, _) = read_for(&mut alice_stream, Duration::from_millis(600)).await;
+    let (bob_text, _) = read_for(&mut bob_stream, Duration::from_millis(600)).await;
+    assert!(alice_text.contains("trades-updated"), "{alice_text:?}");
+    assert!(!bob_text.contains("trades-updated"), "{bob_text:?}");
+}
+
 #[sqlx::test]
 async fn a_transactions_poll_that_stores_nothing_new_sends_no_signal(pool: PgPool) {
     let app = app(pool).await;

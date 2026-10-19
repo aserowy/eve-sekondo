@@ -14,6 +14,7 @@ pub enum Page {
     Dashboard,
     Orders,
     Wealth,
+    Trades,
     Opportunities,
     Characters,
 }
@@ -51,6 +52,10 @@ impl Nav {
         self.current == Page::Wealth
     }
 
+    pub fn trades_current(&self) -> bool {
+        self.current == Page::Trades
+    }
+
     pub fn opportunities_current(&self) -> bool {
         self.current == Page::Opportunities
     }
@@ -66,6 +71,11 @@ impl Nav {
     /// Carries the selection and never the range: the wealth page has a range of its own.
     pub fn wealth_href(&self) -> String {
         format!("/wealth{}", self.chars_query)
+    }
+
+    /// Carries the selection and never the range: the trades page has a range of its own.
+    pub fn trades_href(&self) -> String {
+        format!("/trades{}", self.chars_query)
     }
 
     /// Carries the selection and never the page's own sorting or filters.

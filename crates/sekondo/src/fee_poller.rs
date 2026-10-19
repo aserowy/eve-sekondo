@@ -202,7 +202,7 @@ impl FeePoller {
             .map(|s| (s.skill_id, s.active_skill_level))
             .unzip();
         let mut tx = self.pool.begin().await?;
-        let before = fees::for_characters(&mut *tx, &[character_id]).await?;
+        let before = fees::FeeSnapshot::of(&mut tx, &[character_id]).await?;
         sqlx::query("DELETE FROM character_skills WHERE character_id = $1")
             .bind(character_id)
             .execute(&mut *tx)
@@ -224,7 +224,7 @@ impl FeePoller {
             response.expires_at,
         )
         .await?;
-        let after = fees::for_characters(&mut *tx, &[character_id]).await?;
+        let after = fees::FeeSnapshot::of(&mut tx, &[character_id]).await?;
         tx.commit().await?;
         Ok(before != after)
     }
@@ -247,7 +247,7 @@ impl FeePoller {
         let from_type: Vec<&str> = kept.iter().map(|s| s.from_type.as_str()).collect();
         let standing: Vec<&str> = kept.iter().map(|s| s.standing.as_str()).collect();
         let mut tx = self.pool.begin().await?;
-        let before = fees::for_characters(&mut *tx, &[character_id]).await?;
+        let before = fees::FeeSnapshot::of(&mut tx, &[character_id]).await?;
         sqlx::query("DELETE FROM character_standings WHERE character_id = $1")
             .bind(character_id)
             .execute(&mut *tx)
@@ -272,7 +272,7 @@ impl FeePoller {
             response.expires_at,
         )
         .await?;
-        let after = fees::for_characters(&mut *tx, &[character_id]).await?;
+        let after = fees::FeeSnapshot::of(&mut tx, &[character_id]).await?;
         tx.commit().await?;
         Ok(before != after)
     }
@@ -387,16 +387,20 @@ impl FeePoller {
 
 impl FeePoller {
     /// Looks up the owner of up to [`STATIONS_PER_TICK`] NPC stations where a current order is
-    /// placed and whose owner is not known yet, one ESI call per station whoever's orders they
-    /// are. An account whose fees change because of an owner gets `fees-updated`. A lookup that
+    /// placed or a sale was made and whose owner is not known yet, one ESI call per station
+    /// whoever's they are. An account whose fees change because of an owner gets `fees-updated`. A lookup that
     /// fails is retried on a later tick, later each time. Answers how many owners were learned.
     pub async fn resolve_stations(&self) -> usize {
         let now = self.clock.now();
         let unknown: Vec<i64> = match sqlx::query_scalar(
-            "SELECT DISTINCT o.location_id FROM current_orders o
-             WHERE o.location_id < $1
-               AND NOT EXISTS (SELECT 1 FROM station_owners s WHERE s.station_id = o.location_id)
-             ORDER BY o.location_id",
+            "SELECT l.location_id FROM (
+                 SELECT location_id FROM current_orders
+                 UNION
+                 SELECT location_id FROM sales
+             ) l
+             WHERE l.location_id < $1
+               AND NOT EXISTS (SELECT 1 FROM station_owners s WHERE s.station_id = l.location_id)
+             ORDER BY l.location_id",
         )
         .bind(STRUCTURE_ID_MIN)
         .fetch_all(&self.pool)
@@ -499,15 +503,18 @@ impl FeePoller {
     ) -> Result<(), sqlx::Error> {
         let mut tx = self.pool.begin().await?;
         let characters: Vec<(i64, Uuid)> = sqlx::query_as(
-            "SELECT DISTINCT o.character_id, c.account_id FROM current_orders o
-             JOIN characters c ON c.character_id = o.character_id
-             WHERE o.location_id = $1",
+            "SELECT DISTINCT t.character_id, c.account_id FROM (
+                 SELECT character_id FROM current_orders WHERE location_id = $1
+                 UNION
+                 SELECT character_id FROM sales WHERE location_id = $1
+             ) t
+             JOIN characters c ON c.character_id = t.character_id",
         )
         .bind(station_id)
         .fetch_all(&mut *tx)
         .await?;
         let ids: Vec<i64> = characters.iter().map(|(id, _)| *id).collect();
-        let before = fees::for_characters(&mut *tx, &ids).await?;
+        let before = fees::FeeSnapshot::of(&mut tx, &ids).await?;
         sqlx::query(
             "INSERT INTO station_owners (station_id, owner_id, resolved_at) VALUES ($1, $2, $3)
              ON CONFLICT (station_id) DO NOTHING",
@@ -517,20 +524,12 @@ impl FeePoller {
         .bind(now)
         .execute(&mut *tx)
         .await?;
-        let after = fees::for_characters(&mut *tx, &ids).await?;
+        let after = fees::FeeSnapshot::of(&mut tx, &ids).await?;
         tx.commit().await?;
 
         let accounts: HashSet<Uuid> = characters
             .iter()
-            .filter(|(id, _)| {
-                let of = |rows: &[fees::FeeRow]| {
-                    rows.iter()
-                        .filter(|r| r.character_id == *id)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                };
-                of(&before) != of(&after)
-            })
+            .filter(|(id, _)| before.of_character(*id) != after.of_character(*id))
             .map(|(_, account)| *account)
             .collect();
         for account in accounts {

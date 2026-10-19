@@ -33,6 +33,25 @@ pub async fn list_freshness(
     .await
 }
 
+/// How fresh the wallet transactions of each selected character are, for the trades page.
+pub async fn list_transactions_freshness(
+    pool: &PgPool,
+    account_id: Uuid,
+    selection: &CharacterSelection,
+) -> Result<Vec<FreshnessRecord>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT c.character_id, c.name, c.needs_relogin, s.last_success_at, s.next_poll_at
+         FROM characters c
+         LEFT JOIN wealth_sync s ON s.character_id = c.character_id AND s.kind = 'transactions'
+         WHERE c.account_id = $1 AND c.character_id = ANY($2)
+         ORDER BY c.created_at, c.character_id",
+    )
+    .bind(account_id)
+    .bind(selection.ids())
+    .fetch_all(pool)
+    .await
+}
+
 /// Stale: needs a re-login, never polled successfully, or the last success is older than twice
 /// the refresh interval.
 pub fn is_stale(record: &FreshnessRecord, now: OffsetDateTime, interval: Duration) -> bool {
@@ -203,5 +222,27 @@ mod tests {
     fn just_over_twice_the_interval_is_stale() {
         let last = NOW - INTERVAL * 2 - Duration::seconds(1);
         assert!(is_stale(&record(false, Some(last)), NOW, INTERVAL));
+    }
+
+    #[test]
+    fn transactions_are_stale_after_two_hours() {
+        let hour = crate::wealth_poller::TRANSACTIONS_INTERVAL;
+        assert!(is_stale(
+            &record(false, Some(NOW - Duration::hours(3))),
+            NOW,
+            hour
+        ));
+        assert!(!is_stale(
+            &record(false, Some(NOW - Duration::minutes(110))),
+            NOW,
+            hour
+        ));
+    }
+
+    #[test]
+    fn transactions_of_a_character_needing_re_login_or_never_polled_are_stale() {
+        let hour = crate::wealth_poller::TRANSACTIONS_INTERVAL;
+        assert!(is_stale(&record(true, Some(NOW)), NOW, hour));
+        assert!(is_stale(&record(false, None), NOW, hour));
     }
 }

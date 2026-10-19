@@ -1,4 +1,4 @@
-import { expect, loginWith, test } from '../support/fixtures';
+import { expect, loginWith, openCharacters, test } from '../support/fixtures';
 
 test('navigate between the signed-in pages, and sign out from the navigation', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
@@ -18,6 +18,11 @@ test('navigate between the signed-in pages, and sign out from the navigation', a
   await nav.getByRole('link', { name: 'Wealth' }).click();
   await expect(page).toHaveURL(/\/wealth$/);
   await expect(nav.getByRole('link', { name: 'Wealth' })).toHaveAttribute('aria-current', 'page');
+
+  await nav.getByRole('link', { name: 'Trades' }).click();
+  await expect(page).toHaveURL(/\/trades$/);
+  await expect(nav.getByRole('link', { name: 'Trades' })).toHaveAttribute('aria-current', 'page');
+  await expect(nav.getByRole('link', { name: 'Wealth' })).not.toHaveAttribute('aria-current', 'page');
 
   await nav.getByRole('link', { name: 'Opportunities' }).click();
   await expect(page).toHaveURL(/\/opportunities$/);
@@ -59,4 +64,27 @@ test('characters and sign out are icon-only controls in a single thin top bar', 
   );
   expect(Math.max(...centres) - Math.min(...centres), 'all controls on one row').toBeLessThanOrEqual(3);
   await expect(page.getByRole('heading', { level: 1 })).toHaveCount(0);
+});
+
+test('the trades link carries the selection and never a range', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  await openCharacters(page);
+  await page.getByRole('button', { name: 'Add character' }).click();
+  await page.getByRole('link', { name: 'Bob Bravo' }).click();
+  await expect(page).toHaveURL(/\/characters$/);
+  const nav = page.locator('#main-nav');
+
+  await page.goto('/orders');
+  await page.getByRole('checkbox', { name: 'Bob Bravo' }).uncheck();
+  await expect(page).toHaveURL(/\/orders\?chars=90000001$/);
+  await nav.getByRole('link', { name: 'Trades' }).click();
+
+  await expect(page).toHaveURL(/\/trades\?chars=90000001$/);
+  await expect(page.getByRole('checkbox', { name: 'Alice Alpha' })).toBeChecked();
+  await expect(page.getByRole('checkbox', { name: 'Bob Bravo' })).not.toBeChecked();
+
+  await page.goto('/dashboard?range=30d');
+  await nav.getByRole('link', { name: 'Trades' }).click();
+  await expect(page).toHaveURL(/\/trades$/);
+  await expect(page.locator('#trades-range-control a[aria-current="true"]')).toHaveText('7 days');
 });

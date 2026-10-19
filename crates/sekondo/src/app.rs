@@ -32,7 +32,7 @@ use crate::{
     station_history::StationHistoryPoller,
     tls,
     tokens::TokenService,
-    wealth_page,
+    trades_page, wealth_page,
     wealth_poller::WealthPoller,
 };
 
@@ -221,6 +221,9 @@ pub fn router(state: AppState, extra_routes: Router<AppState>) -> Router {
         .route("/wealth/freshness", get(wealth_page::freshness))
         .route("/wealth/graph", get(wealth_page::graph))
         .route("/wealth/items", get(wealth_page::items))
+        .route("/trades", get(trades_page::page))
+        .route("/trades/table", get(trades_page::table))
+        .route("/trades/freshness", get(trades_page::freshness))
         .route("/opportunities", get(opportunities::page::page))
         .route(
             "/opportunities/freshness",

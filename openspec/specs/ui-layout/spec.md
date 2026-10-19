@@ -18,7 +18,7 @@ Every page SHALL use one dark theme served by the application itself, without an
 - **THEN** the only stylesheet it loads is the application's own
 
 #### Scenario: No policy violations
-- **WHEN** a signed-in user visits the dashboard, the orders page, the wealth page, the characters page, the opportunities page and an opportunity detail page, and uses a sub-menu link on each page that has one
+- **WHEN** a signed-in user visits the dashboard, the orders page, the wealth page, the trades page, the characters page, the opportunities page and an opportunity detail page, and uses a sub-menu link on each page that has one
 - **THEN** the browser reports no Content Security Policy violations
 
 ### Requirement: Full-width pages
@@ -63,14 +63,18 @@ The dashboard SHALL be laid out in rows, top to bottom: the tiles; the per-chara
 - **THEN** the breakdown shows 20 rows and scrolls inside itself, and the split and top-items row is still inside the window
 
 ### Requirement: Scrolling panels with sticky headers
-The orders page's tables and the wealth page's items table SHALL fill their panel and scroll inside it, as tables on a window page. The dashboard breakdown and the opportunities tables SHALL follow the row limit of tables on a scrolling page. While any of these tables scrolls, its header row SHALL stay visible at the top of its panel.
+The orders page's tables, the wealth page's items table and the trades table SHALL fill their panel and scroll inside it, as tables on a window page. The dashboard breakdown and the opportunities tables SHALL follow the row limit of tables on a scrolling page. While any of these tables scrolls, its header row SHALL stay visible at the top of its panel.
 
 #### Scenario: Scroll the sell table
 - **WHEN** a user with 200 sell orders scrolls the sell table to its end at 1920×1080
 - **THEN** the sell table's header row stays visible, the buy table stays in place, and the page itself has not scrolled
 
+#### Scenario: Scroll the trades table
+- **WHEN** a user with 300 transactions in the range scrolls the trades table to its end at 1920×1080
+- **THEN** the trades table's header row and totals row stay visible, and the page itself has not scrolled
+
 ### Requirement: Freshness side column
-Status and freshness information that belongs to a whole page SHALL be shown in a freshness side column on the right of the content at 1280px width or more, scrolling inside itself when it does not fit. The orders page, the wealth page and the opportunities page SHALL have one. On the orders page it also holds the fees per location. On a window page the column is as tall as the content. On a scrolling page the column SHALL stay in place while the page scrolls and SHALL be as tall as the window below the bars. The order tables SHALL be stacked, the sell table above the buy table, each using the full width left of the side column or of its collapsed strip. The opportunities tables SHALL use the full width left of the side column or of its collapsed strip.
+Status and freshness information that belongs to a whole page SHALL be shown in a freshness side column on the right of the content at 1280px width or more, scrolling inside itself when it does not fit. The orders page, the wealth page, the trades page and the opportunities page SHALL have one. On the orders page it also holds the fees per location. On a window page the column is as tall as the content. On a scrolling page the column SHALL stay in place while the page scrolls and SHALL be as tall as the window below the bars. The order tables SHALL be stacked, the sell table above the buy table, each using the full width left of the side column or of its collapsed strip. The trades table and the opportunities tables SHALL use the full width left of the side column or of its collapsed strip.
 
 #### Scenario: Orders page columns
 - **WHEN** a signed-in user opens the orders page at 1920×1080 and unfolds the freshness
@@ -84,10 +88,15 @@ Status and freshness information that belongs to a whole page SHALL be shown in 
 - **WHEN** a signed-in user opens the opportunities page at 1920×1080, unfolds the freshness and scrolls to the trend table
 - **THEN** the freshness is still right of the tables, fully inside the window below the bars
 
+#### Scenario: Trades page columns
+- **WHEN** a signed-in user opens the trades page at 1920×1080 and unfolds the freshness
+- **THEN** the freshness is right of the trades table
+
 ### Requirement: Collapsible freshness
 On every page with a freshness side column, the column SHALL start collapsed when the page loads: a narrow strip with an icon-only toggle. Activating the toggle SHALL unfold the column and activating it again SHALL fold it. The toggle SHALL expose its state to assistive technology, SHALL have the accessible name "Freshness", and SHALL show "Show freshness" or "Hide freshness" on hover. While collapsed, the strip SHALL show a warning count in the error style, and SHALL show no number when the count is zero. The warning count is:
 - orders page: the number of selected characters that are stale or need re-login
 - wealth page: the number of selected characters whose wallet or assets are stale, or who need re-login
+- trades page: the number of selected characters whose transactions are stale, or who need re-login
 - opportunities page: one each for a stale station book, a failed last book refresh and a failed last history run
 
 The state SHALL stay as the user left it across live refreshes and changes of filter, sorting and range on the same page, and SHALL return to collapsed when the page is loaded again. While collapsed, the content SHALL use the width the column gave up.
@@ -124,6 +133,10 @@ The state SHALL stay as the user left it across live refreshes and changes of fi
 - **WHEN** the user has unfolded the freshness and reloads the page
 - **THEN** the freshness is collapsed
 
+#### Scenario: Trades warning count
+- **WHEN** one of two selected characters' last successful transactions poll is three hours old and the user opens the trades page
+- **THEN** the collapsed strip shows "1" in the error style
+
 ### Requirement: Icons
 Icons SHALL be used sparingly and come from one consistent line-icon set served by the application itself. Icon-only controls SHALL appear only in the top bar, with one exception: the freshness toggle. Each icon-only control SHALL keep its text as its accessible name and show it on hover. Outside the top bar, any other action MAY carry an icon in front of its text, but SHALL keep the text. The "Unlink", "Add character" and "Log in again" actions SHALL carry an icon and their text. Icons SHALL take the colour of the surrounding text.
 
@@ -148,7 +161,7 @@ Graphs SHALL use small, dimmed axis labels, grid lines and legends that match th
 
 ### Requirement: Page types
 Every signed-in page SHALL be one of two page types:
-- A **window page** fills the browser window below its bars and SHALL NOT scroll vertically as a whole at 1280px width or more. Its panels share the window's height and scroll inside themselves. The orders page and the wealth page are window pages.
+- A **window page** fills the browser window below its bars and SHALL NOT scroll vertically as a whole at 1280px width or more. Its panels share the window's height and scroll inside themselves. The orders page, the wealth page and the trades page are window pages.
 - A **scrolling page** stacks full-width rows of panels from top to bottom and MAY scroll vertically. The dashboard, the characters page, the opportunities page and the opportunity detail page are scrolling pages.
 
 #### Scenario: Window page does not scroll
@@ -159,11 +172,15 @@ Every signed-in page SHALL be one of two page types:
 - **WHEN** a user opens the opportunities page at 1920×1080 with 20 rows in every table
 - **THEN** the page scrolls vertically and the four table panels are stacked, each as wide as the content area
 
+#### Scenario: Trades page does not scroll
+- **WHEN** a user with 300 transactions in the range opens the trades page at 1920×1080
+- **THEN** the page itself cannot be scrolled vertically
+
 ### Requirement: Content blocks are panels
 Every block of content on a signed-in page SHALL be a panel with a title, apart from the top bar, the section sub-menu and the filter box. Pages SHALL NOT show a page heading or loose text outside a panel or a bar. The navigation's current-page marker identifies the page.
 
 #### Scenario: No page heading
-- **WHEN** a signed-in user opens the dashboard, the orders page, the wealth page, the characters page, the opportunities page or an opportunity detail page
+- **WHEN** a signed-in user opens the dashboard, the orders page, the wealth page, the trades page, the characters page, the opportunities page or an opportunity detail page
 - **THEN** the page has no `h1` heading and no heading or paragraph outside a panel or a bar
 
 ### Requirement: Section sub-menu
@@ -198,10 +215,11 @@ A filter that affects more than one content block of a page SHALL be placed in t
 - dashboard: the character filter and the time range
 - orders page: the character filter
 - wealth page: the character filter
+- trades page: the character filter
 - opportunities page: the character filter, the opportunity filters, and as text the station name and the fees used
 - opportunity detail page: the character filter, and as text the station name and the fees used
 
-The wealth page's time range affects only its graph and SHALL stay in the graph panel's title.
+The wealth page's time range affects only its graph and SHALL stay in the graph panel's title. The trades page's time range affects only its table and SHALL stay in the table panel's title.
 
 #### Scenario: Orders filter box
 - **WHEN** a signed-in user with three characters opens the orders page at 1280×800
@@ -222,6 +240,10 @@ The wealth page's time range affects only its graph and SHALL stay in the graph 
 #### Scenario: Narrow window wraps
 - **WHEN** a signed-in user with five characters opens the opportunities page in a 1024px wide window
 - **THEN** the filter box wraps onto more lines and the page does not scroll horizontally
+
+#### Scenario: Trades range stays with its table
+- **WHEN** a signed-in user opens the trades page
+- **THEN** the character filter is in the filter box and the time range control is in the trades table panel's title
 
 ### Requirement: Sticky bars
 On scrolling pages, the top bar, the section sub-menu and the filter box SHALL stay visible at the top of the window while the page scrolls.

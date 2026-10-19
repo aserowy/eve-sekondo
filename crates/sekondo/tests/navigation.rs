@@ -92,6 +92,7 @@ async fn every_signed_in_page_has_the_navigation_with_its_own_entry_marked(pool:
     for (path, current) in [
         ("/dashboard", "Dashboard"),
         ("/wealth", "Wealth"),
+        ("/trades", "Trades"),
         ("/opportunities", "Opportunities"),
         ("/characters", "Characters"),
     ] {
@@ -100,6 +101,7 @@ async fn every_signed_in_page_has_the_navigation_with_its_own_entry_marked(pool:
             "/dashboard",
             "/orders",
             "/wealth",
+            "/trades",
             "/opportunities",
             "/characters",
         ] {
@@ -147,6 +149,7 @@ async fn navigation_links_carry_a_narrowed_selection(pool: PgPool) {
         format!("/dashboard?chars={BOB}"),
         format!("/characters?chars={BOB}"),
         format!("/orders?chars={BOB}"),
+        format!("/trades?chars={BOB}"),
         format!("/opportunities?chars={BOB}"),
     ] {
         let html = unescaped(&page(&app, &browser, &path).await);
@@ -154,6 +157,7 @@ async fn navigation_links_carry_a_narrowed_selection(pool: PgPool) {
             "/dashboard",
             "/orders",
             "/wealth",
+            "/trades",
             "/opportunities",
             "/characters",
         ] {
@@ -190,6 +194,7 @@ async fn characters_and_sign_out_are_icon_only_controls_that_keep_their_names(po
         "/dashboard",
         "/orders",
         "/wealth",
+        "/trades",
         "/opportunities",
         "/characters",
     ] {
@@ -215,4 +220,30 @@ async fn characters_and_sign_out_are_icon_only_controls_that_keep_their_names(po
         assert!(nav.matches("<svg").count() >= 2, "{path}: icons in the bar");
         assert!(!html.contains("<h1"), "{path} has a page heading");
     }
+}
+
+#[sqlx::test]
+async fn the_trades_link_sits_between_wealth_and_opportunities_and_never_carries_a_range(
+    pool: PgPool,
+) {
+    let app = app(pool).await;
+    let browser = signed_in(&app).await;
+
+    let html = page(&app, &browser, "/dashboard?range=30d").await;
+
+    let links: Vec<&str> = html
+        .split_once(r#"class="links""#)
+        .unwrap()
+        .1
+        .split_once("</ul>")
+        .unwrap()
+        .0
+        .split(r#"href=""#)
+        .skip(1)
+        .map(|rest| rest.split('"').next().unwrap())
+        .collect();
+    assert_eq!(
+        links,
+        ["/dashboard", "/orders", "/wealth", "/trades", "/opportunities"]
+    );
 }

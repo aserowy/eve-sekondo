@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use sqlx::{PgExecutor, PgPool};
+use sqlx::{PgConnection, PgExecutor, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -26,6 +26,17 @@ macro_rules! order_locations_sql {
             FROM current_orders o
             JOIN characters c ON c.character_id = o.character_id
             WHERE o.character_id = ANY($1) AND ($2::uuid IS NULL OR c.account_id = $2)"
+    };
+}
+
+/// The locations of the stored sales, one row per (character, location). `$1` is the character IDs
+/// and `$2` the account the characters must belong to (`NULL`: any).
+macro_rules! sale_locations_sql {
+    () => {
+        "SELECT DISTINCT s.character_id, s.location_id
+            FROM sales s
+            JOIN characters c ON c.character_id = s.character_id
+            WHERE s.character_id = ANY($1) AND ($2::uuid IS NULL OR c.account_id = $2)"
     };
 }
 
@@ -146,6 +157,10 @@ const LOCATION_FEES_SQL: &str = concat!(
 /// worked out from). The orders listing joins it to work out the margin.
 pub const FEE_RATES_SQL: &str = fee_rates_sql!(order_locations_sql!());
 
+/// Like [`FEE_RATES_SQL`], for the locations of the stored sales. The trades listing joins it to
+/// work out the margin of a sale.
+pub const SALE_FEE_RATES_SQL: &str = fee_rates_sql!(sale_locations_sql!());
+
 /// The fee figures of one character at one location, as decimal text in percent.
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct FeeRow {
@@ -171,6 +186,59 @@ pub async fn for_characters<'e>(
         .bind(None::<Uuid>)
         .fetch_all(executor)
         .await
+}
+
+/// The rates these characters have at the locations of their sales, as decimal text in percent:
+/// `(character, location, sales tax, broker fee)`. For the change detection of what the trades
+/// page shows.
+pub async fn sale_rates_for_characters<'e>(
+    executor: impl PgExecutor<'e>,
+    character_ids: &[i64],
+) -> Result<Vec<(i64, i64, Option<String>, Option<String>)>, sqlx::Error> {
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT f.character_id, f.location_id, f.sales_tax::text, f.broker_fee::text
+         FROM ({SALE_FEE_RATES_SQL}) f
+         ORDER BY f.character_id, f.location_id"
+    )))
+    .bind(character_ids)
+    .bind(None::<Uuid>)
+    .fetch_all(executor)
+    .await
+}
+
+/// What the pages show of the fees of these characters: the rates at the locations of their orders
+/// and of their sales. Two snapshots differ exactly when a signal is due.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeeSnapshot {
+    pub orders: Vec<FeeRow>,
+    pub sales: Vec<(i64, i64, Option<String>, Option<String>)>,
+}
+
+impl FeeSnapshot {
+    pub async fn of(conn: &mut PgConnection, character_ids: &[i64]) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            orders: for_characters(&mut *conn, character_ids).await?,
+            sales: sale_rates_for_characters(&mut *conn, character_ids).await?,
+        })
+    }
+
+    /// The part of one character.
+    pub fn of_character(&self, character_id: i64) -> Self {
+        Self {
+            orders: self
+                .orders
+                .iter()
+                .filter(|r| r.character_id == character_id)
+                .cloned()
+                .collect(),
+            sales: self
+                .sales
+                .iter()
+                .filter(|r| r.0 == character_id)
+                .cloned()
+                .collect(),
+        }
+    }
 }
 
 /// The rows of these characters that belong to the account, so a selection can never reach

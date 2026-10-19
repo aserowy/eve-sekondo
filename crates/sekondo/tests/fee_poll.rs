@@ -513,6 +513,63 @@ async fn a_station_owner_that_completes_a_fee_signals_only_the_affected_accounts
     assert_eq!(signals(&mut theirs).await, Vec::<Event>::new());
 }
 
+#[sqlx::test]
+async fn a_sale_at_a_new_npc_station_gets_its_owner_looked_up_and_signals_the_account(
+    pool: PgPool,
+) {
+    let env = linked(pool).await;
+    env.fees.poll(ALICE, Kind::Skills).await;
+    env.fees.poll(ALICE, Kind::Standings).await;
+    // No order anywhere: the only reason to look at Jita 4-4 is Alice's sale there.
+    sqlx::query(
+        "INSERT INTO sales (transaction_id, character_id, type_id, location_id, quantity, \
+         unit_price, sold_at) VALUES (7, $1, 34, $2, 10, 150, now())",
+    )
+    .bind(ALICE)
+    .bind(JITA)
+    .execute(&env.pool)
+    .await
+    .unwrap();
+    let mut mine = env.events.subscribe(account_of(&env, ALICE).await);
+
+    let learned = env.fees.resolve_stations().await;
+
+    assert_eq!(learned, 1);
+    assert_eq!(env.stub.station_requests(), [JITA]);
+    assert_eq!(signals(&mut mine).await, [Event::FeesUpdated]);
+}
+
+#[sqlx::test]
+async fn a_skills_poll_that_changes_the_fees_of_a_sale_signals_the_account_without_any_order(
+    pool: PgPool,
+) {
+    let env = linked(pool).await;
+    sqlx::query(
+        "INSERT INTO sales (transaction_id, character_id, type_id, location_id, quantity, \
+         unit_price, sold_at) VALUES (7, $1, 34, $2, 10, 150, now())",
+    )
+    .bind(ALICE)
+    .bind(JITA)
+    .execute(&env.pool)
+    .await
+    .unwrap();
+    let mut stream = env.events.subscribe(account_of(&env, ALICE).await);
+
+    env.fees.poll(ALICE, Kind::Skills).await;
+
+    assert_eq!(signals(&mut stream).await, [Event::FeesUpdated]);
+}
+
+#[sqlx::test]
+async fn a_skills_poll_changes_nothing_for_a_character_without_orders_or_sales(pool: PgPool) {
+    let env = linked(pool).await;
+    let mut stream = env.events.subscribe(account_of(&env, ALICE).await);
+
+    env.fees.poll(ALICE, Kind::Skills).await;
+
+    assert_eq!(signals(&mut stream).await, Vec::<Event>::new());
+}
+
 // ---- the built-in station ----
 
 #[sqlx::test]

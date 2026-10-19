@@ -1,0 +1,53 @@
+<section id="trades-table" class="panel" hx-get="{{ view.table_url }}" hx-trigger="sse:trades-updated, sse:fees-updated, htmx:sseOpen from:body" hx-swap="outerHTML">
+  <div class="panel-title">
+    <h2>Trades</h2>
+    <div id="trades-range-control" class="range-control" role="group" aria-label="Time range">
+      {% for r in view.ranges %}
+      <a href="{{ r.href }}" hx-get="{{ r.table_url }}" hx-target="#trades-table" hx-swap="outerHTML" hx-sync="#trades-table:replace" hx-push-url="{{ r.href }}"{% if r.current %} aria-current="true"{% endif %}>{{ r.label }}</a>
+      {% endfor %}
+    </div>
+  </div>
+  {% if view.rows.is_empty() %}
+  <p>No trades in this range.</p>
+  {% else %}
+  <div class="scroll" data-scroll-key="trades">
+  <table class="data" id="trades">
+    <thead>
+      <tr>
+        <th scope="col">Date (EVE time)</th>
+        <th scope="col">Character</th>
+        <th scope="col">Item</th>
+        <th scope="col">Location</th>
+        <th scope="col">Buy/Sell</th>
+        <th scope="col" class="num">Quantity</th>
+        <th scope="col" class="num">Unit price</th>
+        <th scope="col" class="num">Value</th>
+        <th scope="col" class="num">Margin</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in view.rows %}
+      <tr data-transaction="{{ r.transaction_id }}">
+        <td>{{ r.at }}</td>
+        <td>{{ r.character }}</td>
+        <td>{{ r.item }}</td>
+        <td>{{ r.location }}</td>
+        <td>{{ r.side }}</td>
+        <td class="num">{{ r.quantity }}</td>
+        <td class="num" title="{{ r.price_exact }}">{{ r.price }}</td>
+        <td class="num" title="{{ r.value_exact }}">{{ r.value }}</td>
+        <td class="num"{% if !r.margin_title.is_empty() %} title="{{ r.margin_title }}"{% endif %} data-column="margin">{% if r.margin_negative %}<mark class="badge loss">{{ r.margin }}</mark>{% else %}{{ r.margin }}{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+    <tfoot>
+      <tr>
+        <td colspan="5">Totals</td>
+        <td colspan="3" class="num">Bought <span title="{{ view.totals.bought_exact }}">{{ view.totals.bought }}</span> · Sold <span title="{{ view.totals.sold_exact }}">{{ view.totals.sold }}</span></td>
+        <td class="num" title="{{ view.totals.margin_title }}" data-column="margin">{{ view.totals.margin }}</td>
+      </tr>
+    </tfoot>
+  </table>
+  </div>
+  {% endif %}
+</section>

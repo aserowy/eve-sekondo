@@ -357,6 +357,61 @@ test('a margin appears after the missing purchase is polled without reloading', 
   expect(await page.evaluate(() => (window as unknown as { marker: string }).marker)).toBe('same page');
 });
 
+// ---- the trades page ----
+
+/** Alice bought 10 of item 34 at 100 and sold them at 150, with Accounting 5 and Broker Relations 5; she is on the trades page. */
+async function aliceOnTrades(page: import('@playwright/test').Page) {
+  await loginWith(page, 'Alice Alpha');
+  await stubControl('skills', { character_id: 90000001, skills: stubTradeSkills(5, 5) });
+  await stubControl('transactions', {
+    character_id: 90000001,
+    transactions: [
+      stubTransaction(1, { type: 34, quantity: 10, price: 100, daysAgo: 5 }),
+      stubTransaction(2, { type: 34, quantity: 10, price: 150, buy: false, daysAgo: 2 }),
+    ],
+  });
+  expect(await wealthPoll(page, 90000001, 'transactions')).toBe('200 updated');
+  expect(await feePoll(page)).toBe('200 ok');
+  // The stream's first refresh shows that it is open; a signal sent before would be lost.
+  const opened = page.waitForResponse((r) => r.url().includes('/trades/table'));
+  await page.goto('/trades');
+  await opened;
+  await expect(page.locator('#trades tr[data-transaction="2"]')).toBeVisible();
+  await page.evaluate(() => ((window as unknown as { marker: string }).marker = 'same page'));
+}
+
+test('a new sale appears on the trades page without a reload', async ({ page }) => {
+  await aliceOnTrades(page);
+  await expect(page.locator('#trades tbody tr')).toHaveCount(2);
+
+  await stubControl('transactions', {
+    character_id: 90000001,
+    transactions: [
+      stubTransaction(1, { type: 34, quantity: 10, price: 100, daysAgo: 5 }),
+      stubTransaction(2, { type: 34, quantity: 10, price: 150, buy: false, daysAgo: 2 }),
+      stubTransaction(3, { type: 35, quantity: 3, price: 200, buy: false, daysAgo: 0 }),
+    ],
+  });
+  expect(await wealthPoll(page, 90000001, 'transactions')).toBe('200 updated');
+
+  await expect(page.locator('#trades tbody tr')).toHaveCount(3);
+  await expect(page.locator('#trades tr[data-transaction="3"] td').nth(2)).toHaveText('Pyerite');
+  expect(await page.evaluate(() => (window as unknown as { marker: string }).marker)).toBe('same page');
+});
+
+test('a higher Accounting level changes the margin of a sale on the trades page without a reload', async ({ page }) => {
+  await aliceOnTrades(page);
+  const margin = page.locator('#trades tr[data-transaction="2"] td').nth(8);
+  await expect(margin).toHaveText('428.23');
+
+  // Accounting 4 raises the sales tax to 4.2%: 10 * 150 * (1 - 4.2% - 1.41%) - 1000 = 415.85
+  await stubControl('skills', { character_id: 90000001, skills: stubTradeSkills(4, 5) });
+  expect(await feePoll(page)).toBe('200 ok');
+
+  await expect(margin).toHaveText('415.85');
+  expect(await page.evaluate(() => (window as unknown as { marker: string }).marker)).toBe('same page');
+});
+
 // ---- the opportunities page ----
 
 

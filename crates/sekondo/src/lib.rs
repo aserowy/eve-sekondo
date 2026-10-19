@@ -38,6 +38,8 @@ pub mod test_hooks;
 pub mod tls;
 pub mod tokens;
 pub mod trade;
+pub mod trades;
+pub mod trades_page;
 pub mod wealth;
 pub mod wealth_page;
 pub mod wealth_poller;

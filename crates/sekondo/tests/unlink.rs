@@ -250,6 +250,9 @@ async fn unlinking_a_character_removes_its_wealth_and_fee_data_and_keeps_the_oth
             "INSERT INTO sell_order_history (order_id, character_id, type_id, first_issued, \
              volume_total) VALUES ($1, $1, 34, now(), 20)",
             "INSERT INTO sell_order_costs (order_id, covered_units, cost) VALUES ($1, 10, 1000)",
+            "INSERT INTO sales (transaction_id, character_id, type_id, location_id, quantity, \
+             unit_price, sold_at) VALUES ($1, $1, 34, 60003760, 10, 150, now())",
+            "INSERT INTO sale_costs (transaction_id, covered_units, cost) VALUES ($1, 10, 1000)",
         ] {
             sqlx::query(statement)
                 .bind(character)
@@ -268,6 +271,7 @@ async fn unlinking_a_character_removes_its_wealth_and_fee_data_and_keeps_the_oth
         ("current_assets", 1),
         ("wealth_sync", 3),
         ("purchases", 1),
+        ("sales", 1),
         ("sell_order_history", 1),
         ("character_skills", 1),
         ("character_standings", 1),
@@ -284,4 +288,5 @@ async fn unlinking_a_character_removes_its_wealth_and_fee_data_and_keeps_the_oth
     }
     // The costs hang off the remembered orders, so they go with them.
     assert_eq!(e.count("sell_order_costs").await, 1);
+    assert_eq!(e.count("sale_costs").await, 1);
 }

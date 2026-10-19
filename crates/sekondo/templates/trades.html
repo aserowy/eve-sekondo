@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+
+{% block title %}Trades · Sekondo{% endblock %}
+
+{% block page_type %}page-window{% endblock %}
+
+{% block filters %}
+<div class="filter-box" id="filter-box">
+<form id="character-filter" data-character-filter hx-get="/trades" hx-trigger="change" hx-target="#trades-view" hx-select="#trades-view" hx-select-oob="#main-nav, #filter-box" hx-swap="outerHTML" hx-push-url="true">
+  {% let characters = view.characters %}
+  {% include "character_filter.html" %}
+  <input type="hidden" id="trades-range" name="range" value="{{ view.range.name() }}">
+</form>
+</div>
+{% endblock %}
+
+{% block content %}
+<div hx-ext="sse" sse-connect="/events">
+<div id="trades-view">
+  <section id="trades-freshness" class="panel" data-freshness hx-get="{{ view.freshness_url }}" hx-trigger="sse:trades-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
+    {% include "trades_freshness.html" %}
+  </section>
+  {% include "trades_table.html" %}
+</div>
+</div>
+{% endblock %}

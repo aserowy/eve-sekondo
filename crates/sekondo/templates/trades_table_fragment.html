@@ -1,0 +1,3 @@
+{% include "trades_table.html" %}
+{# The filter keeps the range the table was switched to. #}
+<input type="hidden" id="trades-range" name="range" value="{{ view.range.name() }}" hx-swap-oob="true">

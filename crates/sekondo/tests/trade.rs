@@ -57,6 +57,33 @@ async fn costs(env: &PollEnv) -> Vec<(i64, i64, String)> {
     .unwrap()
 }
 
+/// A sale of 34, sold on day `day` of October 2026.
+async fn sold(env: &PollEnv, (id, character): (i64, i64), day: u32, quantity: i64, price: &str) {
+    sqlx::query(
+        "INSERT INTO sales (transaction_id, character_id, type_id, location_id, quantity, \
+         unit_price, sold_at) \
+         VALUES ($1, $2, 34, 60003760, $3, $4::numeric, make_timestamptz(2026, 10, $5, 12, 0, 0, 'UTC'))",
+    )
+    .bind(id)
+    .bind(character)
+    .bind(quantity)
+    .bind(price)
+    .bind(day as i32)
+    .execute(&env.pool)
+    .await
+    .unwrap();
+}
+
+/// `(sale, covered units, cost)` of every stored sale cost.
+async fn sale_costs(env: &PollEnv) -> Vec<(i64, i64, String)> {
+    sqlx::query_as(
+        "SELECT transaction_id, covered_units, cost::text FROM sale_costs ORDER BY transaction_id",
+    )
+    .fetch_all(&env.pool)
+    .await
+    .unwrap()
+}
+
 async fn two_characters(pool: PgPool) -> PollEnv {
     let env = PollEnv::new(pool).await;
     let account = env.new_account().await;
@@ -104,6 +131,59 @@ async fn a_purchase_stored_late_feeds_the_orders_issued_after_it(pool: PgPool) {
     recompute(&env, ALICE).await;
 
     assert_eq!(costs(&env).await, [(11, 10, "1000.00".to_owned())]);
+}
+
+#[sqlx::test]
+async fn the_stored_sale_costs_follow_first_in_first_out(pool: PgPool) {
+    let env = two_characters(pool).await;
+    buy(&env, (1, ALICE), 1, 10, "100.00").await;
+    buy(&env, (2, ALICE), 2, 10, "120.00").await;
+    sold(&env, (31, ALICE), 3, 15, "150.00").await;
+    sold(&env, (32, ALICE), 4, 10, "150.00").await;
+
+    recompute(&env, ALICE).await;
+
+    assert_eq!(
+        sale_costs(&env).await,
+        [(31, 15, "1600.00".to_owned()), (32, 5, "600.00".to_owned())]
+    );
+}
+
+#[sqlx::test]
+async fn other_characters_purchases_are_not_taken_by_a_sale(pool: PgPool) {
+    let env = two_characters(pool).await;
+    buy(&env, (1, BOB), 1, 100, "100.00").await;
+    sold(&env, (31, ALICE), 3, 10, "150.00").await;
+
+    recompute(&env, ALICE).await;
+
+    assert_eq!(sale_costs(&env).await, [(31, 0, "0.00".to_owned())]);
+}
+
+#[sqlx::test]
+async fn a_sale_and_a_sell_order_both_take_the_same_lot(pool: PgPool) {
+    let env = two_characters(pool).await;
+    buy(&env, (1, ALICE), 1, 10, "100.00").await;
+    remember(&env, (11, ALICE), 3, 10).await;
+    sold(&env, (31, ALICE), 3, 10, "150.00").await;
+
+    recompute(&env, ALICE).await;
+
+    assert_eq!(costs(&env).await, [(11, 10, "1000.00".to_owned())]);
+    assert_eq!(sale_costs(&env).await, [(31, 10, "1000.00".to_owned())]);
+}
+
+#[sqlx::test]
+async fn a_purchase_stored_late_feeds_a_sale_stored_before_it(pool: PgPool) {
+    let env = two_characters(pool).await;
+    sold(&env, (31, ALICE), 3, 10, "150.00").await;
+    recompute(&env, ALICE).await;
+    assert_eq!(sale_costs(&env).await, [(31, 0, "0.00".to_owned())]);
+
+    buy(&env, (1, ALICE), 2, 10, "100.00").await;
+    recompute(&env, ALICE).await;
+
+    assert_eq!(sale_costs(&env).await, [(31, 10, "1000.00".to_owned())]);
 }
 
 #[sqlx::test]
@@ -318,4 +398,191 @@ async fn a_margin_can_be_negative(pool: PgPool) {
 
     // 15 * 100 * 0.95215 - 1600 = -171.775 (half away from zero)
     assert_eq!(margin_of(&env, 11).await.margin_cents, Some(-17_178));
+}
+
+// ---- trades listing and the margin of a sale ----
+
+use time::{OffsetDateTime, macros::datetime};
+
+struct Listed {
+    transaction_id: i64,
+    is_sale: bool,
+    margin_cents: Option<i64>,
+    covered_units: Option<i64>,
+    cost_per_unit_cents: Option<i64>,
+}
+
+/// What the account lists for Alice and Bob within `[from, to]`.
+async fn listed_between(
+    env: &PollEnv,
+    characters: &[i64],
+    (from, to): (OffsetDateTime, OffsetDateTime),
+) -> Vec<Listed> {
+    use sekondo::selection::CharacterSelection;
+    let account: uuid::Uuid = sqlx::query_scalar("SELECT account_id FROM characters LIMIT 1")
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+    let all = [ALICE, BOB];
+    let raw = characters
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let selection = CharacterSelection::resolve(&all, Some(&raw));
+    sekondo::trades::list(&env.pool, account, &selection, from, to)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| Listed {
+            transaction_id: row.transaction_id,
+            is_sale: row.is_sale,
+            margin_cents: row.margin_cents,
+            covered_units: row.covered_units,
+            cost_per_unit_cents: row.cost_per_unit_cents,
+        })
+        .collect()
+}
+
+async fn listed(env: &PollEnv) -> Vec<Listed> {
+    listed_between(
+        env,
+        &[ALICE, BOB],
+        (datetime!(2026-09-01 0:00 UTC), datetime!(2026-11-01 0:00 UTC)),
+    )
+    .await
+}
+
+async fn margin_of_sale(env: &PollEnv, id: i64) -> Listed {
+    listed(env)
+        .await
+        .into_iter()
+        .find(|row| row.is_sale && row.transaction_id == id)
+        .unwrap()
+}
+
+#[sqlx::test]
+async fn a_sale_earns_its_price_after_fees_minus_its_cost(pool: PgPool) {
+    let env = two_characters(pool).await;
+    alice_with_fees(&env).await;
+    buy(&env, (1, ALICE), 1, 10, "100.00").await;
+    sold(&env, (31, ALICE), 2, 10, "150.00").await;
+    recompute(&env, ALICE).await;
+
+    let sale = margin_of_sale(&env, 31).await;
+
+    // 10 * 150 * (1 - 0.03375 - 0.0141) - 1000 = 428.225 (half away from zero)
+    assert_eq!(sale.margin_cents, Some(42_823));
+    assert_eq!(sale.covered_units, Some(10));
+    assert_eq!(sale.cost_per_unit_cents, Some(10_000));
+}
+
+#[sqlx::test]
+async fn a_sale_below_its_cost_is_a_loss(pool: PgPool) {
+    let env = two_characters(pool).await;
+    alice_with_fees(&env).await;
+    buy(&env, (1, ALICE), 1, 10, "100.00").await;
+    sold(&env, (31, ALICE), 2, 10, "90.00").await;
+    recompute(&env, ALICE).await;
+
+    // 10 * 90 * 0.95215 - 1000 = -143.065
+    assert_eq!(margin_of_sale(&env, 31).await.margin_cents, Some(-14_307));
+}
+
+#[sqlx::test]
+async fn a_sale_with_a_partly_known_cost_has_no_margin_and_says_how_much_is_known(pool: PgPool) {
+    let env = two_characters(pool).await;
+    alice_with_fees(&env).await;
+    buy(&env, (1, ALICE), 1, 4, "100.00").await;
+    sold(&env, (31, ALICE), 2, 10, "150.00").await;
+    recompute(&env, ALICE).await;
+
+    let sale = margin_of_sale(&env, 31).await;
+
+    assert_eq!(sale.margin_cents, None);
+    assert_eq!(sale.cost_per_unit_cents, None);
+    assert_eq!(sale.covered_units, Some(4));
+}
+
+#[sqlx::test]
+async fn a_sale_in_a_structure_or_without_polled_skills_has_no_margin(pool: PgPool) {
+    let env = two_characters(pool).await;
+    buy(&env, (1, ALICE), 1, 20, "100.00").await;
+    sold(&env, (31, ALICE), 2, 10, "150.00").await;
+    recompute(&env, ALICE).await;
+    assert_eq!(
+        margin_of_sale(&env, 31).await.margin_cents,
+        None,
+        "skills not polled"
+    );
+
+    alice_with_fees(&env).await;
+    sqlx::query("UPDATE sales SET location_id = $1")
+        .bind(STRUCTURE)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        margin_of_sale(&env, 31).await.margin_cents,
+        None,
+        "structure"
+    );
+}
+
+#[sqlx::test]
+async fn a_higher_accounting_level_changes_the_margin_of_an_earlier_sale(pool: PgPool) {
+    let env = two_characters(pool).await;
+    alice_with_fees(&env).await;
+    buy(&env, (1, ALICE), 1, 10, "100.00").await;
+    sold(&env, (31, ALICE), 2, 10, "150.00").await;
+    recompute(&env, ALICE).await;
+    assert_eq!(margin_of_sale(&env, 31).await.margin_cents, Some(42_823));
+
+    // Accounting 4 is 7.5 * (1 - 0.44) = 4.2% instead of 3.375%.
+    sqlx::query("UPDATE character_skills SET active_level = 4 WHERE skill_id = 16622")
+        .execute(&env.pool)
+        .await
+        .unwrap();
+
+    // 1500 * (1 - 0.042 - 0.0141) - 1000 = 415.85
+    assert_eq!(margin_of_sale(&env, 31).await.margin_cents, Some(41_585));
+}
+
+#[sqlx::test]
+async fn only_the_selected_personal_trades_in_the_range_are_listed_newest_first(pool: PgPool) {
+    let env = two_characters(pool).await;
+    buy(&env, (1, ALICE), 1, 10, "100.00").await;
+    sold(&env, (31, ALICE), 2, 4, "150.00").await;
+    sold(&env, (32, ALICE), 2, 3, "150.00").await;
+    buy(&env, (2, ALICE), 20, 5, "100.00").await;
+    buy(&env, (3, BOB), 3, 5, "100.00").await;
+    let day = |d: u8| datetime!(2026-10-01 0:00 UTC).replace_day(d).unwrap();
+
+    let all = listed_between(&env, &[ALICE, BOB], (day(1), day(25))).await;
+    let order: Vec<_> = all.iter().map(|r| (r.is_sale, r.transaction_id)).collect();
+    // Same moment: the higher transaction ID first. Buys and sells share the list.
+    assert_eq!(
+        order,
+        [(false, 2), (false, 3), (true, 32), (true, 31), (false, 1)]
+    );
+
+    let alice = listed_between(&env, &[ALICE], (day(1), day(25))).await;
+    assert_eq!(alice.len(), 4, "Bob's purchase is left out");
+
+    let ranged = listed_between(&env, &[ALICE, BOB], (day(2), day(10))).await;
+    let order: Vec<_> = ranged.iter().map(|r| (r.is_sale, r.transaction_id)).collect();
+    assert_eq!(order, [(false, 3), (true, 32), (true, 31)]);
+}
+
+#[sqlx::test]
+async fn a_purchase_has_no_margin(pool: PgPool) {
+    let env = two_characters(pool).await;
+    alice_with_fees(&env).await;
+    buy(&env, (1, ALICE), 1, 10, "100.00").await;
+
+    let rows = listed(&env).await;
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].margin_cents, None);
+    assert_eq!(rows[0].covered_units, None);
 }
