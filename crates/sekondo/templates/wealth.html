@@ -6,30 +6,28 @@
 <script src="/static/chart.umd.min.js"></script>
 {% endblock %}
 
-{% block page_type %}page-window{% endblock %}
-
 {% block filters %}
 <div class="filter-box" id="filter-box">
-<form id="character-filter" data-character-filter data-default-sort="value" data-default-dir="desc" hx-get="/wealth" hx-trigger="change" hx-target="#wealth-view" hx-select="#wealth-view" hx-select-oob="#main-nav, #filter-box" hx-swap="outerHTML" hx-push-url="true">
+<form id="character-filter" data-character-filter data-default-sort="value" data-default-dir="desc" hx-get="/wealth" hx-trigger="change" hx-target="#content" hx-sync="#content:replace" hx-select="#content > *" hx-select-oob="#main-nav, #filter-box, #freshness" hx-swap="innerHTML show:#content:top" hx-push-url="true">
   {% let characters = view.characters %}
   {% include "character_filter.html" %}
   <input type="hidden" name="sort" value="{{ view.sort.key.name() }}">
   <input type="hidden" name="dir" value="{{ view.sort.dir.name() }}">
   <input type="hidden" id="wealth-range" name="range" value="{{ view.range.name() }}">
+  <input type="hidden" name="per_page" value="{{ view.pager.paging.per_page }}">
 </form>
+{% let oob = false %}
+{% include "wealth_range_control.html" %}
 </div>
 {% endblock %}
 
 {% block content %}
 <div hx-ext="sse" sse-connect="/events">
-<div id="wealth-view">
-  <section id="wealth-freshness" class="panel" data-freshness hx-get="{{ view.freshness_url }}" hx-trigger="sse:wealth-updated, sse:orders-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
+  <section id="content" data-live="/wealth/content" hx-get="{{ view.content_url }}" hx-trigger="sse:wealth-updated, sse:orders-updated, htmx:sseOpen from:body" hx-swap="innerHTML" hx-sync="this:queue last">
+    {% include "wealth_content.html" %}
+  </section>
+  <section id="freshness" data-live="/wealth/freshness" hx-get="{{ view.freshness_url }}" hx-trigger="sse:wealth-updated, sse:orders-updated, htmx:sseOpen from:body" hx-swap="innerHTML" hx-sync="this:queue last">
     {% include "wealth_freshness.html" %}
   </section>
-  {% include "wealth_graph.html" %}
-  <section id="wealth-items" class="panel" hx-get="{{ view.items_url }}" hx-trigger="sse:wealth-updated, sse:orders-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
-    {% include "wealth_items.html" %}
-  </section>
-</div>
 </div>
 {% endblock %}

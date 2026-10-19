@@ -7,22 +7,26 @@ Shows a trader every active market order of their selected characters in one pla
 ## Requirements
 
 ### Requirement: Orders page
-A signed-in user SHALL be able to open an orders page that shows the current orders of their selected characters in two separate tables: one for sell orders and one for buy orders. The page SHALL show only orders of characters linked to the user's account. Unauthenticated requests SHALL be redirected to the landing page.
+A signed-in user SHALL be able to open a sell orders page at `/orders/sell` and a buy orders page at `/orders/buy`. The sell orders page SHALL show the current sell orders of their selected characters in one table, and the buy orders page their current buy orders in one table. The pages SHALL show only orders of characters linked to the user's account. Both pages SHALL keep each other's sorting in their sub-menu links. Unauthenticated requests SHALL be redirected to the landing page.
 
 #### Scenario: Sell and buy orders are separated
-- **WHEN** a signed-in user whose characters have two sell orders and one buy order opens the orders page
-- **THEN** the sell table lists the two sell orders and the buy table lists the one buy order
+- **WHEN** a signed-in user whose characters have two sell orders and one buy order opens the sell orders page and then follows "Buy" in the sub-menu
+- **THEN** the sell orders page lists the two sell orders and the buy orders page lists the one buy order
 
 #### Scenario: No orders
-- **WHEN** a signed-in user whose characters have no current orders opens the orders page
-- **THEN** both tables say that there are no orders
+- **WHEN** a signed-in user whose characters have no current orders opens the sell orders page
+- **THEN** the table says that there are no sell orders and no pagination is shown
 
 #### Scenario: Only own orders
-- **WHEN** two accounts both have characters with orders, and a user of the first account opens the orders page
-- **THEN** no order of the second account's characters is shown
+- **WHEN** two accounts both have characters with orders, and a user of the first account opens the sell and the buy orders page
+- **THEN** no order of the second account's characters is shown or counted
+
+#### Scenario: Sorting kept between the pages
+- **WHEN** a user sorts the buy table by price, switches to "Sell" and back to "Buy"
+- **THEN** the buy table is still sorted by price
 
 #### Scenario: Unauthenticated access
-- **WHEN** an unauthenticated user requests the orders page
+- **WHEN** an unauthenticated user requests the sell or the buy orders page
 - **THEN** they are redirected to the landing page
 
 ### Requirement: Order columns
@@ -135,7 +139,7 @@ ISK amounts of 1,000 or more SHALL be shortened to at most four significant digi
 - **THEN** it reads "950.50"
 
 ### Requirement: Freshness
-The orders page SHALL show, for each selected character, when its orders were last updated and when the next update is scheduled. A character SHALL be shown as stale when it needs re-login, when its last successful poll is older than twice the refresh interval, or when it has never been polled successfully. The orders of a stale character SHALL still be shown as last known. A character that needs re-login SHALL link to logging in again.
+The sell and the buy orders page SHALL each show in their freshness section, for each selected character, when its orders were last updated and when the next update is scheduled. A character SHALL be shown as stale when it needs re-login, when its last successful poll is older than twice the refresh interval, or when it has never been polled successfully. The orders of a stale character SHALL still be shown as last known. A character that needs re-login SHALL link to logging in again. The freshness SHALL NOT list fees.
 
 #### Scenario: Fresh character
 - **WHEN** a character was polled successfully 5 minutes ago with a 20-minute interval
@@ -153,29 +157,60 @@ The orders page SHALL show, for each selected character, when its orders were la
 - **WHEN** a character was linked and has not been polled successfully yet
 - **THEN** the page shows it as waiting for its first update
 
-### Requirement: Market fees per character
-Behind each character's freshness entry, the orders page SHALL list every station or structure where the character currently has orders, ordered by location name, each with the character's sales tax, broker fee and minimum margin there, as defined by the fee-sync capability. Rates SHALL be shown as percentages rounded half up to two decimals. Hovering a rate SHALL show it rounded half up to four decimals together with its inputs: the Accounting level for the sales tax, and the Broker Relations level, the faction standing and the corporation standing for an NPC station broker fee. In a player-owned structure the broker fee SHALL read "0.5% + owner fee" and the minimum margin "—". A figure that is not known yet SHALL read "—". A character without orders SHALL list no locations.
+### Requirement: Order KPIs
+The sell orders page SHALL show these KPI cards, over all sell orders of the selected characters:
+- "Sell orders": the number of sell orders
+- "Sell value": the sum of the order values, with the corporation share as its detail line when there is one
+- "Net margin": the sum of the margins of the sell orders that have one, with its detail line showing that sum as a percentage of the known cost of those orders, rounded half up to two decimals
+
+The buy orders page SHALL show:
+- "Buy orders": the number of buy orders
+- "Buy escrow": the sum of the escrows, with the corporation share as its detail line when there is one
+
+Hovering the net margin SHALL show its exact value and, when some sell orders have no margin, how many it leaves out. A negative net margin SHALL be styled with the error style. When no sell order has a margin, the net margin SHALL read "—". The figures SHALL equal the corresponding dashboard totals for the same selection.
+
+#### Scenario: Sell KPIs
+- **WHEN** the selected characters have three sell orders worth 10,000,000.00 ISK in total, two of them with margins of 1,500,000.00 ISK and 500,000.00 ISK on a known cost of 8,000,000.00 ISK, and one without a margin
+- **THEN** the cards read 3 sell orders, a sell value of "10m" and a net margin of "2m" with "25.00%", and hovering the net margin shows "2,000,000.00 ISK" and that 1 order is left out
+
+#### Scenario: Negative net margin
+- **WHEN** the margins of the selected characters' sell orders sum to −1,500.00 ISK
+- **THEN** the net margin card reads "-1.5k" in the error style
+
+#### Scenario: Buy KPIs
+- **WHEN** the selected characters have two buy orders with 2,000,000.00 ISK escrow in total
+- **THEN** the buy orders page's cards read 2 buy orders and a buy escrow of "2m"
+
+### Requirement: Fee KPIs
+The sell and the buy orders page SHALL each show, after the order KPIs and for every selected character in the order the characters were linked, three KPI cards: "Sales tax", "Broker fee" and "Min. margin". Each card's detail line SHALL name the character and the fee location chosen by the character-location capability. The values SHALL be the character's fees at that location, as defined by the fee-sync capability. Rates SHALL be shown as percentages rounded half up to two decimals. Hovering a rate SHALL show it rounded half up to four decimals together with its inputs: the Accounting level for the sales tax, and the Broker Relations level, the faction standing and the corporation standing for an NPC station broker fee. In a player-owned structure the broker fee SHALL read "0.5% + owner fee" and the minimum margin "—". A figure that is not known yet SHALL read "—". When the fee location falls back to Jita 4-4 because the character has not granted the location scope, the cards SHALL show a "Log in again" link that lets the user grant it.
 
 #### Scenario: NPC station
-- **WHEN** a character with Accounting 5 and Broker Relations 5 has orders at an NPC station where its faction standing is 2.0 and its corporation standing is 1.5
-- **THEN** its entry lists that station with sales tax "3.38%", broker fee "1.41%" and minimum margin "6.51%"
+- **WHEN** a character with Accounting 5 and Broker Relations 5 is docked at an NPC station where its faction standing is 2.0 and its corporation standing is 1.5
+- **THEN** its cards read sales tax "3.38%", broker fee "1.41%" and min. margin "6.51%", each naming the character and that station
 
 #### Scenario: Inputs on hover
 - **WHEN** a user hovers that broker fee
 - **THEN** it shows "1.4100%", Broker Relations 5, faction standing 2.00 and corporation standing 1.50
 
-#### Scenario: Minimum margin on hover
-- **WHEN** a user hovers that minimum margin
-- **THEN** it shows "6.5063%"
-
-#### Scenario: Two locations
-- **WHEN** a character has orders at an NPC station and in a player-owned structure
-- **THEN** its entry lists both, and the structure's broker fee reads "0.5% + owner fee" and its minimum margin "—"
+#### Scenario: Player structure
+- **WHEN** a character is docked in a player-owned structure
+- **THEN** its broker fee card reads "0.5% + owner fee" and its min. margin card "—"
 
 #### Scenario: Skills not polled yet
-- **WHEN** a newly linked character with orders has not had its skills polled yet
-- **THEN** each of its locations reads "—" for every figure
+- **WHEN** a newly linked character has not had its skills polled yet
+- **THEN** its three cards read "—"
+
+#### Scenario: Location scope missing
+- **WHEN** a character linked before the location scope was introduced is selected
+- **THEN** its cards name Jita IV - Moon 4 - Caldari Navy Assembly Plant and show a "Log in again" link
 
 #### Scenario: Only selected characters
 - **WHEN** the selection is narrowed to one of two characters
-- **THEN** only that character's locations and fees are shown
+- **THEN** only that character's three fee cards are shown
+
+### Requirement: Order pagination
+The sell table and the buy table SHALL be paginated as described by the ui-layout capability. Each page SHALL keep its own page number and page size; the sub-menu links SHALL NOT carry them.
+
+#### Scenario: Second page of sell orders
+- **WHEN** a user with 70 sell orders sorted by price opens page 2 of the sell orders page
+- **THEN** the table shows the 51st to 70th order by price

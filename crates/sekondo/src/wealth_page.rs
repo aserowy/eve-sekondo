@@ -15,12 +15,14 @@ use crate::{
     app::AppState,
     csrf, format,
     freshness::{WealthFreshnessView, list_wealth_freshness, wealth_freshness_view},
+    kpi::Kpi,
     names::STRUCTURE_ID_MIN,
     orders::{Dir, FilterEntry},
     pages::{self, Nav, Page},
+    pagination::{Link, PageView, Paging, paginate},
     range::Range,
     selection::{CharacterSelection, ViewQuery},
-    wealth::{self, Inventory, InventoryRow, InventorySort, InventorySortKey, WealthPoint},
+    wealth::{self, InventoryRow, InventorySort, InventorySortKey, WealthPoint},
     wealth_poller::ASSETS_INTERVAL,
 };
 
@@ -29,7 +31,10 @@ const NO_DATA: &str = "\u{2014}";
 
 pub struct HeaderView {
     pub label: &'static str,
+    /// The page that the sorting leads to, for the address bar.
     pub href: String,
+    /// The content fragment that htmx fetches for it.
+    pub content_href: String,
     /// `ascending`, `descending` or empty: for `aria-sort`.
     pub aria_sort: &'static str,
     pub arrow: &'static str,
@@ -48,21 +53,19 @@ pub struct RowView {
     pub location: String,
 }
 
-/// The inventory table with its totals.
+/// The inventory table.
 pub struct ItemsView {
     pub headers: Vec<HeaderView>,
     pub rows: Vec<RowView>,
-    pub total: String,
-    pub total_exact: String,
-    pub unpriced: usize,
 }
 
 pub struct RangeLink {
     pub label: &'static str,
-    /// The page's URL with this range, for the address bar and without scripts.
+    /// The page's URL with this range, from the first page, for the address bar and without
+    /// scripts.
     pub href: String,
-    /// The graph fragment's URL with this range.
-    pub graph_url: String,
+    /// The content fragment's URL with this range.
+    pub content_url: String,
     pub current: bool,
 }
 
@@ -73,7 +76,6 @@ pub struct StackChart {
 }
 
 pub struct GraphView {
-    pub ranges: Vec<RangeLink>,
     /// `None` while no selected character has any recorded figure: the page says so instead.
     pub chart: Option<StackChart>,
 }
@@ -83,39 +85,50 @@ pub struct WealthView {
     pub characters: Vec<FilterEntry>,
     pub sort: InventorySort,
     pub range: Range,
+    pub ranges: Vec<RangeLink>,
+    /// The content fragment's URL with the whole view state, for live refreshes.
+    pub content_url: String,
     pub freshness_url: String,
-    pub items_url: String,
-    pub graph_url: String,
     pub freshness: Vec<WealthFreshnessView>,
-    /// How many of the selected characters need re-login or have a stale wallet or assets.
-    pub warnings: usize,
-    pub items: ItemsView,
+    pub kpis: Vec<Kpi>,
     pub graph: GraphView,
+    pub items: ItemsView,
+    pub pager: PageView,
 }
 
-/// The view state a URL carries: the selection, the list's sorting and the graph's range, each
-/// only when it is not the default.
+/// The view state a URL carries: the selection, the list's sorting, the graph's range and the
+/// list's paging, each only when it is not the default.
 struct ViewState {
     chars: Option<String>,
     sort: InventorySort,
     range: Range,
+    paging: Paging,
 }
 
 impl ViewState {
-    fn query(&self, with_sort: bool, with_range: bool) -> String {
+    fn query(&self, with_paging: bool) -> String {
         let mut pairs = url::form_urlencoded::Serializer::new(String::new());
         if let Some(chars) = &self.chars {
             pairs.append_pair("chars", chars);
         }
-        if with_sort && self.sort != InventorySort::default() {
+        if self.sort != InventorySort::default() {
             pairs.append_pair("sort", self.sort.key.name());
             pairs.append_pair("dir", self.sort.dir.name());
         }
-        if with_range && self.range != Range::default() {
+        if self.range != Range::default() {
             pairs.append_pair("range", self.range.name());
         }
         // The commas stay readable in the URL, as in bookmarks people write by hand.
-        let query = pairs.finish().replace("%2C", ",");
+        let mut query = pairs.finish().replace("%2C", ",");
+        if with_paging {
+            let paging = self.paging.query();
+            if !paging.is_empty() {
+                if !query.is_empty() {
+                    query.push('&');
+                }
+                query.push_str(&paging);
+            }
+        }
         if query.is_empty() {
             query
         } else {
@@ -123,19 +136,39 @@ impl ViewState {
         }
     }
 
+    /// The selection alone: what the freshness depends on.
+    fn chars_query(&self) -> String {
+        self.chars
+            .as_ref()
+            .map_or_else(String::new, |chars| format!("?chars={chars}"))
+    }
+
+    /// Another sorting, from the first page.
     fn with_sort(&self, sort: InventorySort) -> Self {
         Self {
             chars: self.chars.clone(),
             sort,
             range: self.range,
+            paging: self.paging.first(),
         }
     }
 
+    /// Another range, from the first page.
     fn with_range(&self, range: Range) -> Self {
         Self {
             chars: self.chars.clone(),
             sort: self.sort,
             range,
+            paging: self.paging.first(),
+        }
+    }
+
+    fn with_paging(&self, paging: Paging) -> Self {
+        Self {
+            chars: self.chars.clone(),
+            sort: self.sort,
+            range: self.range,
+            paging,
         }
     }
 }
@@ -180,22 +213,47 @@ fn stack_chart(points: &[WealthPoint]) -> Option<StackChart> {
     })
 }
 
-fn graph_view(state: &ViewState, points: &[WealthPoint]) -> GraphView {
+fn graph_view(points: &[WealthPoint]) -> GraphView {
     GraphView {
-        ranges: Range::ALL
-            .into_iter()
-            .map(|range| {
-                let target = state.with_range(range);
-                RangeLink {
-                    label: range.label(),
-                    href: format!("/wealth{}", target.query(true, true)),
-                    graph_url: format!("/wealth/graph{}", target.query(false, true)),
-                    current: range == state.range,
-                }
-            })
-            .collect(),
         chart: stack_chart(points),
     }
+}
+
+fn range_links(state: &ViewState) -> Vec<RangeLink> {
+    Range::ALL
+        .into_iter()
+        .map(|range| {
+            let query = state.with_range(range).query(true);
+            RangeLink {
+                label: range.label(),
+                href: format!("/wealth{query}"),
+                content_url: format!("/wealth/content{query}"),
+                current: range == state.range,
+            }
+        })
+        .collect()
+}
+
+/// One card per value of the graph: the current figures, whatever the graph's range.
+fn kpis(current: &wealth::Current, unpriced_rows: usize) -> Vec<Kpi> {
+    let card = |name: &str, id: &str, cents: i64| {
+        Kpi::new(name, format::isk_short(cents), format::isk_exact(cents)).with_id(id)
+    };
+    let inventory = card("Inventory", "kpi-inventory", current.inventory_cents);
+    vec![
+        card("Wealth", "kpi-wealth", current.total_cents()),
+        card("Wallet", "kpi-wallet", current.wallet_cents),
+        card("Sell orders", "kpi-sell", current.sell_cents),
+        card("Buy escrow", "kpi-escrow", current.escrow_cents),
+        if unpriced_rows > 0 {
+            inventory.with_detail(format!(
+                "{unpriced_rows} unpriced {}",
+                if unpriced_rows == 1 { "row" } else { "rows" }
+            ))
+        } else {
+            inventory
+        },
+    ]
 }
 
 fn headers(state: &ViewState) -> Vec<HeaderView> {
@@ -224,9 +282,11 @@ fn headers(state: &ViewState) -> Vec<HeaderView> {
                 (true, Dir::Asc) => ("ascending", " \u{25B2}"),
                 (true, Dir::Desc) => ("descending", " \u{25BC}"),
             };
+            let query = state.with_sort(next).query(true);
             HeaderView {
                 label,
-                href: format!("/wealth{}", state.with_sort(next).query(true, true)),
+                href: format!("/wealth{query}"),
+                content_href: format!("/wealth/content{query}"),
                 aria_sort,
                 arrow,
                 numeric,
@@ -265,13 +325,10 @@ fn row_view(row: &InventoryRow) -> RowView {
     }
 }
 
-fn items_view(state: &ViewState, inventory: &Inventory) -> ItemsView {
+fn items_view(state: &ViewState, rows: &[InventoryRow]) -> ItemsView {
     ItemsView {
         headers: headers(state),
-        rows: inventory.rows.iter().map(row_view).collect(),
-        total: format::isk_short(inventory.total_cents),
-        total_exact: format::isk_exact(inventory.total_cents),
-        unpriced: inventory.unpriced_rows,
+        rows: rows.iter().map(row_view).collect(),
     }
 }
 
@@ -296,23 +353,32 @@ async fn build_view(
     let now = state.clock.now();
     let order_interval: Duration = state.config.order_poll_interval;
     let freshness = list_wealth_freshness(&state.pool, account_id, &selection).await?;
-    let view_state = ViewState {
+    let mut view_state = ViewState {
         chars: selection.param(),
         sort: InventorySort::parse(query.sort.as_deref(), query.dir.as_deref()),
         range: Range::parse(query.range.as_deref()),
+        paging: query.paging(),
     };
     let inventory = wealth::inventory(&state.pool, account_id, &selection, view_state.sort).await?;
     let points =
         wealth::history(&state.pool, account_id, &selection, view_state.range, now).await?;
+    let current = wealth::current(&state.pool, account_id, &selection).await?;
+
+    let link_to = |paging: Paging| {
+        let query = view_state.with_paging(paging).query(true);
+        Link {
+            href: format!("/wealth{query}"),
+            content: format!("/wealth/content{query}"),
+        }
+    };
+    let (page_rows, pager) = paginate(&inventory.rows, view_state.paging, link_to);
+    // What the URLs below carry is the page actually shown, after clamping.
+    view_state.paging = pager.paging;
 
     let freshness: Vec<WealthFreshnessView> = freshness
         .iter()
         .map(|r| wealth_freshness_view(r, now, order_interval, ASSETS_INTERVAL))
         .collect();
-    let warnings = freshness
-        .iter()
-        .filter(|f| f.needs_relogin || f.wallet.stale || f.assets.stale)
-        .count();
     let view = WealthView {
         characters: characters
             .iter()
@@ -324,13 +390,14 @@ async fn build_view(
             .collect(),
         sort: view_state.sort,
         range: view_state.range,
-        freshness_url: format!("/wealth/freshness{}", view_state.query(false, false)),
-        items_url: format!("/wealth/items{}", view_state.query(true, false)),
-        graph_url: format!("/wealth/graph{}", view_state.query(false, true)),
+        ranges: range_links(&view_state),
+        content_url: format!("/wealth/content{}", view_state.query(true)),
+        freshness_url: format!("/wealth/freshness{}", view_state.chars_query()),
         freshness,
-        warnings,
-        items: items_view(&view_state, &inventory),
-        graph: graph_view(&view_state, &points),
+        kpis: kpis(&current, inventory.unpriced_rows),
+        graph: graph_view(&points),
+        items: items_view(&view_state, page_rows),
+        pager,
     };
     Ok(Some((view, selection)))
 }
@@ -350,14 +417,8 @@ struct FreshnessFragment {
 }
 
 #[derive(Template)]
-#[template(path = "wealth_graph_fragment.html")]
-struct GraphFragment {
-    view: WealthView,
-}
-
-#[derive(Template)]
-#[template(path = "wealth_items.html")]
-struct ItemsFragment {
+#[template(path = "wealth_content_fragment.html")]
+struct ContentFragment {
     view: WealthView,
 }
 
@@ -412,28 +473,16 @@ pub async fn freshness(
     }
 }
 
-/// The inventory list only, for live refreshes.
-pub async fn items(
+/// The KPI cards, the graph, the inventory list and its pagination, for range switches, the
+/// page's own controls and live refreshes.
+pub async fn content(
     State(state): State<AppState>,
     account: CurrentAccount,
     session: Session,
     query: ViewQuery,
 ) -> Response {
     match load(&state, account, &session, &query).await {
-        Ok((view, _)) => pages::render(&ItemsFragment { view }),
-        Err(response) => *response,
-    }
-}
-
-/// The graph and its range control only, for range switches and live refreshes.
-pub async fn graph(
-    State(state): State<AppState>,
-    account: CurrentAccount,
-    session: Session,
-    query: ViewQuery,
-) -> Response {
-    match load(&state, account, &session, &query).await {
-        Ok((view, _)) => pages::render(&GraphFragment { view }),
+        Ok((view, _)) => pages::render(&ContentFragment { view }),
         Err(response) => *response,
     }
 }

@@ -40,7 +40,9 @@ fn params(location: &str) -> (Url, HashMap<String, String>) {
 }
 
 #[sqlx::test]
-async fn login_redirects_to_the_sso_authorize_url_with_exactly_the_required_scopes(pool: PgPool) {
+async fn login_redirects_to_the_sso_authorize_url_with_exactly_the_required_and_the_optional_scopes(
+    pool: PgPool,
+) {
     let app = app(pool).await;
     let browser = app.browser();
     let res = browser.get(&app.url("/auth/login")).await;
@@ -64,10 +66,11 @@ async fn login_redirects_to_the_sso_authorize_url_with_exactly_the_required_scop
             "esi-wallet.read_character_wallet.v1",
             "esi-assets.read_assets.v1",
             "esi-skills.read_skills.v1",
-            "esi-characters.read_standings.v1"
+            "esi-characters.read_standings.v1",
+            "esi-location.read_location.v1"
         ])
     );
-    assert_eq!(q["scope"].split(' ').count(), 6, "no duplicates or extras");
+    assert_eq!(q["scope"].split(' ').count(), 7, "no duplicates or extras");
     assert_eq!(q["code_challenge_method"], "S256");
     assert_eq!(q["code_challenge"].len(), 43, "base64url SHA-256");
     assert!(q["state"].len() >= 32);
@@ -105,7 +108,7 @@ async fn add_when_signed_in_starts_an_sso_flow(pool: PgPool) {
     assert!(res.status().is_redirection());
     let (url, q) = params(&Browser::location(&res));
     assert_eq!(url.path(), "/v2/oauth/authorize");
-    assert_eq!(q["scope"].split(' ').count(), 6);
+    assert_eq!(q["scope"].split(' ').count(), 7);
 }
 
 #[sqlx::test]

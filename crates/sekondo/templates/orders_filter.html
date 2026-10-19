@@ -1,8 +1,9 @@
-<form id="character-filter" data-character-filter hx-get="/orders" hx-trigger="change" hx-target="#orders-view" hx-select="#orders-view" hx-select-oob="#main-nav, #filter-box" hx-swap="outerHTML" hx-push-url="true">
+<form id="character-filter" data-character-filter hx-get="{{ view.path }}" hx-trigger="change" hx-target="#content" hx-sync="#content:replace" hx-select="#content > *" hx-select-oob="#main-nav, #sub-menu, #filter-box, #freshness" hx-swap="innerHTML show:#content:top" hx-push-url="true">
   {% let characters = view.characters %}
   {% include "character_filter.html" %}
   <input type="hidden" name="sort" value="{{ view.sell_sort.key.name() }}">
   <input type="hidden" name="dir" value="{{ view.sell_sort.dir.name() }}">
   <input type="hidden" name="bsort" value="{{ view.buy_sort.key.name() }}">
   <input type="hidden" name="bdir" value="{{ view.buy_sort.dir.name() }}">
+  <input type="hidden" name="per_page" value="{{ view.pager.paging.per_page }}">
 </form>

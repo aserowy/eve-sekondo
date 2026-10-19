@@ -12,10 +12,11 @@ use crate::{account::CurrentAccount, app::AppState, auth, csrf, selection::ViewQ
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Dashboard,
-    Orders,
+    OrdersSell,
+    OrdersBuy,
     Wealth,
     Trades,
-    Opportunities,
+    Opportunities(crate::opportunities::tables::Table),
     Characters,
 }
 
@@ -45,7 +46,7 @@ impl Nav {
     }
 
     pub fn orders_current(&self) -> bool {
-        self.current == Page::Orders
+        matches!(self.current, Page::OrdersSell | Page::OrdersBuy)
     }
 
     pub fn wealth_current(&self) -> bool {
@@ -57,7 +58,7 @@ impl Nav {
     }
 
     pub fn opportunities_current(&self) -> bool {
-        self.current == Page::Opportunities
+        matches!(self.current, Page::Opportunities(_))
     }
 
     pub fn characters_current(&self) -> bool {
@@ -65,7 +66,7 @@ impl Nav {
     }
 
     pub fn orders_href(&self) -> String {
-        format!("/orders{}", self.chars_query)
+        format!("/orders/sell{}", self.chars_query)
     }
 
     /// Carries the selection and never the range: the wealth page has a range of its own.
@@ -80,7 +81,7 @@ impl Nav {
 
     /// Carries the selection and never the page's own sorting or filters.
     pub fn opportunities_href(&self) -> String {
-        format!("/opportunities{}", self.chars_query)
+        format!("/opportunities/expansion{}", self.chars_query)
     }
 
     pub fn dashboard_href(&self) -> String {

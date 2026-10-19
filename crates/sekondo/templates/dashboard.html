@@ -21,7 +21,7 @@
 {% endblock %}
 
 {% block subnav %}
-<nav class="section-nav" id="section-nav" aria-label="Sections">
+<nav class="sub-menu" id="section-nav" aria-label="Sections">
   <a href="#totals">Totals</a>
   <a href="#characters">Characters</a>
   <a href="#split">Split &amp; top items</a>
@@ -34,7 +34,7 @@
 {% block content %}
 <div hx-ext="sse" sse-connect="/events">
 <div id="dashboard-view">
-  <section id="dashboard-summary" hx-get="{{ view.summary_url }}" hx-trigger="sse:orders-updated, sse:wealth-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
+  <section id="dashboard-summary" data-live="/dashboard/summary" hx-get="{{ view.summary_url }}" hx-trigger="sse:orders-updated, sse:wealth-updated, htmx:sseOpen from:body" hx-swap="innerHTML" hx-sync="this:queue last">
     {% include "dashboard_summary.html" %}
   </section>
 </div>

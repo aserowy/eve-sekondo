@@ -474,7 +474,10 @@ mod tests {
             &[sale(1, DAY2, 4), sale(2, DAY3, 4), sale(3, DAY4, 4)],
         );
 
-        assert_eq!(sale_summary(&costs), [(1, 4, 400), (2, 4, 400), (3, 2, 200)]);
+        assert_eq!(
+            sale_summary(&costs),
+            [(1, 4, 400), (2, 4, 400), (3, 2, 200)]
+        );
     }
 
     #[test]

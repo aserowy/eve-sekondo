@@ -52,7 +52,7 @@ test('narrow the selection, bookmark it, and carry it across pages', async ({ pa
   await nav.getByRole('link', { name: 'Dashboard' }).click();
   await expect(page).toHaveURL(/\/dashboard\?chars=90000002,90000003$/);
   await nav.getByRole('link', { name: 'Orders' }).click();
-  await expect(page).toHaveURL(/\/orders\?chars=90000002,90000003$/);
+  await expect(page).toHaveURL(/\/orders\/sell\?chars=90000002,90000003$/);
   await expect(page.locator('#sell-orders tbody.order')).toHaveCount(2);
   await expect(page.getByRole('checkbox', { name: 'Alice Alpha' })).not.toBeChecked();
 
@@ -74,7 +74,7 @@ test('a foreign character id in the URL is ignored', async ({ page }) => {
   await pollCharacter(page, 90000001);
 
   // Bob belongs to nobody here: his ID is not one of this account's characters.
-  await page.goto('/orders?chars=90000002');
+  await page.goto('/orders/sell?chars=90000002');
 
   await expect(page.locator('#sell-orders tbody.order')).toHaveCount(1);
   await expect(page.getByRole('checkbox')).toHaveCount(1);
@@ -89,7 +89,7 @@ test('the sorting is kept when the selection changes', async ({ page }) => {
     orders: [stubOrder(1, { price: 5 }), stubOrder(2, { type: 35, price: 9 })],
   });
   await pollCharacter(page, 90000001);
-  await page.goto('/orders?sort=price&dir=desc');
+  await page.goto('/orders/sell?sort=price&dir=desc');
   await expect(page.locator('#sell-orders tbody.order').first()).toHaveAttribute('id', 'order-2');
 
   // One character only: nothing to deselect, but the form still carries the sort fields.

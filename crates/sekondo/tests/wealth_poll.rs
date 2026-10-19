@@ -630,7 +630,9 @@ async fn a_poll_reads_on_past_answers_without_a_stored_transaction(pool: PgPool)
 async fn a_poll_asks_for_at_most_fifty_answers(pool: PgPool) {
     let env = linked(pool).await;
     // Corporation transactions are never stored, so nothing ever tells the poll to stop.
-    let others = (1..=60).map(|id| transaction(id, id % 2 == 0, false)).collect();
+    let others = (1..=60)
+        .map(|id| transaction(id, id % 2 == 0, false))
+        .collect();
     set_transactions(&env, ALICE, others, Some(1)).await;
 
     let outcome = env.wealth.poll(ALICE, Kind::Transactions).await;

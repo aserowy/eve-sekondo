@@ -21,7 +21,7 @@ Without Nix you need the same tools installed yourself. Below, `podman-compose` 
 At <https://developers.eveonline.com/> create an application with:
 
 - **Callback URL:** `https://localhost:8443/auth/callback`
-- **Scopes:** `esi-markets.read_character_orders.v1`, `esi-universe.read_structures.v1`, `esi-wallet.read_character_wallet.v1`, `esi-assets.read_assets.v1`, `esi-skills.read_skills.v1` and `esi-characters.read_standings.v1`. All six are required: tick every one of them on the application, or EVE's login answers `invalid_scope`. Characters linked with fewer scopes (every character linked before the skills and standings scopes were added) show "Needs re-login" until they log in once more.
+- **Scopes:** `esi-markets.read_character_orders.v1`, `esi-universe.read_structures.v1`, `esi-wallet.read_character_wallet.v1`, `esi-assets.read_assets.v1`, `esi-skills.read_skills.v1`, `esi-characters.read_standings.v1` and `esi-location.read_location.v1`. Tick every one of them on the application, or EVE's login answers `invalid_scope`. The first six are required: characters linked with fewer scopes (every character linked before the skills and standings scopes were added) show "Needs re-login" until they log in once more. The location scope is optional: without it a character's fee cards use Jita 4-4 and offer to log in again, and nothing else changes.
 
 Keep the client ID and the secret for `.env` below.
 
@@ -102,7 +102,7 @@ minimum margin of a station trade (hover a figure for the exact rate and its inp
 - The sources of the formulas, and what was checked in game, are in
   `openspec/changes/show-market-fees/design.md`.
 
-The orders page (`/orders`) takes `?chars=<id>,<id>` to select characters and `sort`/`dir` (sell table)
+The orders pages (`/orders/sell` and `/orders/buy`) take `?chars=<id>,<id>` to select characters and `sort`/`dir` (sell table)
 and `bsort`/`bdir` (buy table) for the sorting; the URL can be bookmarked. Open pages are told about new
 data over a server-sent event stream (`/events`) and re-fetch the affected tables themselves. A skills or
 standings poll that changes a fee re-fetches the fee rows and the order tables, because the margins depend
@@ -194,20 +194,21 @@ sync can be switched off with `STATION_SYNC=off`.
   figures after every refresh, the indicators (volume, volatility, SMA 5/20, Bollinger %B, RSI 14, the
   fresh SMA crossing) after a history pass, and the recurring spread window when the hourly rollup
   advanced. All maths are pure functions in `crates/sekondo/src/opportunities/analysis.rs`.
-- **The page** stacks four tables, each at most 50 rows and 20 of them visible before it scrolls inside
-  its panel, sorted by ISK/day unless you sort a column (each table keeps its own sorting in the URL:
-  `xs`/`xd`, `cs`/`cd`, `ms`/`md`, `ts`/`td`): recurring spread expansion, classic spread trade, mean
-  reversion and trend. A sub-menu below the top bar jumps to each table and shows its row count, and a
-  collapsible freshness column on the right holds the station sync's status and a warning count. For every row the request works out the cost
+- **The pages** show one table each: `/opportunities/expansion`, `/opportunities/classic`,
+  `/opportunities/reversion` and `/opportunities/trend` (`/opportunities` goes to the first). A sub-menu
+  switches between them without row counts, and every table lists every item that passes its rules,
+  paged 50 at a time after sorting by ISK/day unless you sort a column (each table keeps its own sorting
+  in the URL: `xs`/`xd`, `cs`/`cd`, `ms`/`md`, `ts`/`td`). The freshness at the end of the page holds the
+  station sync's status. For every row the request works out the cost
   `c = B (1 + b)`, the revenue `r = S (1 - b - t)`, the margin `m`, the order size, the fill time, the
   allowed holding time `min(3, (m / 2σ)^2)` days and ISK/day, with the fees of the selected character that
   has the lowest minimum margin at the station (base rates of 3% and 7.5% while none is known). An item
   whose fill time exceeds its holding time, whose margin is not positive, or that has fewer than 10 daily
-  returns is in no table. The filter box (the character filter, then minimum margin, minimum ISK/day, an
-  item name search and the capital per item, which are saved per account as soon as one changes) also
+  returns is in no table. The filter section (the character filter, then minimum margin, minimum ISK/day,
+  an item name search and the capital per item, which are saved per account as soon as one changes) also
   names the station and the fees in use on its right. A click on a row opens the detail page
   `/opportunities/<table>/<type id>` with the fees, every figure and how it follows from the others, and
-  each chart of the table on a row of its own; its sub-menu leads back to the tables with the selection
+  each chart of the table on a row of its own; its sub-menu leads back to the table with the selection
   and sorting kept.
 - The owner of the station is looked up once, for every account, so a character has fees there whether or
   not it has an order in Jita.
@@ -215,13 +216,15 @@ sync can be switched off with `STATION_SYNC=off`.
 
 ## Page layout
 
-Every signed-in page follows the layout guidelines in `openspec/specs/ui-layout/spec.md`: a window page
-(orders, wealth, trades) fills the window and never scrolls as a whole, a scrolling page (dashboard,
-characters, opportunities and their detail page) stacks full-width rows. A top bar holds the
-navigation, a sub-menu jumps to the rows of a scrolling page, and a filter box holds the filters that
-affect more than one block; these three stay at the top. Every block is a titled panel, every table
-uses the one `table.data` style, and details open on a page of their own. Read the spec before adding a
-page.
+Every signed-in page follows the layout guidelines in `openspec/specs/ui-layout/spec.md`, styled with
+Pico CSS (vendored in `crates/sekondo/static/`) and a small stylesheet of our own. A collapsible sidebar
+holds the main menu (icons and text, icons only when collapsed; the state is kept per browser). A table
+page shows, top to bottom, its sub-menu (if it has siblings), the filter section, the KPI cards, **one**
+table with its pagination (page size 25, 50, 100 or 200, in the URL as `page` and `per_page`) and the
+freshness. Sorting, filters, ranges and pages are server-rendered and swapped in place; a live refresh
+keeps the page, the sorting and the scroll position. The orders are split into `/orders/sell` and
+`/orders/buy` (`/orders` goes to the sell page), the fee cards show each selected character's fees at the
+station it is docked in (Jita 4-4 until its location is known). Read the spec before adding a page.
 
 ## 4. Run with Compose
 
@@ -346,6 +349,7 @@ restores everything) change how the stub behaves:
 | `esi-delay` | `{"millis"}` | the orders route answers slowly |
 | `skills` | `{"character_id", "skills": [...]}` | replaces the skills ESI returns for a character (ESI's objects with `skill_id`, `active_skill_level`, ...) |
 | `standings` | `{"character_id", "standings": [...]}` | replaces the standings (`from_id`, `from_type`, `standing`) |
+| `location` | `{"character_id", "location"}` | replaces where a character is: `{"solar_system_id", "station_id"}`, `{..., "structure_id"}` or just `{"solar_system_id"}` (open space); everybody is docked in Jita 4-4 by default |
 | `stations` | `{"station_id", "owner"}` | sets the owner corporation of an NPC station |
 | `revoke`, `scopes`, `owner-hash`, `fail-next-token`, `rotate-key` | | SSO behaviour, see `crates/eve-stub` |
 | `stats` | (GET) | call counters per route |
@@ -353,7 +357,7 @@ restores everything) change how the stub behaves:
 ESI routes served: `GET /characters/{id}/orders` (needs a stub-issued token of that character with the
 orders scope), `POST /universe/names` (a fixture table; one unknown ID fails the whole request with 404)
 `GET /universe/structures/{id}` (needs the structures scope), `GET /characters/{id}/skills` and
-`GET /characters/{id}/standings` (each needs its scope) and `GET /universe/stations/{id}` (public).
+`GET /characters/{id}/standings` and `GET /characters/{id}/location` (each needs its scope) and `GET /universe/stations/{id}` (public).
 
 ## Database queries
 

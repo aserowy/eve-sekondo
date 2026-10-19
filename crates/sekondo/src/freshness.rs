@@ -4,7 +4,7 @@ use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
-use crate::{fees::FeeLocationView, format, selection::CharacterSelection};
+use crate::{format, selection::CharacterSelection};
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct FreshnessRecord {
@@ -144,8 +144,6 @@ pub struct FreshnessView {
     pub waiting_for_first_update: bool,
     pub last_update: String,
     pub next_update: String,
-    /// What the market charges at each location with orders; only the orders page fills it.
-    pub locations: Vec<FeeLocationView>,
 }
 
 pub fn freshness_view(
@@ -165,7 +163,6 @@ pub fn freshness_view(
             (false, Some(next)) => format::eve_time(next),
             _ => "\u{2014}".to_owned(),
         },
-        locations: Vec::new(),
     }
 }
 

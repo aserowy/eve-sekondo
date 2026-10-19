@@ -2,7 +2,7 @@ use askama::Template;
 
 #[derive(Template)]
 #[template(
-    source = r#"{% include "icons/users.html" %}|{% include "icons/log-out.html" %}|{% include "icons/user-plus.html" %}|{% include "icons/unlink.html" %}|{% include "icons/log-in.html" %}|{% include "icons/panel-right-open.html" %}|{% include "icons/panel-right-close.html" %}"#,
+    source = r#"{% include "icons/users.html" %}|{% include "icons/log-out.html" %}|{% include "icons/user-plus.html" %}|{% include "icons/unlink.html" %}|{% include "icons/log-in.html" %}|{% include "icons/layout-dashboard.html" %}|{% include "icons/wallet.html" %}|{% include "icons/arrow-left-right.html" %}|{% include "icons/list.html" %}|{% include "icons/lightbulb.html" %}|{% include "icons/panel-left-close.html" %}|{% include "icons/panel-left-open.html" %}"#,
     ext = "html"
 )]
 struct AllIcons;
@@ -11,7 +11,7 @@ struct AllIcons;
 fn every_icon_is_an_inline_decorative_svg_in_the_text_colour() {
     let html = AllIcons.render().unwrap();
     let icons: Vec<&str> = html.split('|').collect();
-    assert_eq!(icons.len(), 7);
+    assert_eq!(icons.len(), 12);
     for icon in icons {
         let icon = icon.trim();
         assert!(

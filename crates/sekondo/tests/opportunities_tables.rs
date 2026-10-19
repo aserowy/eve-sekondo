@@ -13,10 +13,31 @@ async fn setup(pool: PgPool) -> (TestApp, Browser) {
     (app, browser)
 }
 
-async fn get(app: &TestApp, browser: &Browser, path: &str) -> String {
+async fn get_one(app: &TestApp, browser: &Browser, path: &str) -> String {
     let res = browser.get(&app.url(path)).await;
     assert_eq!(res.status(), 200, "{path}");
     res.text().await.unwrap()
+}
+
+/// A page by its path. `/opportunities/tables` and `/opportunities/tables?…` stand for the four
+/// tables, the content of each table's page one after the other with the same query, so that a
+/// test can look at the rows of every table.
+async fn get(app: &TestApp, browser: &Browser, path: &str) -> String {
+    match path.strip_prefix("/opportunities/tables") {
+        Some(query) if query.is_empty() || query.starts_with('?') => {
+            let mut all = String::new();
+            for table in ["expansion", "classic", "reversion", "trend"] {
+                all += &get_one(
+                    app,
+                    browser,
+                    &format!("/opportunities/{table}/content{query}"),
+                )
+                .await;
+            }
+            all
+        }
+        _ => get_one(app, browser, path).await,
+    }
 }
 
 /// The page with HTML-escaped ampersands turned back, so URLs can be compared as written.
@@ -259,7 +280,7 @@ async fn items_that_fail_a_hard_rule_are_in_no_table(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn more_than_fifty_matches_show_the_fifty_with_the_highest_isk_per_day(pool: PgPool) {
+async fn more_than_fifty_matches_page_through_all_of_them_by_isk_per_day(pool: PgPool) {
     let (app, browser) = setup(pool.clone()).await;
     for i in 1..=80i64 {
         // A larger volume fills faster and so earns more per day.
@@ -271,12 +292,57 @@ async fn more_than_fifty_matches_show_the_fifty_with_the_highest_isk_per_day(poo
         .await;
     }
 
-    let html = get(&app, &browser, "/opportunities/tables").await;
-    let shown = rows(table(&html, "classic"));
+    let first = get_one(&app, &browser, "/opportunities/classic/content").await;
+    let second = get_one(&app, &browser, "/opportunities/classic/content?page=2").await;
+    let first = rows(table(&first, "classic"));
+    let second = rows(table(&second, "classic"));
 
-    assert_eq!(shown.len(), 50);
-    assert_eq!(shown[0], 1080, "highest ISK/day first");
-    assert!(shown.contains(&1031) && !shown.contains(&1030));
+    assert_eq!(first.len(), 50);
+    assert_eq!(first[0], 1080, "highest ISK/day first");
+    assert!(first.contains(&1031) && !first.contains(&1030));
+    assert_eq!(second.len(), 30, "the other 30");
+    assert_eq!(second[0], 1030);
+    assert_eq!(second.last(), Some(&1001));
+}
+
+#[sqlx::test]
+async fn the_page_is_applied_after_sorting_and_clamped_and_carried_by_the_controls(pool: PgPool) {
+    let (app, browser) = setup(pool.clone()).await;
+    for i in 1..=80i64 {
+        Item {
+            volume_7d: 10_000_000.0 * i as f64,
+            ..Item::new(1000 + i)
+        }
+        .insert(&pool)
+        .await;
+    }
+
+    let by_item = get_one(
+        &app,
+        &browser,
+        "/opportunities/classic/content?cs=item&cd=asc&page=2",
+    )
+    .await;
+    let past = get_one(&app, &browser, "/opportunities/classic/content?page=9").await;
+
+    // All items are named alike, so the tie falls to the item number: page 2 is the last 30.
+    assert_eq!(rows(table(&by_item, "classic")).len(), 30);
+    assert!(past.contains("Page 2 of 2"), "{past}");
+    let links = unescaped(&by_item);
+    let previous = links
+        .split("<a ")
+        .find(|a| a.contains(r#"rel="prev""#))
+        .unwrap();
+    assert!(
+        previous.contains(r#"href="/opportunities/classic?cs=item&cd=asc""#),
+        "{previous}"
+    );
+    // A sorting starts over on the first page.
+    let sort_link = links
+        .split("<a ")
+        .find(|a| a.contains("cs=item&cd=desc"))
+        .unwrap();
+    assert!(!sort_link.contains("page="), "{sort_link}");
 }
 
 #[sqlx::test]

@@ -85,6 +85,144 @@ async fn sync_row(
     .unwrap()
 }
 
+async fn location(env: &PollEnv, character: i64) -> Option<(i64, String)> {
+    sqlx::query_as("SELECT location_id, kind FROM character_locations WHERE character_id = $1")
+        .bind(character)
+        .fetch_optional(&env.pool)
+        .await
+        .unwrap()
+}
+
+async fn move_to(env: &PollEnv, character: i64, where_to: serde_json::Value) {
+    env.control(
+        "location",
+        json!({"character_id": character, "location": where_to}),
+    )
+    .await;
+}
+
+// ---- polling the location ----
+
+#[sqlx::test]
+async fn a_character_docked_in_a_station_is_stored_with_that_station(pool: PgPool) {
+    let env = linked(pool).await;
+    let polled_at = env.clock.now();
+
+    assert_eq!(
+        env.fees.poll(ALICE, Kind::Location).await,
+        PollOutcome::Updated
+    );
+
+    assert_eq!(
+        location(&env, ALICE).await,
+        Some((JITA, "station".to_owned()))
+    );
+    let (success, ..) = sync_row(&env, ALICE, "location").await;
+    assert_eq!(success, Some(polled_at));
+}
+
+#[sqlx::test]
+async fn a_character_docked_in_a_structure_is_stored_with_that_structure(pool: PgPool) {
+    let env = linked(pool).await;
+    move_to(
+        &env,
+        ALICE,
+        json!({"solar_system_id": 30000144, "structure_id": 1000000000001u64}),
+    )
+    .await;
+
+    env.fees.poll(ALICE, Kind::Location).await;
+
+    assert_eq!(
+        location(&env, ALICE).await,
+        Some((1000000000001, "structure".to_owned()))
+    );
+}
+
+#[sqlx::test]
+async fn a_character_in_space_keeps_the_last_location(pool: PgPool) {
+    let env = linked(pool).await;
+    env.fees.poll(ALICE, Kind::Location).await;
+    move_to(&env, ALICE, json!({"solar_system_id": 30000144})).await;
+
+    assert_eq!(
+        env.fees.poll(ALICE, Kind::Location).await,
+        PollOutcome::Updated
+    );
+
+    assert_eq!(
+        location(&env, ALICE).await,
+        Some((JITA, "station".to_owned()))
+    );
+}
+
+#[sqlx::test]
+async fn the_next_location_poll_waits_for_the_hour(pool: PgPool) {
+    let env = linked(pool).await;
+    let polled_at = env.clock.now();
+
+    env.fees.poll(ALICE, Kind::Location).await;
+
+    let (_, next, ..) = sync_row(&env, ALICE, "location").await;
+    assert!(next >= polled_at + Duration::hours(1), "{next}");
+}
+
+#[sqlx::test]
+async fn a_failed_location_poll_keeps_the_last_location(pool: PgPool) {
+    let env = linked(pool).await;
+    env.fees.poll(ALICE, Kind::Location).await;
+    move_to(
+        &env,
+        ALICE,
+        json!({"solar_system_id": 30000144, "structure_id": 1000000000001u64}),
+    )
+    .await;
+    env.clock.advance(Duration::hours(1) + Duration::minutes(1));
+    env.control("esi-fail-next", json!({"route": "location", "status": 503}))
+        .await;
+
+    assert_eq!(
+        env.fees.poll(ALICE, Kind::Location).await,
+        PollOutcome::Failed
+    );
+
+    assert_eq!(
+        location(&env, ALICE).await,
+        Some((JITA, "station".to_owned()))
+    );
+    let (_, _, error, failures) = sync_row(&env, ALICE, "location").await;
+    assert_eq!(failures, 1);
+    assert!(error.unwrap().contains("503"));
+}
+
+#[sqlx::test]
+async fn a_character_without_the_location_scope_is_never_polled_for_it(pool: PgPool) {
+    let env = PollEnv::new(pool).await;
+    let account = env.new_account().await;
+    env.control(
+        "scopes",
+        json!({"character_id": ALICE, "scopes": sekondo::oauth::REQUIRED_SCOPES}),
+    )
+    .await;
+    env.link(account, ALICE).await;
+
+    assert_eq!(
+        env.fees.poll(ALICE, Kind::Location).await,
+        PollOutcome::Skipped
+    );
+    env.fees.tick().await;
+    env.clock.advance(Duration::hours(3));
+    env.fees.tick().await;
+
+    assert_eq!(env.stub.esi_calls("location"), 0);
+    assert_eq!(location(&env, ALICE).await, None);
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM fee_sync WHERE kind = 'location'")
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0, "not even scheduled");
+}
+
 // ---- polling skills and standings ----
 
 #[sqlx::test]
@@ -180,10 +318,10 @@ async fn the_scheduler_polls_a_new_character_within_one_hour_and_not_again_befor
         .fetch_one(&env.pool)
         .await
         .unwrap();
-    assert_eq!(scheduled, 2, "skills and standings");
+    assert_eq!(scheduled, 3, "skills, standings and location");
 
     env.clock.advance(Duration::hours(1) + Duration::minutes(1));
-    assert_eq!(env.fees.tick().await, 2);
+    assert_eq!(env.fees.tick().await, 3);
     assert_eq!(skills(&env, ALICE).await.len(), 2);
     assert_eq!(env.fees.tick().await, 0, "not due again right away");
 
@@ -195,6 +333,7 @@ async fn the_scheduler_polls_a_new_character_within_one_hour_and_not_again_befor
     );
     assert_eq!(env.stub.esi_calls("skills"), 1);
     assert_eq!(env.stub.esi_calls("standings"), 1);
+    assert_eq!(env.stub.esi_calls("location"), 1);
 }
 
 #[sqlx::test]
@@ -561,13 +700,14 @@ async fn a_skills_poll_that_changes_the_fees_of_a_sale_signals_the_account_witho
 }
 
 #[sqlx::test]
-async fn a_skills_poll_changes_nothing_for_a_character_without_orders_or_sales(pool: PgPool) {
+async fn a_skills_poll_changes_the_fee_card_of_a_character_without_orders_or_sales(pool: PgPool) {
     let env = linked(pool).await;
     let mut stream = env.events.subscribe(account_of(&env, ALICE).await);
 
     env.fees.poll(ALICE, Kind::Skills).await;
 
-    assert_eq!(signals(&mut stream).await, Vec::<Event>::new());
+    // Every character has a fee card at its fee location (Jita 4-4 here), orders or not.
+    assert_eq!(signals(&mut stream).await, [Event::FeesUpdated]);
 }
 
 // ---- the built-in station ----
@@ -641,4 +781,119 @@ async fn learning_the_built_in_owner_signals_every_account(pool: PgPool) {
 
     assert!(signals(&mut alice).await.contains(&Event::FeesUpdated));
     assert!(signals(&mut bob).await.contains(&Event::FeesUpdated));
+}
+
+// ---- the fee location ----
+
+const AMARR: i64 = 60008494;
+
+/// Alice with skills and standings polled, docked in Jita 4-4, and both owners known.
+async fn alice_docked_in_jita(pool: PgPool) -> PollEnv {
+    let env = linked(pool).await;
+    env.fees.poll(ALICE, Kind::Skills).await;
+    env.fees.poll(ALICE, Kind::Standings).await;
+    env.fees.poll(ALICE, Kind::Location).await;
+    env.fees.resolve_stations().await;
+    env.fees.tick().await;
+    assert!(env.stub.station_requests().contains(&JITA));
+    env
+}
+
+#[sqlx::test]
+async fn moving_to_a_station_with_other_fees_signals_the_account(pool: PgPool) {
+    let env = alice_docked_in_jita(pool).await;
+    // Amarr's owner is known already, so the move changes the fees right away.
+    sqlx::query("INSERT INTO station_owners (station_id, owner_id, resolved_at) VALUES ($1, 1000086, now())")
+        .bind(AMARR)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    let mut stream = env.events.subscribe(account_of(&env, ALICE).await);
+    move_to(
+        &env,
+        ALICE,
+        json!({"solar_system_id": 30002187, "station_id": AMARR}),
+    )
+    .await;
+    env.clock.advance(Duration::hours(1) + Duration::minutes(1));
+
+    env.fees.poll(ALICE, Kind::Location).await;
+
+    assert_eq!(signals(&mut stream).await, [Event::FeesUpdated]);
+    assert_eq!(
+        location(&env, ALICE).await,
+        Some((AMARR, "station".to_owned()))
+    );
+}
+
+#[sqlx::test]
+async fn the_same_station_signals_nobody(pool: PgPool) {
+    let env = alice_docked_in_jita(pool).await;
+    let mut stream = env.events.subscribe(account_of(&env, ALICE).await);
+    env.clock.advance(Duration::hours(1) + Duration::minutes(1));
+
+    env.fees.poll(ALICE, Kind::Location).await;
+
+    assert_eq!(signals(&mut stream).await, Vec::<Event>::new());
+}
+
+#[sqlx::test]
+async fn the_owner_of_a_docked_station_is_looked_up_and_completes_the_fee(pool: PgPool) {
+    let env = alice_docked_in_jita(pool).await;
+    move_to(
+        &env,
+        ALICE,
+        json!({"solar_system_id": 30002187, "station_id": AMARR}),
+    )
+    .await;
+    env.clock.advance(Duration::hours(1) + Duration::minutes(1));
+    env.fees.poll(ALICE, Kind::Location).await;
+    let mut stream = env.events.subscribe(account_of(&env, ALICE).await);
+
+    assert_eq!(env.fees.resolve_stations().await, 1);
+
+    assert!(env.stub.station_requests().contains(&AMARR));
+    assert_eq!(
+        signals(&mut stream).await,
+        [Event::FeesUpdated],
+        "the broker fee at the docked station is known now"
+    );
+}
+
+#[sqlx::test]
+async fn a_docked_station_and_a_docked_structure_are_named_like_order_locations(pool: PgPool) {
+    let env = linked(pool).await;
+    let name = |id: i64| {
+        let pool = env.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<String>>("SELECT name FROM names WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&pool)
+                .await
+                .unwrap()
+                .flatten()
+        }
+    };
+
+    move_to(
+        &env,
+        ALICE,
+        json!({"solar_system_id": 30002187, "station_id": AMARR}),
+    )
+    .await;
+    env.fees.poll(ALICE, Kind::Location).await;
+    assert_eq!(
+        name(AMARR).await.as_deref(),
+        Some("Amarr VIII (Oris) - Emperor Family Academy")
+    );
+
+    env.clock.advance(Duration::hours(1) + Duration::minutes(1));
+    move_to(
+        &env,
+        ALICE,
+        json!({"solar_system_id": 30000144, "structure_id": 1000000000001u64}),
+    )
+    .await;
+    env.fees.poll(ALICE, Kind::Location).await;
+    assert_eq!(name(1000000000001).await.as_deref(), Some("Alpha Keepstar"));
 }

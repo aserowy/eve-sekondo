@@ -439,3 +439,99 @@ async fn fees_at_a_location_never_reach_another_accounts_characters(pool: PgPool
         [ALICE]
     );
 }
+
+// ---- the fee location ----
+
+const LOCATION_SCOPE: &str = "esi-location.read_location.v1";
+
+async fn grant_location_scope(pool: &PgPool, character: i64) {
+    sqlx::query("UPDATE characters SET scopes = ARRAY[$2] WHERE character_id = $1")
+        .bind(character)
+        .bind(LOCATION_SCOPE)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn docked(pool: &PgPool, character: i64, location: i64, kind: &str) {
+    sqlx::query(
+        "INSERT INTO character_locations (character_id, location_id, kind, updated_at) \
+         VALUES ($1, $2, $3, now())",
+    )
+    .bind(character)
+    .bind(location)
+    .bind(kind)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn fee_location_of(pool: &PgPool, acc: Uuid, character: i64) -> (i64, bool) {
+    let rows = fees::at_fee_location(pool, acc, &[character])
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    (rows[0].row.location_id, rows[0].needs_location_scope)
+}
+
+#[sqlx::test]
+async fn without_the_location_scope_the_fee_location_is_jita_with_the_relogin_hint(pool: PgPool) {
+    let acc = alice_at_jita(&pool).await;
+    // A docked row left over from before the scope went missing is not used.
+    docked(&pool, ALICE, AMARR, "station").await;
+
+    assert_eq!(fee_location_of(&pool, acc, ALICE).await, (JITA, true));
+}
+
+#[sqlx::test]
+async fn a_docked_character_has_its_fees_at_the_station_it_is_docked_in(pool: PgPool) {
+    let acc = alice_at_jita(&pool).await;
+    grant_location_scope(&pool, ALICE).await;
+    owner(&pool, AMARR, 1000086).await;
+    docked(&pool, ALICE, AMARR, "station").await;
+
+    assert_eq!(fee_location_of(&pool, acc, ALICE).await, (AMARR, false));
+    let row = &fees::at_fee_location(&pool, acc, &[ALICE]).await.unwrap()[0].row;
+    assert_eq!(row.sales_tax.as_deref(), Some("3.375"));
+    assert!(
+        row.broker_fee.is_some(),
+        "the owner of the docked station is known"
+    );
+}
+
+#[sqlx::test]
+async fn a_character_docked_in_a_structure_has_its_fees_there(pool: PgPool) {
+    let acc = alice_at_jita(&pool).await;
+    grant_location_scope(&pool, ALICE).await;
+    docked(&pool, ALICE, STRUCTURE, "structure").await;
+
+    let row = &fees::at_fee_location(&pool, acc, &[ALICE]).await.unwrap()[0].row;
+
+    assert_eq!((row.location_id, row.is_structure), (STRUCTURE, true));
+    assert_eq!(row.broker_fee, None);
+}
+
+#[sqlx::test]
+async fn a_character_never_reported_docked_uses_jita(pool: PgPool) {
+    let acc = alice_at_jita(&pool).await;
+    grant_location_scope(&pool, ALICE).await;
+
+    assert_eq!(fee_location_of(&pool, acc, ALICE).await, (JITA, false));
+}
+
+#[sqlx::test]
+async fn the_fee_location_never_reaches_another_accounts_characters(pool: PgPool) {
+    let acc = account(&pool).await;
+    let other = account(&pool).await;
+    character(&pool, acc, ALICE).await;
+    character(&pool, other, BOB).await;
+
+    let rows = fees::at_fee_location(&pool, acc, &[ALICE, BOB])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        rows.iter().map(|r| r.row.character_id).collect::<Vec<_>>(),
+        [ALICE]
+    );
+}

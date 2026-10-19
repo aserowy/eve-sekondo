@@ -1,252 +1,171 @@
-/* Design tokens */
+/* The CSP has no data: images, so Pico's inline icons are served as files. */
 :root {
-  color-scheme: dark;
-  --bg: #0f1216;
-  --panel: #161b21;
-  --panel-alt: #1a2028;
-  --hover: #222a34;
-  --border: #2a323d;
-  --ink: #d5dbe3;
-  --ink-dim: #8793a2;
-  --accent: #4aa3df;
-  --success: #3fb27f;
-  --error: #e5584f;
-  --fs: 13px;
-  --row: 20px;
-  --gap: 4px;
-  --radius: 2px;
-  --bars-height: 31px;
+  --pico-icon-checkbox: url("/static/pico-icons/checkbox.svg");
+  --pico-icon-minus: url("/static/pico-icons/minus.svg");
+  --pico-icon-chevron: url("/static/pico-icons/chevron.svg");
+  --pico-icon-search: url("/static/pico-icons/search.svg");
+  --pico-icon-close: url("/static/pico-icons/close.svg");
+  --pico-icon-date: url("/static/pico-icons/date.svg");
+  --pico-icon-time: url("/static/pico-icons/time.svg");
+  --pico-icon-valid: url("/static/pico-icons/valid.svg");
+  --pico-icon-invalid: url("/static/pico-icons/invalid.svg");
 }
-
-/* Reset */
-*, *::before, *::after { box-sizing: border-box; }
-html { font-size: var(--fs); }
-body, h1, h2, h3, p, ul, ol, figure, fieldset, form { margin: 0; padding: 0; }
-body {
-  background: var(--bg);
-  color: var(--ink);
-  font: var(--fs) / 1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-}
-main { padding: var(--gap) 8px 8px; }
-ul, ol { list-style: none; }
-fieldset { border: 0; min-width: 0; }
-img, svg { display: block; }
-small { color: var(--ink-dim); font-size: 0.92em; }
-h1, h2, h3 { font-size: 1rem; font-weight: 600; }
-
-/* Links, buttons, checkboxes */
-a { color: var(--accent); text-decoration: none; }
-a:hover { text-decoration: underline; }
-button, .button {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 1px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--panel-alt);
-  color: var(--ink);
-  font: inherit;
-  line-height: 1.4;
-  cursor: pointer;
-}
-button:hover, .button:hover { background: var(--hover); text-decoration: none; }
-button.link { border: 0; background: none; padding: 0; color: var(--accent); }
-input[type="checkbox"] { margin: 0; accent-color: var(--accent); }
-label { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
-
-/* Tables */
-table { border-collapse: collapse; width: 100%; }
-th, td { padding: 1px 6px; text-align: left; vertical-align: baseline; line-height: 1.35; }
-th { color: var(--ink-dim); font-weight: 500; white-space: nowrap; border-bottom: 1px solid var(--border); }
-th a { color: inherit; }
-td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-td[title] { cursor: help; }
-
-/* One style for every data table: dense rows, striped, highlighted on hover, never wrapping. A table
-   that is wider than its panel scrolls sideways inside the panel's .scroll box. */
-table.data { width: max-content; min-width: 100%; }
-table.data th, table.data td { height: var(--row); padding: 0 6px; line-height: var(--row); white-space: nowrap; }
-table.data:not(.records) tbody tr:nth-child(even) { background: var(--panel-alt); }
-table.data:not(.records) tbody tr:hover { background: var(--hover); }
-table.data tbody tr[data-href] { cursor: pointer; }
-/* The orders tables keep two rows per order, so the stripe is per order. */
-table.data.records tbody.order:nth-of-type(even) { background: var(--panel-alt); }
-table.data.records tbody.order:hover { background: var(--hover); }
-table.data.records tr.details td { color: var(--ink-dim); font-size: 0.92em; }
-
-/* Badges */
-mark.badge {
-  display: inline-block;
-  padding: 0 5px;
-  border-radius: var(--radius);
-  background: var(--border);
-  color: var(--ink);
-  font-size: 0.9em;
-  line-height: 1.35;
-}
-mark.badge.stale, mark.badge.undercut, mark.badge.loss, mark.badge.error { background: var(--error); color: #fff; }
-mark.badge.top, mark.badge.success { background: var(--success); color: #0b1410; }
-
-/* Layout primitives */
-.panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; border: 1px solid var(--border); background: var(--panel); }
-.panel-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 2px 6px;
-  border-bottom: 1px solid var(--border);
-  color: var(--ink-dim);
-  font-size: 0.85rem;
-  font-weight: 500;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-.panel > p { padding: 2px 6px; }
-.scroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
-.scroll thead th { position: sticky; top: 0; z-index: 1; background: var(--panel); }
-.side { min-width: 0; min-height: 0; overflow: auto; }
 
 /* htmx indicator styles (htmx.config.includeIndicatorStyles is off because of the CSP). */
 .htmx-indicator { opacity: 0; transition: opacity 200ms ease-in; }
 .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { opacity: 1; }
 
-/* Characters page, landing and error pages */
-.character { display: flex; gap: 8px; align-items: center; padding: 2px 6px; border-bottom: 1px solid var(--border); }
-.character img { border-radius: 50%; }
-.character .unlink { margin-left: auto; }
-.actions { padding: 4px 6px; }
-.badge { margin-right: 0; }
-.alert { margin-bottom: var(--gap); padding: 3px 8px; border: 1px solid var(--error); border-radius: var(--radius); background: var(--panel); }
-.card { max-width: 32rem; margin: 2rem auto; padding: 12px 16px; gap: 6px; align-items: flex-start; }
-.card h1 { font-size: 1.4rem; }
-
-/* Bars: the top bar, the section sub-menu and the filter box stay together at the top of the window. */
-.bars { position: sticky; top: 0; z-index: 10; background: var(--panel); }
-.filter-box {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 2px 12px;
-  min-height: 24px;
-  padding: 2px 8px;
-  border-bottom: 1px solid var(--border);
-  background: var(--panel);
-}
-.filter-box #filter-context { margin-left: auto; color: var(--ink-dim); }
-
-/* Section sub-menu: one link per row of a scrolling page; the row in view is marked aria-current="location". */
-.section-nav { display: flex; align-items: center; gap: 12px; height: 24px; padding: 0 8px; border-bottom: 1px solid var(--border); background: var(--panel); overflow-x: auto; white-space: nowrap; }
-.section-nav a { color: var(--ink-dim); }
-.section-nav a[aria-current="location"] { color: var(--ink); font-weight: 600; }
-.page-scroll section[id] { scroll-margin-top: calc(var(--bars-height) + 4px); }
-
-/* Navigation */
-.main-nav { display: flex; align-items: center; gap: 12px; height: 30px; padding: 0 8px; border-bottom: 1px solid var(--border); background: var(--panel); }
-.main-nav .links { display: flex; flex: 1 1 auto; align-items: center; gap: 12px; }
-.main-nav a[aria-current="page"] { color: var(--ink); font-weight: 600; }
-.icon-control { display: inline-flex; align-items: center; padding: 2px 4px; border: 0; background: none; color: var(--ink-dim); }
-.icon-control:hover, .icon-control[aria-current="page"] { background: none; color: var(--ink); }
-.icon { flex: none; }
-
-/* Freshness column: a strip with the toggle, 24rem wide when unfolded */
-[data-freshness] { width: 28px; }
-[data-freshness][data-open] { width: 24rem; }
-.freshness-head { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 3px 0; }
-[data-freshness][data-open] .freshness-head { flex-direction: row; justify-content: flex-end; padding: 2px 6px; border-bottom: 1px solid var(--border); }
-.freshness-toggle { display: inline-flex; flex-direction: column; align-items: center; gap: 4px; padding: 2px 4px; border: 0; background: none; color: var(--ink-dim); }
-.freshness-toggle:hover { background: none; color: var(--ink); }
-[data-freshness][data-open] .freshness-toggle { flex-direction: row; }
-.freshness-toggle .when-open, [data-freshness][data-open] .freshness-toggle .when-closed { display: none; }
-[data-freshness][data-open] .freshness-toggle .when-open { display: inline-flex; }
-.freshness-toggle .when-closed { display: inline-flex; }
-.freshness-body { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
-.freshness-body[hidden] { display: none; }
-
-/* Orders page */
-#orders-view { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--gap); height: 100%; }
-#order-tables { grid-column: 1; grid-row: 1; display: grid; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); gap: var(--gap); min-height: 0; }
-#freshness { grid-column: 2; grid-row: 1; }
-#character-filter fieldset { display: flex; flex-wrap: nowrap; gap: 4px 12px; }
-.freshness { display: flex; flex-direction: column; gap: 6px; padding: 4px 6px; }
-.freshness table.fees { width: auto; margin: 2px 0 2px 6px; }
-.freshness table.fees th, .freshness table.fees td { padding: 0 8px 0 0; }
-a.relogin { display: inline-flex; align-items: center; gap: 4px; }
-
-/* Wealth page */
-#wealth-view { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: minmax(0, 2fr) minmax(0, 3fr); gap: var(--gap); height: 100%; }
-#wealth-graph { grid-column: 1; grid-row: 1; }
-#wealth-items { grid-column: 1; grid-row: 2; }
-#wealth-freshness { grid-column: 2; grid-row: 1 / span 2; }
-.inventory-total { padding: 2px 6px; }
-
-/* Window pages fill the window below the bars and never scroll as a whole; scrolling pages stack rows.
-   --bars-height is set by app.js from the bars' measured height. */
-.page-window { height: calc(100dvh - var(--bars-height)); min-height: 0; }
-.page-window > [hx-ext] { height: 100%; }
-/* A table on a scrolling page shows 20 rows (and the header), then scrolls inside its panel. */
-.page-scroll .scroll { flex: 0 1 auto; max-height: calc(var(--row) * 21 + 1px); }
-[data-freshness] .scroll { flex: 1 1 auto; max-height: none; }
-/* On a scrolling page the freshness column stays in place and is as tall as the window below the bars. */
-.page-scroll [data-freshness] { position: sticky; top: calc(var(--bars-height) + var(--gap)); height: calc(100dvh - var(--bars-height) - 12px); }
-
-/* Dashboard: rows, the page scrolls */
-#dashboard-summary {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  grid-auto-rows: auto;
-  gap: var(--gap);
-}
-.tiles { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--gap); }
-.tiles article { margin: 0; padding: 4px 8px; border: 1px solid var(--border); background: var(--panel); }
-.tiles h2 { font-size: 0.92rem; color: var(--ink-dim); font-weight: 500; }
-.tiles .amount { font-size: 1.6rem; line-height: 1.2; font-variant-numeric: tabular-nums; }
-.tiles .amount[title], .corp-share span[title] { cursor: help; }
-.breakdown { grid-column: 1 / -1; }
-.split, .top-sell, .top-buy { height: 22rem; }
-.history-value, .history-count, .history-wealth { grid-column: 1 / -1; height: 40dvh; min-height: 16rem; }
-
-/* Charts */
-.chart { position: relative; height: 18rem; }
-.panel > .chart { height: auto; flex: 1 1 0; min-height: 8rem; }
+/* Charts: Chart.js's default aspect ratio (2:1), reserved on the wrapper so that the page does not
+   change height while a swapped-in chart is drawn. */
+.chart { position: relative; aspect-ratio: 2 / 1; }
 .chart-tooltip {
   position: absolute;
   pointer-events: none;
   transform: translate(-50%, -110%);
   padding: 0.4rem 0.6rem;
-  border-radius: var(--radius);
-  background: var(--panel-alt);
-  border: 1px solid var(--border);
+  border-radius: var(--pico-border-radius);
+  background: var(--pico-card-background-color);
+  border: 1px solid var(--pico-muted-border-color);
   white-space: nowrap;
   z-index: 1;
 }
 .chart-tooltip[hidden] { display: none; }
 .chart-tooltip-title { font-weight: 600; }
-.range-control { display: flex; gap: 8px; }
-.range-control a[aria-current="true"] { font-weight: 600; text-decoration: none; color: var(--ink); }
 
-/* Opportunities */
-#opportunities-view { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--gap); align-items: start; }
-#opportunity-tables { grid-column: 1; grid-row: 1; display: flex; flex-direction: column; gap: var(--gap); min-width: 0; }
-#opportunity-freshness { grid-column: 2; grid-row: 1; }
-.freshness small.error { color: var(--error); }
-.filter-box form { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; }
-.filter-box input[type="text"], .filter-box input[type="search"] { width: 9rem; padding: 0 4px; }
-.filter-box input[name="min_margin"] { width: 4rem; }
-.filter-box .filter-error { color: var(--error); }
+/* Shell: the sidebar and the page. */
+.shell { display: grid; grid-template-columns: auto minmax(0, 1fr); min-height: 100vh; }
+.shell > main { min-width: 0; padding-block: var(--pico-spacing); }
+.sidebar {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  padding: var(--pico-spacing) 0.5rem;
+  border-right: 1px solid var(--pico-muted-border-color);
+  background: var(--pico-card-sectioning-background-color);
+}
+.sidebar nav { display: flex; flex: 1 1 auto; flex-direction: column; }
+.sidebar nav ul { display: flex; flex: 1 1 auto; flex-direction: column; gap: 0.25rem; margin: 0; padding: 0; }
+.sidebar nav li { display: block; margin: 0; padding: 0; list-style: none; }
+.sidebar nav li.bottom { margin-top: auto; }
+.sidebar nav a, .sidebar nav button, .sidebar .menu-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  margin: 0;
+  padding: 0.4rem 0.6rem;
+  border: 0;
+  border-radius: var(--pico-border-radius);
+  background: none;
+  color: var(--pico-color);
+  box-shadow: none;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.sidebar nav a:hover, .sidebar nav button:hover, .sidebar .menu-toggle:hover { background: var(--pico-secondary-focus); }
+.sidebar nav a[aria-current="page"] { background: var(--pico-primary-focus); font-weight: 600; }
+.sidebar .icon { flex: none; width: 1.1rem; height: 1.1rem; }
+.sidebar .menu-toggle { margin-bottom: var(--pico-spacing); color: var(--pico-muted-color); }
+.menu-toggle .when-collapsed, html[data-menu="collapsed"] .menu-toggle .when-expanded { display: none; }
+html[data-menu="collapsed"] .menu-toggle .when-collapsed { display: inline-flex; }
+html[data-menu="collapsed"] .sidebar .label { display: none; }
+
+/* Tables: compact, never wrapping; a table wider than the page scrolls sideways inside .table-wrap. */
+.table-wrap { max-width: 100%; margin-bottom: var(--pico-spacing); overflow-x: auto; }
+.table-wrap table { width: max-content; min-width: 100%; margin-bottom: 0; }
+table { font-size: 0.875rem; }
+th, td { padding: 0.1rem 0.5rem; line-height: 1.2; white-space: nowrap; }
+th a { color: inherit; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td[title] { cursor: help; }
+tbody tr[data-href] { cursor: pointer; }
+/* Pico stripes the rows of table.striped; every data table gets the same stripe and hover. */
+table tbody tr:nth-child(even) > * { background-color: var(--pico-table-row-stripped-background-color); }
+table tbody tr:hover > * { background-color: var(--pico-secondary-focus); }
+/* The orders tables keep two rows per order, so the stripe is per order. */
+table.records tbody tr > * { background-color: transparent; }
+table.records tbody.order:nth-of-type(even) > tr > * { background-color: var(--pico-table-row-stripped-background-color); }
+table.records tbody.order:hover > tr > * { background-color: var(--pico-secondary-focus); }
+
+/* Sub-menu: text links to the sibling pages, or to the rows of a long page; sticks to the window top. */
+.sub-menu {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  margin-bottom: var(--pico-spacing);
+  padding: 0.2rem 0;
+  border-bottom: 1px solid var(--pico-muted-border-color);
+  background: var(--pico-background-color);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.sub-menu a { color: var(--pico-muted-color); text-decoration: none; }
+.sub-menu a[aria-current] { color: var(--pico-color); font-weight: 600; }
+[id] { scroll-margin-top: calc(var(--sub-menu-height, 0px) + 0.5rem); }
+
+/* KPI cards: a grid of square cards of one size; long detail lines are clipped after three lines. */
+.kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr)); gap: var(--pico-grid-column-gap); margin-bottom: var(--pico-spacing); }
+.kpi { display: flex; flex-direction: column; aspect-ratio: 1; min-width: 0; margin: 0; overflow: hidden; }
+.kpi > header { margin: 0; padding: 0.4rem 0.75rem; color: var(--pico-muted-color); font-size: 0.875rem; }
+.kpi .value { margin: 0.5rem 0.75rem 0.25rem; font-size: 1.5rem; font-variant-numeric: tabular-nums; line-height: 1.2; }
+.kpi .value[title] { cursor: help; }
+.kpi .detail {
+  display: -webkit-box;
+  margin: 0 0.75rem;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow-wrap: anywhere;
+}
+.kpi > a { margin: auto 0.75rem 0.5rem; font-size: 0.875rem; }
+.kpi.error .value { color: var(--pico-del-color); }
+
+/* Pagination bar under a table. */
+.pagination { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; margin-bottom: var(--pico-spacing); }
+.pagination [aria-disabled="true"] { color: var(--pico-muted-color); }
+.pagination label { display: inline-flex; align-items: center; gap: 0.5rem; margin: 0 0 0 auto; }
+.pagination select { width: auto; margin: 0; padding-block: 0.15rem; }
+
+/* Status markers: success and error styles on Pico's <mark>. */
+mark.badge.top, mark.badge.success { background: var(--pico-ins-color); color: #0b1410; }
+mark.badge.undercut, mark.badge.loss, mark.badge.error, mark.badge.stale { background: var(--pico-del-color); color: #fff; }
+
+/* The details line of an order is dimmed. */
+table.records tr.details td { color: var(--pico-muted-color); font-size: 0.8125rem; }
+
+/* Filter section: the page's filters in a wrapping row, with the page's context text at its right end. */
+.filter-box { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 1.5rem; margin-bottom: var(--pico-spacing); }
+.filter-box form, .filter-box fieldset { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 1rem; margin: 0; }
+.filter-box label { display: inline-flex; align-items: center; gap: 0.4rem; margin: 0; white-space: nowrap; }
+.filter-box input { margin: 0; width: auto; }
+.filter-box input[type="text"], .filter-box input[type="search"] { width: 9rem; }
+.filter-box #filter-context { margin-left: auto; color: var(--pico-muted-color); }
+.filter-box .filter-error { color: var(--pico-del-color); }
 .filter-box .filter-error:empty { display: none; }
-.section-nav .count { margin-left: 2px; color: var(--ink-dim); font-variant-numeric: tabular-nums; }
-.note { padding: 2px 6px; color: var(--ink-dim); }
+.range-control { display: flex; gap: 0.75rem; }
+.range-control a[aria-current="true"] { color: var(--pico-color); font-weight: 600; text-decoration: none; }
+.note { color: var(--pico-muted-color); }
 
-/* The opportunity detail page: the figures, then each chart on a row of its own. */
-#opportunity-detail-content { display: flex; flex-direction: column; gap: var(--gap); }
-.chart-row { height: 16rem; }
-.figures th { text-align: left; font-weight: 500; }
-.figures td.how { color: var(--ink-dim); font-size: 0.92em; }
-.next-occurrences { padding: 2px 6px; }
+/* Dashboard: the split graph and the two top-items graphs share a row. */
+.graph-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr)); gap: var(--pico-grid-column-gap); }
+.graph-row > section { min-width: 0; }
 
-/* Trades page */
-#trades-view { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: minmax(0, 1fr); gap: var(--gap); height: 100%; }
-#trades-table { grid-column: 1; grid-row: 1; }
-#trades-freshness { grid-column: 2; grid-row: 1; }
-.scroll tfoot td { position: sticky; bottom: 0; z-index: 1; background: var(--panel); border-top: 1px solid var(--border); font-weight: 600; }
+/* Characters page, landing and error pages. */
+.character { display: flex; align-items: center; gap: 0.75rem; padding: 0.35rem 0; border-bottom: 1px solid var(--pico-muted-border-color); }
+.character img { border-radius: 50%; }
+.character .unlink { width: auto; margin: 0 0 0 auto; }
+.character .unlink svg, a[role="button"] svg, .relogin svg { margin-right: 0.35rem; vertical-align: -0.1em; }
+.actions { margin-top: var(--pico-spacing); }
+.card { max-width: 32rem; margin: 2rem auto; }
+.alert { border-left: 0.25rem solid var(--pico-del-color); }
+a.relogin { display: inline-flex; align-items: center; gap: 0.35rem; }
+
+/* The page sits right of the sidebar; without a sidebar (landing, error) it has the whole width. */
+.shell > .sidebar { grid-column: 1; }
+.shell > main { grid-column: 2; }

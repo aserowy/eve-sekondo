@@ -1,16 +1,11 @@
-<section id="trades-table" class="panel" hx-get="{{ view.table_url }}" hx-trigger="sse:trades-updated, sse:fees-updated, htmx:sseOpen from:body" hx-swap="outerHTML">
-  <div class="panel-title">
-    <h2>Trades</h2>
-    <div id="trades-range-control" class="range-control" role="group" aria-label="Time range">
-      {% for r in view.ranges %}
-      <a href="{{ r.href }}" hx-get="{{ r.table_url }}" hx-target="#trades-table" hx-swap="outerHTML" hx-sync="#trades-table:replace" hx-push-url="{{ r.href }}"{% if r.current %} aria-current="true"{% endif %}>{{ r.label }}</a>
-      {% endfor %}
-    </div>
-  </div>
+<div class="kpis">
+  {% for kpi in view.kpis %}{% include "kpi_card.html" %}{% endfor %}
+</div>
+<section id="trades-table">
   {% if view.rows.is_empty() %}
   <p>No trades in this range.</p>
   {% else %}
-  <div class="scroll" data-scroll-key="trades">
+  <div class="table-wrap">
   <table class="data" id="trades">
     <thead>
       <tr>
@@ -40,14 +35,9 @@
       </tr>
       {% endfor %}
     </tbody>
-    <tfoot>
-      <tr>
-        <td colspan="5">Totals</td>
-        <td colspan="3" class="num">Bought <span title="{{ view.totals.bought_exact }}">{{ view.totals.bought }}</span> · Sold <span title="{{ view.totals.sold_exact }}">{{ view.totals.sold }}</span></td>
-        <td class="num" title="{{ view.totals.margin_title }}" data-column="margin">{{ view.totals.margin }}</td>
-      </tr>
-    </tfoot>
   </table>
   </div>
   {% endif %}
 </section>
+{% let pager = view.pager %}
+{% include "pagination.html" %}

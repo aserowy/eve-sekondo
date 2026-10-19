@@ -3,7 +3,7 @@ import { chartData, chartDrawn } from '../support/charts';
 import { aliceTrained, bookOf, calm, crossed, fill, history } from '../support/opportunities';
 import {
   expect, feePoll, loginWith, openCharacters, pollCharacter, stationBook, stationRollups, stationSeed, stubControl, stubMarket,
-  stubMarketOrder, stubTradeSkills, test, unfoldFreshness, type SeedSnapshot,
+  stubMarketOrder, stubTradeSkills, test, type SeedSnapshot,
 } from '../support/fixtures';
 
 const STATION = 'Jita IV - Moon 4 - Caldari Navy Assembly Plant';
@@ -17,30 +17,30 @@ test('open the opportunities page from the orders page with a narrowed selection
   const nav = page.locator('#main-nav');
   await nav.getByRole('link', { name: 'Orders' }).click();
   await page.getByRole('checkbox', { name: 'Alice Alpha' }).uncheck();
-  await expect(page).toHaveURL(/\/orders\?chars=90000002$/);
+  await expect(page).toHaveURL(/\/orders\/sell\?chars=90000002$/);
 
   await nav.getByRole('link', { name: 'Opportunities' }).click();
 
-  await expect(page).toHaveURL(/\/opportunities\?chars=90000002$/);
+  await expect(page).toHaveURL(/\/opportunities\/expansion\?chars=90000002$/);
   await expect(nav.getByRole('link', { name: 'Opportunities' })).toHaveAttribute('aria-current', 'page');
-  await expect(page.locator('header.bars #filter-context')).toContainText(STATION);
-  for (const title of ['Recurring spread expansion', 'Classic spread trade', 'Mean reversion', 'Trend']) {
-    await expect(page.getByRole('heading', { name: title })).toBeVisible();
-  }
-  await unfoldFreshness(page);
-  await expect(page.locator('#opportunity-freshness')).toContainText('Waiting for first refresh');
-  await expect(page.locator('#opportunity-freshness')).toContainText('Stale');
+  await expect(page.locator('#filter-box #filter-context')).toContainText(STATION);
+  const menu = page.locator('nav.sub-menu');
+  await expect(menu.getByRole('link')).toHaveText(['Recurring spread expansion', 'Classic spread trade', 'Mean reversion', 'Trend']);
+  await expect(menu.getByRole('link', { name: 'Recurring spread expansion' })).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByRole('heading', { name: 'Recurring spread expansion' })).toBeVisible();
+  await expect(page.locator('#freshness')).toContainText('Waiting for first refresh');
+  await expect(page.locator('#freshness')).toContainText('Stale');
   await expect(page.getByRole('checkbox', { name: 'Alice Alpha' })).not.toBeChecked();
   await expect(page.getByRole('checkbox', { name: 'Bob Bravo' })).toBeChecked();
   // The selection goes on to the other pages.
   await nav.getByRole('link', { name: 'Orders' }).click();
-  await expect(page).toHaveURL(/\/orders\?chars=90000002$/);
+  await expect(page).toHaveURL(/\/orders\/sell\?chars=90000002$/);
 });
 
 test('a book refresh shows its time in the freshness and clears the stale mark', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
   await page.locator('#main-nav').getByRole('link', { name: 'Opportunities' }).click();
-  const freshness = page.locator('#opportunity-freshness');
+  const freshness = page.locator('#freshness');
   await expect(freshness).toContainText('Stale');
 
   await stubMarket([
@@ -59,7 +59,7 @@ test('a book refresh shows its time in the freshness and clears the stale mark',
 
 test('a classic row shows the sell price one tick below the best sell and the current best buy', async ({ page }) => {
   await aliceTrained(page);
-  await page.locator('#main-nav').getByRole('link', { name: 'Opportunities' }).click();
+  await page.goto('/opportunities/classic');
 
   await fill(page, bookOf(34, 100, 120, 1), calm(34));
 
@@ -77,7 +77,7 @@ test('a classic row shows the sell price one tick below the best sell and the cu
 
 test('sorting the trend table by volatility keeps the classic sorting and puts both in the URL', async ({ page }) => {
   await aliceTrained(page);
-  await page.locator('#main-nav').getByRole('link', { name: 'Opportunities' }).click();
+  await page.goto('/opportunities/classic');
   await stubMarket([...bookOf(34, 100, 130, 1), ...bookOf(35, 100, 130, 3)]);
   await stubControl('esi-expires', { seconds: 300 });
   expect(await stationBook(page)).toBe('200 updated');
@@ -85,28 +85,34 @@ test('sorting the trend table by volatility keeps the classic sorting and puts b
   expect((await stationSeed(page, { history: [...crossed(34, 1.1), ...crossed(35, 1.2)] })).startsWith('200 ')).toBe(true);
   await page.reload();
 
-  const classic = page.locator('#classic');
-  const trend = page.locator('#trend');
-  await expect(trend.locator('tbody tr')).toHaveCount(2);
-  await classic.getByRole('link', { name: 'Item' }).click();
+  const menu = page.locator('nav.sub-menu');
+  const first = () => page.locator('tbody tr').first();
+  await page.locator('#classic').getByRole('link', { name: 'Item' }).click();
   await expect(page).toHaveURL(/cs=item&cd=asc/);
-  await expect(classic.locator('tbody tr').first()).toContainText('Pyerite');
+  await expect(first()).toContainText('Pyerite');
 
-  await trend.getByRole('link', { name: 'σ' }).click();
+  await menu.getByRole('link', { name: 'Trend' }).click();
+  await expect(page).toHaveURL(/\/opportunities\/trend\?cs=item&cd=asc$/);
+  await expect(page.locator('#trend tbody tr')).toHaveCount(2);
+  await page.locator('#trend').getByRole('link', { name: 'σ' }).click();
   await expect(page).toHaveURL(/cs=item&cd=asc/);
   await expect(page).toHaveURL(/ts=sigma&td=desc/);
-  await expect(trend.locator('tbody tr').first()).toContainText('Pyerite');
-  await expect(classic.locator('tbody tr').first()).toContainText('Pyerite');
+  await expect(first()).toContainText('Pyerite');
 
-  await trend.getByRole('link', { name: 'σ' }).click();
+  await page.locator('#trend').getByRole('link', { name: 'σ' }).click();
   await expect(page).toHaveURL(/ts=sigma&td=asc/);
-  await expect(trend.locator('tbody tr').first()).toContainText('Tritanium');
-  await expect(classic.locator('tbody tr').first()).toContainText('Pyerite');
+  await expect(first()).toContainText('Tritanium');
+
+  // The classic table kept its own sorting, which the URL still holds.
+  await menu.getByRole('link', { name: 'Classic spread trade' }).click();
+  await expect(page).toHaveURL(/\/opportunities\/classic\?cs=item&cd=asc&ts=sigma&td=asc$/);
+  await expect(page.locator('#classic th[aria-sort="ascending"]')).toContainText('Item');
+  await expect(first()).toContainText('Pyerite');
 });
 
 test('an item the account sells at the station is marked as an own sell', async ({ page }) => {
   await aliceTrained(page);
-  await page.locator('#main-nav').getByRole('link', { name: 'Opportunities' }).click();
+  await page.goto('/opportunities/classic');
   await stubMarket([...bookOf(34, 100, 130, 1), ...bookOf(36, 100, 130, 3)]);
   await stubControl('esi-expires', { seconds: 300 });
   expect(await stationBook(page)).toBe('200 updated');
@@ -130,7 +136,7 @@ function minutesBack(daysBack: number, hour: number): number {
 
 test('an evening spread expansion that recurred on most days is listed as a daily window', async ({ page }) => {
   await aliceTrained(page);
-  await page.locator('#main-nav').getByRole('link', { name: 'Opportunities' }).click();
+  await page.goto('/opportunities/expansion');
   await stubMarket(bookOf(34, 100, 105, 1));
   await stubControl('esi-expires', { seconds: 300 });
   expect(await stationBook(page)).toBe('200 updated');
@@ -159,7 +165,7 @@ test('an evening spread expansion that recurred on most days is listed as a dail
 
 test('with three days of snapshots the expansion table says that hourly data is still collected', async ({ page }) => {
   await aliceTrained(page);
-  await page.locator('#main-nav').getByRole('link', { name: 'Opportunities' }).click();
+  await page.goto('/opportunities/expansion');
   await stubMarket(bookOf(34, 100, 105, 1));
   await stubControl('esi-expires', { seconds: 300 });
   expect(await stationBook(page)).toBe('200 updated');
@@ -169,12 +175,12 @@ test('with three days of snapshots the expansion table says that hourly data is 
   await page.reload();
 
   await expect(page.locator('#expansion')).toContainText('Collecting hourly data (3/7 days)');
-  await expect(page.locator('#opportunity-freshness')).toContainText('3 days of own snapshots');
+  await expect(page.locator('#freshness')).toContainText('3 days of own snapshots');
 });
 
 test('an oversold item is listed in the mean reversion table with the SMA 20 rounded down as its sell price', async ({ page }) => {
   await aliceTrained(page);
-  await page.locator('#main-nav').getByRole('link', { name: 'Opportunities' }).click();
+  await page.goto('/opportunities/reversion');
   await stubMarket(bookOf(34, 120, 125, 1));
   await stubControl('esi-expires', { seconds: 300 });
   expect(await stationBook(page)).toBe('200 updated');
@@ -189,6 +195,9 @@ test('an oversold item is listed in the mean reversion table with the SMA 20 rou
   await expect(row.locator('[data-col="pb"]')).toHaveText(/^-\d/);
   await expect(row.locator('[data-col="rsi"]')).toHaveText(/^\d+\.\d$/);
   // Buying at 120 and selling at 124.90 earns nothing after the fees: the classic table skips it.
+  await page.locator('nav.sub-menu').getByRole('link', { name: 'Classic spread trade' }).click();
+  await expect(page).toHaveURL(/\/opportunities\/classic$/);
+  await expect(page.locator('#classic')).toBeVisible();
   await expect(page.locator('#classic tr[data-type-id="34"]')).toHaveCount(0);
 });
 
@@ -199,7 +208,7 @@ const filters = (page: Page) => page.locator('#opportunity-filters');
 
 test('a first visit shows the default filters', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
-  await page.locator('#main-nav').getByRole('link', { name: 'Opportunities' }).click();
+  await page.goto('/opportunities/classic');
 
   await expect(filters(page).getByLabel('Minimum margin (%)')).toHaveValue('5');
   await expect(filters(page).getByLabel('Minimum ISK/day')).toHaveValue('5000000');
@@ -209,7 +218,7 @@ test('a first visit shows the default filters', async ({ page }) => {
 
 test('raising the capital removes an item that can no longer fill in time and stays after signing in again', async ({ page }) => {
   await aliceTrained(page);
-  await page.locator('#main-nav').getByRole('link', { name: 'Opportunities' }).click();
+  await page.goto('/opportunities/classic');
   await stubMarket([...bookOf(34, 100, 130, 1), ...bookOf(35, 100, 130, 3)]);
   await stubControl('esi-expires', { seconds: 300 });
   expect(await stationBook(page)).toBe('200 updated');
@@ -229,34 +238,37 @@ test('raising the capital removes an item that can no longer fill in time and st
   await page.locator('#main-nav').getByRole('button', { name: 'Sign out' }).click();
   await expect(page).toHaveURL(/localhost:\d+\/$/);
   await loginWith(page, 'Alice Alpha');
-  await page.locator('#main-nav').getByRole('link', { name: 'Opportunities' }).click();
+  await page.goto('/opportunities/classic');
   await expect(filters(page).getByLabel('Capital per item (ISK)')).toHaveValue('2000000000');
   await expect(page.locator('#classic tbody tr')).toHaveCount(1);
 });
 
 test('the item name search narrows every table', async ({ page }) => {
   await aliceTrained(page);
-  await page.locator('#main-nav').getByRole('link', { name: 'Opportunities' }).click();
+  await page.goto('/opportunities/classic');
   await stubMarket([...bookOf(34, 100, 130, 1), ...bookOf(35, 100, 130, 3)]);
   await stubControl('esi-expires', { seconds: 300 });
   expect(await stationBook(page)).toBe('200 updated');
   expect((await stationSeed(page, { history: [...crossed(34, 1.1), ...crossed(35, 1.2)] })).startsWith('200 ')).toBe(true);
   await page.reload();
   await expect(page.locator('#classic tbody tr')).toHaveCount(2);
-  await expect(page.locator('#trend tbody tr')).toHaveCount(2);
 
   await filters(page).getByLabel('Item name').fill('TRIT');
   await filters(page).getByLabel('Item name').press('Tab');
+  await expect(page.locator('#classic tbody tr')).toHaveCount(1);
+  await expect(page.locator('#classic tbody tr')).toContainText('Tritanium');
 
-  for (const table of ['classic', 'trend']) {
-    await expect(page.locator(`#${table} tbody tr`)).toHaveCount(1);
-    await expect(page.locator(`#${table} tbody tr`)).toContainText('Tritanium');
-  }
+  // The filters are shared: the trend page applies the saved search too.
+  await page.locator('nav.sub-menu').getByRole('link', { name: 'Trend' }).click();
+  await expect(page).toHaveURL(/\/opportunities\/trend$/);
+  await expect(filters(page).getByLabel('Item name')).toHaveValue('TRIT');
+  await expect(page.locator('#trend tbody tr')).toHaveCount(1);
+  await expect(page.locator('#trend tbody tr')).toContainText('Tritanium');
 });
 
 test('a capital of zero is rejected with a message and the tables stay as they were', async ({ page }) => {
   await aliceTrained(page);
-  await page.locator('#main-nav').getByRole('link', { name: 'Opportunities' }).click();
+  await page.goto('/opportunities/classic');
   await stubMarket(bookOf(34, 100, 130, 1));
   await stubControl('esi-expires', { seconds: 300 });
   expect(await stationBook(page)).toBe('200 updated');
@@ -278,24 +290,22 @@ test('a capital of zero is rejected with a message and the tables stay as they w
 
 // ---- the detail page ----
 
-/** Tritanium in the classic and the trend table: a fresh crossing with a rising volume. */
-async function withTritanium(page: Page) {
+/** Tritanium in the classic and the trend table (a fresh crossing with a rising volume), on the page of `table`. */
+async function withTritanium(page: Page, table: 'classic' | 'trend' = 'classic') {
   await aliceTrained(page);
-  await page.locator('#main-nav').getByRole('link', { name: 'Opportunities' }).click();
+  await page.goto(`/opportunities/${table}`);
   await stubMarket(bookOf(34, 100, 130, 1));
   await stubControl('esi-expires', { seconds: 300 });
   expect(await stationBook(page)).toBe('200 updated');
   expect((await stationSeed(page, { history: crossed(34, 1.1) })).startsWith('200 ')).toBe(true);
   await page.reload();
-  await expect(page.locator('#classic tr[data-type-id="34"]')).toHaveCount(1);
-  await expect(page.locator('#trend tr[data-type-id="34"]')).toHaveCount(1);
+  await expect(page.locator(`#${table} tr[data-type-id="34"]`)).toHaveCount(1);
 }
-
 
 /** Tritanium in the classic table with three earlier hours of snapshots, so that every classic chart has data. */
 async function withClassicCharts(page: Page) {
   await aliceTrained(page);
-  await page.locator('#main-nav').getByRole('link', { name: 'Opportunities' }).click();
+  await page.goto('/opportunities/classic');
   await stubMarket(bookOf(34, 100, 130, 1));
   await stubControl('esi-expires', { seconds: 300 });
   expect(await stationBook(page)).toBe('200 updated');
@@ -316,12 +326,12 @@ test('a row click navigates to the detail page of that table and item, with no f
 
   await expect(page).toHaveURL(/\/opportunities\/classic\/34$/);
   await expect(page.locator('#opportunity-detail')).toHaveCount(0);
-  await expect(page.locator('[role="dialog"], aside')).toHaveCount(0);
-  await expect(page.locator('#figures .panel-title')).toContainText('Tritanium');
-  await expect(page.locator('#figures .panel-title')).toContainText('Classic spread trade');
-  await expect(page.locator('#main-nav a[aria-current="page"]')).toHaveText('Opportunities');
-  await expect(page.locator('header.bars #filter-box #character-filter')).toBeVisible();
-  await expect(page.locator('header.bars #filter-context')).toContainText('Alice Alpha');
+  await expect(page.locator('[role="dialog"], aside:not(.sidebar)')).toHaveCount(0);
+  await expect(page.locator('#figures h2')).toContainText('Tritanium');
+  await expect(page.locator('#figures h2')).toContainText('Classic spread trade');
+  await expect(page.locator('#main-nav a[aria-current="page"]')).toHaveAttribute('aria-label', 'Opportunities');
+  await expect(page.locator('#filter-box #character-filter')).toBeVisible();
+  await expect(page.locator('#filter-box #filter-context')).toContainText('Alice Alpha');
   await expect(page.locator('[data-figure="buy"] [data-value]')).toHaveText('100.00');
   await expect(page.locator('[data-figure="sell"] [data-value]')).toHaveText('129.90');
   await expect(page.locator('[data-figure="margin"]')).toContainText('(r − c) / c');
@@ -329,15 +339,15 @@ test('a row click navigates to the detail page of that table and item, with no f
 });
 
 test('a row of the trend table opens the trend page, and the item name is a real link', async ({ page }) => {
-  await withTritanium(page);
+  await withTritanium(page, 'trend');
   const link = page.locator('#trend tr[data-type-id="34"] [data-col="item"] a');
   await expect(link).toHaveAttribute('href', '/opportunities/trend/34');
 
   await link.click();
 
   await expect(page).toHaveURL(/\/opportunities\/trend\/34$/);
-  await expect(page.locator('#figures .panel-title')).toContainText('Trend');
-  await expect(page.locator('#figures .panel-title')).not.toContainText('Classic spread trade');
+  await expect(page.locator('#figures h2')).toContainText('Trend');
+  await expect(page.locator('#figures h2')).not.toContainText('Classic spread trade');
 });
 
 test('the detail page has a sub-menu with a way back that keeps the sorting, the figures and one entry per chart', async ({ page }) => {
@@ -347,17 +357,17 @@ test('the detail page has a sub-menu with a way back that keeps the sorting, the
   await page.locator('#classic tr[data-type-id="34"]').click();
   await expect(page).toHaveURL(/\/opportunities\/classic\/34\?.*cs=item&cd=asc/);
 
-  const menu = page.locator('header.bars #section-nav');
+  const menu = page.locator('main > nav.sub-menu#section-nav');
   await expect(menu.getByRole('link')).toHaveText([
-    '← Opportunities', 'Figures', 'Best buy and best sell', 'Spread', 'Units within 1% of the best price',
+    '← Classic spread trade', 'Figures', 'Best buy and best sell', 'Spread', 'Units within 1% of the best price',
   ]);
-  await expect(menu.getByRole('link', { name: 'Opportunities' })).toHaveAttribute('href', /^\/opportunities\?.*cs=item&cd=asc/);
-  expect((await menu.boundingBox())!.height).toBeLessThanOrEqual(24);
+  await expect(menu.getByRole('link', { name: 'Classic spread trade' })).toHaveAttribute('href', /^\/opportunities\/classic\?.*cs=item&cd=asc/);
+  expect((await menu.boundingBox())!.height).toBeLessThanOrEqual(48);
 
-  await menu.getByRole('link', { name: 'Spread' }).click();
+  await menu.getByRole('link', { name: 'Spread', exact: true }).click();
   await expect(page).toHaveURL(/#classic-spread$/);
-  await menu.getByRole('link', { name: 'Opportunities' }).click();
-  await expect(page).toHaveURL(/\/opportunities\?.*cs=item&cd=asc/);
+  await menu.getByRole('link', { name: 'Classic spread trade' }).click();
+  await expect(page).toHaveURL(/\/opportunities\/classic\?.*cs=item&cd=asc/);
   await expect(page.locator('#classic th[aria-sort="ascending"]')).toContainText('Item');
 });
 
@@ -377,7 +387,7 @@ test('the charts of the detail page sit on rows of their own', async ({ page }) 
       above = row;
     }
   }).toPass();
-  expect(await page.locator('main h1, main h2:not(.panel-title)').count()).toBe(0);
+  await expect(page.locator('h1')).toHaveCount(0);
 });
 
 test('deselecting a character recomputes the fees on the detail page, and only the content is swapped', async ({ page }) => {
@@ -385,7 +395,7 @@ test('deselecting a character recomputes the fees on the detail page, and only t
   await openCharacters(page);
   await page.getByRole('button', { name: 'Add character' }).click();
   await page.getByRole('link', { name: 'Bob Bravo' }).click();
-  await page.locator('#main-nav').getByRole('link', { name: 'Opportunities' }).click();
+  await page.goto('/opportunities/classic');
   await page.locator('#classic tr[data-type-id="34"]').click();
   await expect(page).toHaveURL(/\/opportunities\/classic\/34$/);
   await expect(page.locator('#filter-context')).toContainText('Fees of Alice Alpha');
@@ -393,7 +403,7 @@ test('deselecting a character recomputes the fees on the detail page, and only t
   await expect(page.locator('[data-figure="cost"] [data-value]')).toHaveText('101.41');
   await page.evaluate(() => ((window as unknown as { marker: string }).marker = 'same page'));
 
-  await page.locator('header.bars').getByRole('checkbox', { name: 'Alice Alpha' }).uncheck();
+  await page.locator('#filter-box').getByRole('checkbox', { name: 'Alice Alpha' }).uncheck();
 
   await expect(page).toHaveURL(/\/opportunities\/classic\/34\?chars=90000002$/);
   await expect(page.locator('#filter-context')).toContainText('base rates');
@@ -425,7 +435,7 @@ const ys = (points: { y: number | null }[]) => points.map((p) => p.y);
 
 test('the classic page draws the best prices, the spread and the depth of the book', async ({ page }) => {
   await aliceTrained(page);
-  await page.locator('#main-nav').getByRole('link', { name: 'Opportunities' }).click();
+  await page.goto('/opportunities/classic');
   await stubMarket(bookOf(34, 100, 130, 1));
   await stubControl('esi-expires', { seconds: 300 });
   expect(await stationBook(page)).toBe('200 updated');
@@ -449,12 +459,12 @@ test('the classic page draws the best prices, the spread and the depth of the bo
   expect(ys(spread).slice(0, 3)).toEqual([10, 20, 30]);
   const [units] = await chartData(page, 'depth');
   expect(units).toEqual([3, 3]);
-  await expect(page.locator('.chart-row .panel-title')).toContainText(['Best buy and best sell', 'Spread', 'Units within 1% of the best price']);
+  await expect(page.locator('.chart-row h2')).toContainText(['Best buy and best sell', 'Spread', 'Units within 1% of the best price']);
 });
 
 test('the mean reversion page draws the average with its bands and the RSI', async ({ page }) => {
   await aliceTrained(page);
-  await page.locator('#main-nav').getByRole('link', { name: 'Opportunities' }).click();
+  await page.goto('/opportunities/reversion');
   await stubMarket(bookOf(34, 120, 125, 1));
   await stubControl('esi-expires', { seconds: 300 });
   expect(await stationBook(page)).toBe('200 updated');
@@ -478,7 +488,7 @@ test('the mean reversion page draws the average with its bands and the RSI', asy
 });
 
 test('the trend page draws the averages with the volume', async ({ page }) => {
-  await withTritanium(page);
+  await withTritanium(page, 'trend');
 
   await page.locator('#trend tr[data-type-id="34"]').click();
   await expect(page).toHaveURL(/\/opportunities\/trend\/34$/);
@@ -497,7 +507,7 @@ test('the trend page draws the averages with the volume', async ({ page }) => {
 
 test('the expansion page draws the spread by hour and weekday, the peaks with S and the next occurrences', async ({ page }) => {
   await aliceTrained(page);
-  await page.locator('#main-nav').getByRole('link', { name: 'Opportunities' }).click();
+  await page.goto('/opportunities/expansion');
   await stubMarket(bookOf(34, 100, 105, 1));
   await stubControl('esi-expires', { seconds: 300 });
   expect(await stationBook(page)).toBe('200 updated');
@@ -526,7 +536,7 @@ test('the expansion page draws the spread by hour and weekday, the peaks with S 
   const [peak, sell] = await chartData(page, 'peaks');
   expect(peak).toHaveLength(10);
   expect(new Set(sell)).toEqual(new Set([13720]));
-  await expect(page.locator('#next .panel-title')).toContainText('Next occurrences');
+  await expect(page.locator('#next h2')).toContainText('Next occurrences');
   await expect(page.locator('#next li')).toHaveCount(3);
   await expect(page.locator('#next li').first()).toContainText('18:00');
   await expect(page.locator('#section-nav').getByRole('link', { name: 'Next occurrences' })).toHaveAttribute('href', '#next');

@@ -1,0 +1,5 @@
+<nav class="sub-menu" id="sub-menu" aria-label="Orders"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {% for link in view.sub_menu %}
+  <a href="{{ link.href }}"{% if link.current %} aria-current="page"{% endif %}>{{ link.label }}</a>
+  {% endfor %}
+</nav>

@@ -41,6 +41,8 @@ pub enum PollOutcome {
     Deferred,
     /// The character was unlinked while its poll ran.
     Dropped,
+    /// Nothing to poll: the character lacks an optional scope this poll needs.
+    Skipped,
 }
 
 pub struct Poller {

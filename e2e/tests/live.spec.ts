@@ -2,14 +2,14 @@ import type { Page } from '@playwright/test';
 import { chartData, chartDrawn } from '../support/charts';
 import {
   stationBook, stationSeed, expect, feePoll, loginWith, marketPoll, marketPollOutsideBrowser, pollCharacter, pollOutsideBrowser, stubControl,
-  stubMarket, stubMarketOrder, stubOrder, stubAsset, stubTradeSkills, stubTransaction, test, unfoldFreshness, wealthPoll,
+  stubMarket, stubMarketOrder, stubOrder, stubAsset, stubTradeSkills, stubTransaction, test, wealthPoll,
 } from '../support/fixtures';
 
 test('the tables refresh after a poll without reloading', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
   await stubControl('orders', { character_id: 90000001, orders: [stubOrder(1, { price: 10 })] });
   await pollCharacter(page, 90000001);
-  await page.goto('/orders');
+  await page.goto('/orders/sell');
   await expect(page.locator('#order-1')).toContainText('10.00');
   await page.evaluate(() => ((window as unknown as { marker: string }).marker = 'same page'));
 
@@ -33,7 +33,7 @@ test('filter and sorting are kept by a live refresh', async ({ page }) => {
     orders: [stubOrder(1, { price: 5 }), stubOrder(2, { type: 35, price: 9 })],
   });
   await pollCharacter(page, 90000001);
-  await page.goto('/orders?chars=90000001&sort=price&dir=desc');
+  await page.goto('/orders/sell?chars=90000001&sort=price&dir=desc');
   await expect(page.locator('#sell-orders tbody.order')).toHaveCount(2);
   await expect(page.locator('#sell-orders tbody.order').first()).toHaveAttribute('id', 'order-2');
 
@@ -58,7 +58,7 @@ test('missed signals are caught up after the stream reconnects', async ({ page, 
   // The stream cannot connect: the page is open, but no signal reaches it. (`context.setOffline`
   // does not cut a stream that is already open in Chromium, so the connection is refused instead.)
   await page.route('**/events', (route) => route.abort('connectionrefused'));
-  await page.goto('/orders');
+  await page.goto('/orders/sell');
   await expect(page.locator('#order-1')).toContainText('10.00');
 
   // A poll changes the order meanwhile (called from outside the page).
@@ -84,7 +84,7 @@ async function topSeller(page: import('@playwright/test').Page) {
 
 test('a standing changes after a market refresh without reloading', async ({ page }) => {
   await topSeller(page);
-  await page.goto('/orders');
+  await page.goto('/orders/sell');
   await expect(page.locator('#order-1 .badge.top')).toHaveText('Top');
   await page.evaluate(() => ((window as unknown as { marker: string }).marker = 'same page'));
 
@@ -99,7 +99,7 @@ test('the undercut volume changes after a market refresh without reloading', asy
   await topSeller(page);
   await stubMarket([stubMarketOrder(1, { price: 100 }), stubMarketOrder(2, { price: 90, remain: 20 })]);
   expect(await marketPoll(page)).toBe('200 1');
-  await page.goto('/orders');
+  await page.goto('/orders/sell');
   const cell = page.locator('#order-1 td').nth(4);
   await expect(cell).toHaveText('20');
   await page.evaluate(() => ((window as unknown as { marker: string }).marker = 'same page'));
@@ -126,7 +126,7 @@ test('filter and sorting are kept by a market refresh', async ({ page }) => {
   await pollCharacter(page, 90000001);
   await stubMarket([stubMarketOrder(1, { price: 100 }), stubMarketOrder(2, { type: 35, price: 100 })]);
   await marketPoll(page);
-  await page.goto('/orders?chars=90000001&sort=standing&dir=desc');
+  await page.goto('/orders/sell?chars=90000001&sort=standing&dir=desc');
   await expect(page.locator('#sell-orders tbody.order')).toHaveCount(2);
   await expect(page.locator('#order-100')).toHaveCount(0);
 
@@ -146,13 +146,13 @@ test('filter and sorting are kept by a market refresh', async ({ page }) => {
 
 test('a market refresh that changes nothing does not refresh the page', async ({ page }) => {
   await topSeller(page);
-  await page.goto('/orders');
+  await page.goto('/orders/sell');
   await expect(page.locator('#order-1 .badge.top')).toHaveText('Top');
   // Let the refresh the page makes when its stream opens settle before counting.
   await page.waitForTimeout(1000);
   const refreshes: string[] = [];
   page.on('request', (request) => {
-    if (request.url().includes('/orders/tables') || request.url().includes('/orders/freshness')) {
+    if (request.url().includes('/orders/sell/content') || request.url().includes('/orders/freshness')) {
       refreshes.push(request.url());
     }
   });
@@ -187,7 +187,7 @@ test('the dashboard does not refresh because of a market refresh', async ({ page
 test('a missed market signal is caught up after the stream reconnects', async ({ page, context }) => {
   await topSeller(page);
   await page.route('**/events', (route) => route.abort('connectionrefused'));
-  await page.goto('/orders');
+  await page.goto('/orders/sell');
   await expect(page.locator('#order-1 .badge.top')).toHaveText('Top');
 
   await stubMarket([stubMarketOrder(1, { price: 100 }), stubMarketOrder(2, { price: 90 })]);
@@ -237,7 +237,6 @@ test('selection, range and sorting are kept by a live wealth refresh', async ({ 
   await wealthPoll(page, 90000002, 'assets');
   await wealthPoll(page, 90000001, 'wallet');
   await page.goto('/wealth?chars=90000001&range=24h&sort=item&dir=asc');
-  await unfoldFreshness(page);
   await expect(page.locator('#inventory tbody tr')).toHaveCount(2);
   await expect(page.locator('#inventory th[aria-sort="ascending"]')).toContainText('Item');
   await page.waitForTimeout(1000);
@@ -254,7 +253,7 @@ test('selection, range and sorting are kept by a live wealth refresh', async ({ 
   await expect(page.locator('#wealth-range-control [aria-current="true"]')).toHaveText('24 hours');
   await expect(page.locator('#inventory tbody tr')).toHaveCount(2);
   await expect(page.locator('#inventory th[aria-sort="ascending"]')).toContainText('Item');
-  await expect(page.locator('#wealth-freshness')).not.toContainText('Bob Bravo');
+  await expect(page.locator('#freshness')).not.toContainText('Bob Bravo');
   await chartDrawn(page, 'wealth-stack');
   expect(
     await page.evaluate(() => {
@@ -318,7 +317,7 @@ async function aliceWithAMargin(page: import('@playwright/test').Page) {
   });
   expect(await wealthPoll(page, 90000001, 'transactions')).toBe('200 updated');
   expect(await feePoll(page)).toBe('200 ok');
-  await page.goto('/orders');
+  await page.goto('/orders/sell');
 }
 
 const marginCell = (page: import('@playwright/test').Page, order: number) =>
@@ -354,6 +353,31 @@ test('a margin appears after the missing purchase is polled without reloading', 
   expect(await wealthPoll(page, 90000001, 'transactions')).toBe('200 updated');
 
   await expect(marginCell(page, 3)).toHaveText('142.58');
+  expect(await page.evaluate(() => (window as unknown as { marker: string }).marker)).toBe('same page');
+});
+
+test('a wealth refresh keeps the wealth page on page 2 with its sorting and range', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  await stubControl('assets', {
+    character_id: 90000001,
+    assets: Array.from({ length: 120 }, (_, i) => stubAsset(i + 1, { type: 1000 + i, quantity: 1 })),
+  });
+  await wealthPoll(page, 90000001, 'assets');
+  await wealthPoll(page, 90000001, 'wallet');
+  const opened = page.waitForResponse((r) => r.url().includes('/wealth/content'));
+  await page.goto('/wealth?range=24h&sort=item&dir=asc&page=2');
+  await opened;
+  await expect(page.locator('.pagination')).toContainText('Page 2 of 3');
+  await page.evaluate(() => ((window as unknown as { marker: string }).marker = 'same page'));
+
+  await stubControl('wallet', { character_id: 90000001, balance: 88_000_000 });
+  await wealthPoll(page, 90000001, 'wallet');
+
+  await expect(page.locator('#kpi-wallet .value')).toHaveText('88m');
+  await expect(page.locator('.pagination')).toContainText('Page 2 of 3');
+  await expect(page).toHaveURL(/range=24h&sort=item&dir=asc&page=2$/);
+  await expect(page.locator('#wealth-range-control [aria-current="true"]')).toHaveText('24 hours');
+  await expect(page.locator('#inventory th[aria-sort="ascending"]')).toContainText('Item');
   expect(await page.evaluate(() => (window as unknown as { marker: string }).marker)).toBe('same page');
 });
 
@@ -412,6 +436,36 @@ test('a higher Accounting level changes the margin of a sale on the trades page 
   expect(await page.evaluate(() => (window as unknown as { marker: string }).marker)).toBe('same page');
 });
 
+test('a new sale keeps the trades page on page 2 and updates the sold card', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  const sale = (id: number, minutesAgo: number) => ({
+    ...stubTransaction(id, { type: 34, quantity: 1, price: 100, buy: false, daysAgo: 0 }),
+    date: new Date(Date.now() - minutesAgo * 60_000).toISOString().replace(/\.\d+Z$/, 'Z'),
+  });
+  await stubControl('transactions', {
+    character_id: 90000001,
+    transactions: Array.from({ length: 70 }, (_, i) => sale(i + 1, 71 - i)),
+  });
+  expect(await wealthPoll(page, 90000001, 'transactions')).toBe('200 updated');
+  const opened = page.waitForResponse((r) => r.url().includes('/trades/table'));
+  await page.goto('/trades?page=2');
+  await opened;
+  await expect(page.locator('.pagination')).toContainText('Page 2 of 2');
+  await expect(page.locator('#trades tbody tr')).toHaveCount(20);
+  await page.evaluate(() => ((window as unknown as { marker: string }).marker = 'same page'));
+
+  await stubControl('transactions', {
+    character_id: 90000001,
+    transactions: Array.from({ length: 71 }, (_, i) => sale(i + 1, 72 - i)),
+  });
+  expect(await wealthPoll(page, 90000001, 'transactions')).toBe('200 updated');
+
+  await expect(page.locator('#kpi-sold .value')).toHaveAttribute('title', '7,100.00 ISK');
+  await expect(page.locator('.pagination')).toContainText('Page 2 of 2');
+  await expect(page.locator('#trades tbody tr')).toHaveCount(21);
+  expect(await page.evaluate(() => (window as unknown as { marker: string }).marker)).toBe('same page');
+});
+
 // ---- the opportunities page ----
 
 
@@ -441,7 +495,7 @@ async function opportunitiesWithTwoTrendItems(page: Page) {
   await stubControl('skills', { character_id: 90000001, skills: stubTradeSkills(5, 5) });
   expect(await pollCharacter(page, 90000001)).toBe('200 updated');
   expect(await feePoll(page)).toBe('200 ok');
-  await page.locator('#main-nav').getByRole('link', { name: 'Opportunities' }).click();
+  await page.goto('/opportunities/classic');
   await stubMarket(stationBookOf(130));
   await stubControl('esi-expires', { seconds: 300 });
   expect(await stationBook(page)).toBe('200 updated');
@@ -451,75 +505,90 @@ async function opportunitiesWithTwoTrendItems(page: Page) {
   await page.reload();
 }
 
-test('a station book refresh updates the tables in place and keeps sorting, filters and scroll', async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 300 });
-  await opportunitiesWithTwoTrendItems(page);
-  const classicSell = page.locator('#classic tr[data-type-id="34"] [data-col="sell"]');
-  const trend = page.locator('#trend');
-  await expect(classicSell).toHaveText('129.90');
-
-  // Sort the trend table by volatility, change a filter and scroll down.
-  await trend.getByRole('link', { name: 'σ' }).click();
-  await expect(page).toHaveURL(/ts=sigma&td=desc/);
-  await page.locator('#opportunity-filters').getByLabel('Capital per item (ISK)').fill('50000000');
-  await page.locator('#opportunity-filters').getByLabel('Item name').press('Tab');
-  await expect(classicSell).toHaveText('129.90');
-  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-  const scrollBefore = await page.evaluate(() => window.scrollY);
-  expect(scrollBefore, 'the page is scrolled').toBeGreaterThan(50);
-  await expect(page.locator('#section-nav [aria-current="location"]')).toHaveCount(1);
-  const marked = await page.locator('#section-nav [aria-current="location"]').textContent();
-  await page.evaluate(() => ((window as unknown as { marker: string }).marker = 'same page'));
-
-  // The book changes: the best sell is 140 now, and the station is refreshed.
-  await stubMarket(stationBookOf(140));
-  expect(await stationBook(page)).toBe('200 updated');
-
-  await expect(page.locator('#classic tr[data-type-id="34"] [data-col="sell"]')).toHaveText('139.90');
-  await expect(trend.locator('tbody tr').first()).toContainText('Pyerite');
-  await expect(page).toHaveURL(/ts=sigma&td=desc/);
-  await expect(page.locator('#opportunity-filters').getByLabel('Capital per item (ISK)')).toHaveValue('50000000');
-  expect(await page.evaluate(() => (window as unknown as { marker: string }).marker)).toBe('same page');
-  expect(Math.abs((await page.evaluate(() => window.scrollY)) - scrollBefore)).toBeLessThanOrEqual(2);
-  // The sub-menu was swapped out of band with fresh counts and got its marker back.
-  await expect(page.locator('#section-nav [aria-current="location"]')).toHaveText(marked!);
-});
-
-test('a station book refresh keeps the scroll position inside an opportunities table', async ({ page }) => {
-  await page.setViewportSize({ width: 1920, height: 1080 });
-  await loginWith(page, 'Alice Alpha');
-  await page.locator('#main-nav').getByRole('link', { name: 'Opportunities' }).click();
+/** Thirty items with a classic spread and a fresh crossing each, the jumps all different. */
+function thirtyTrendItems() {
   const types = Array.from({ length: 30 }, (_, i) => 2000 + i);
   const book = (sell: number) =>
     types.flatMap((type, i) => [
       stubMarketOrder(100 + i * 2, { type, price: 100, buy: true, range: 'region' }),
       stubMarketOrder(101 + i * 2, { type, price: sell }),
     ]);
+  const history = types.flatMap((type, i) => crossedHistory(type, 1.1 + i / 100));
+  return { book, history };
+}
+
+test('a station book refresh updates the table in place and keeps sorting, filters, page and scroll', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 300 });
+  await loginWith(page, 'Alice Alpha');
+  await page.goto('/opportunities/trend');
+  const { book, history } = thirtyTrendItems();
   await stubMarket(book(130));
   await stubControl('esi-expires', { seconds: 300 });
   expect(await stationBook(page)).toBe('200 updated');
-  const history = types.flatMap((type) =>
+  expect((await stationSeed(page, { history })).startsWith('200 ')).toBe(true);
+  await page.reload();
+  const trend = page.locator('#trend');
+  await expect(trend.locator('tbody tr')).toHaveCount(30);
+
+  // Sort by volatility with 25 rows a page, change a filter, go to page 2 and scroll down.
+  await trend.getByRole('link', { name: 'σ' }).click();
+  await expect(page).toHaveURL(/ts=sigma&td=desc/);
+  await page.locator('.pagination').getByLabel('Rows per page').selectOption('25');
+  await expect(trend.locator('tbody tr')).toHaveCount(25);
+  const saved = page.waitForResponse((r) => r.url().includes('/opportunities/settings'));
+  await page.locator('#opportunity-filters').getByLabel('Capital per item (ISK)').fill('50000000');
+  await page.locator('#opportunity-filters').getByLabel('Item name').press('Tab');
+  await saved;
+  await expect(trend.locator('tbody tr')).toHaveCount(25);
+  await page.locator('.pagination').getByRole('link', { name: 'Next' }).click();
+  await expect(page).toHaveURL(/page=2/);
+  await expect(trend.locator('tbody tr')).toHaveCount(5);
+  // The page change brings the top of the table into view; let that scroll finish first.
+  await page.waitForTimeout(400);
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  const scrollBefore = await page.evaluate(() => window.scrollY);
+  expect(scrollBefore, 'the page is scrolled').toBeGreaterThan(50);
+  const firstBefore = await trend.locator('tbody tr').first().getAttribute('data-type-id');
+  await page.evaluate(() => ((window as unknown as { marker: string }).marker = 'same page'));
+
+  // The book changes: the best sell is 140 now, and the station is refreshed.
+  await stubMarket(book(140));
+  expect(await stationBook(page)).toBe('200 updated');
+
+  await expect(trend.locator('tbody tr').first().locator('[data-col="sell"]')).toHaveText('139.90');
+  await expect(trend.locator('tbody tr').first()).toHaveAttribute('data-type-id', firstBefore!);
+  await expect(page).toHaveURL(/ts=sigma&td=desc/);
+  await expect(page).toHaveURL(/page=2/);
+  await expect(page.locator('.pagination')).toContainText('Page 2 of 2');
+  await expect(page.locator('#opportunity-filters').getByLabel('Capital per item (ISK)')).toHaveValue('50000000');
+  expect(await page.evaluate(() => (window as unknown as { marker: string }).marker)).toBe('same page');
+  expect(Math.abs((await page.evaluate(() => window.scrollY)) - scrollBefore)).toBeLessThanOrEqual(2);
+});
+
+test('a station book refresh keeps where the page is scrolled on a long classic table', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 400 });
+  await loginWith(page, 'Alice Alpha');
+  await page.goto('/opportunities/classic');
+  const { book } = thirtyTrendItems();
+  await stubMarket(book(130));
+  await stubControl('esi-expires', { seconds: 300 });
+  expect(await stationBook(page)).toBe('200 updated');
+  const history = Array.from({ length: 30 }, (_, i) => 2000 + i).flatMap((type) =>
     Array.from({ length: 14 }, (_, i) => ({ type_id: type, days_back: 14 - i, average: 105, highest: 106, lowest: 104, volume: 100_000_000 })),
   );
   expect((await stationSeed(page, { history })).startsWith('200 ')).toBe(true);
   await page.reload();
   await expect(page.locator('#classic tbody tr')).toHaveCount(30);
   await page.waitForTimeout(500);
-
-  const scroller = page.locator('[data-scroll-key="opportunity-classic"]');
-  const top = await scroller.evaluate((el) => {
-    el.scrollTop = el.scrollHeight;
-    (el as unknown as { stale: boolean }).stale = true;
-    return el.scrollTop;
-  });
-  expect(top).toBeGreaterThan(0);
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  const top = await page.evaluate(() => window.scrollY);
+  expect(top).toBeGreaterThan(300);
 
   await stubMarket(book(140));
   expect(await stationBook(page)).toBe('200 updated');
 
   await expect(page.locator('#classic tbody tr').first().locator('[data-col="sell"]')).toHaveText('139.90');
-  await expect.poll(() => scroller.evaluate((el) => Boolean((el as unknown as { stale?: boolean }).stale))).toBe(false);
-  expect(Math.abs((await scroller.evaluate((el) => el.scrollTop)) - top)).toBeLessThanOrEqual(1);
+  expect(Math.abs((await page.evaluate(() => window.scrollY)) - top)).toBeLessThanOrEqual(2);
 });
 
 test('the detail page refreshes its figures in place and stays scrolled to its chart', async ({ page }) => {
@@ -530,8 +599,8 @@ test('the detail page refreshes its figures in place and stays scrolled to its c
   await expect(sell).toHaveText('129.90');
   await page.waitForTimeout(500);
   await page.evaluate(() => {
-    const bars = document.getElementById('bars')!.getBoundingClientRect().bottom;
-    window.scrollBy(0, document.getElementById('trend-volume')!.getBoundingClientRect().top - bars);
+    const menu = document.querySelector('nav.sub-menu')!.getBoundingClientRect().height;
+    window.scrollBy(0, document.getElementById('trend-volume')!.getBoundingClientRect().top - menu);
   });
   const scrollBefore = await page.evaluate(() => window.scrollY);
   expect(scrollBefore, 'the page is scrolled').toBeGreaterThan(50);
@@ -551,8 +620,8 @@ test('the orders page does not fetch anything when the station is refreshed', as
   // Run the character's first order and fee polls now, so their signals cannot land while counting.
   expect(await pollCharacter(page, 90000001)).toBe('200 updated');
   expect(await feePoll(page)).toBe('200 ok');
-  await page.goto('/orders');
-  await expect(page.locator('#order-tables')).toBeVisible();
+  await page.goto('/orders/sell');
+  await expect(page.locator('#content')).toBeVisible();
   // Let the refresh the page makes when its stream opens settle before counting.
   await page.waitForTimeout(1000);
   const fetched: string[] = [];
@@ -564,4 +633,42 @@ test('the orders page does not fetch anything when the station is refreshed', as
   await page.waitForTimeout(1000);
 
   expect(fetched).toEqual([]);
+});
+
+test('a poll and a fee change keep the orders page on page 2 and where the page is scrolled', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 600 });
+  await loginWith(page, 'Alice Alpha');
+  await stubControl('orders', {
+    character_id: 90000001,
+    orders: Array.from({ length: 120 }, (_, i) => stubOrder(i + 1, { price: 10 + i })),
+  });
+  expect(await pollCharacter(page, 90000001)).toBe('200 updated');
+  await page.goto('/orders/sell?sort=price&dir=asc&page=2');
+  await expect(page.locator('#sell-orders tbody.order')).toHaveCount(50);
+  // Let the refresh the page makes when its stream opens settle first.
+  await page.waitForTimeout(800);
+  await page.evaluate(() => ((window as unknown as { marker: string }).marker = 'same page'));
+  await page.evaluate(() => window.scrollTo(0, 700));
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(500);
+  const scrolled = await page.evaluate(() => window.scrollY);
+
+  const refreshed = page.waitForResponse((r) => r.url().includes('/orders/sell/content?') && r.url().includes('page=2'));
+  await stubControl('orders', {
+    character_id: 90000001,
+    orders: Array.from({ length: 120 }, (_, i) => stubOrder(i + 1, { price: 10 + i, remain: 7 })),
+  });
+  expect(await pollCharacter(page, 90000001)).toBe('200 updated');
+  await refreshed;
+  await expect(page.locator('#order-51')).toContainText('7 / ');
+  await expect(page.locator('.pagination')).toContainText('Page 2 of 3');
+  expect(Math.abs((await page.evaluate(() => window.scrollY)) - scrolled)).toBeLessThanOrEqual(2);
+  expect(await page.evaluate(() => (window as unknown as { marker: string }).marker)).toBe('same page');
+
+  const feesRefreshed = page.waitForResponse((r) => r.url().includes('/orders/sell/content?') && r.url().includes('page=2'));
+  await stubControl('skills', { character_id: 90000001, skills: stubTradeSkills(4, 5) });
+  expect(await feePoll(page)).toBe('200 ok');
+  await feesRefreshed;
+  await expect(page.locator('#fee-90000001-sales-tax .value')).toHaveText('4.20%');
+  await expect(page.locator('.pagination')).toContainText('Page 2 of 3');
+  expect(Math.abs((await page.evaluate(() => window.scrollY)) - scrolled)).toBeLessThanOrEqual(2);
 });

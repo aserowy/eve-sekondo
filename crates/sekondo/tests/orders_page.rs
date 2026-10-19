@@ -1,6 +1,6 @@
 mod common;
 
-use common::{AppBuilder, Browser, TestApp};
+use common::{AppBuilder, Browser, TestApp, kpi};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
@@ -18,13 +18,27 @@ async fn signed_in(app: &TestApp, character: i64) -> Browser {
     browser
 }
 
-async fn get(app: &TestApp, browser: &Browser, path: &str) -> String {
+async fn get_one(app: &TestApp, browser: &Browser, path: &str) -> String {
     let res = browser.get(&app.url(path)).await;
     assert_eq!(res.status(), 200, "{path}");
     res.text().await.unwrap()
 }
 
-/// The part of the page between two markers (the sell and the buy table).
+/// A page by its path. `/orders` and `/orders?…` stand for both orders pages, the sell page and
+/// the buy page one after the other with the same query, so that a test can look at orders of
+/// either side.
+async fn get(app: &TestApp, browser: &Browser, path: &str) -> String {
+    match path.strip_prefix("/orders") {
+        Some(query) if query.is_empty() || query.starts_with('?') => {
+            let sell = get_one(app, browser, &format!("/orders/sell{query}")).await;
+            let buy = get_one(app, browser, &format!("/orders/buy{query}")).await;
+            sell + &buy
+        }
+        _ => get_one(app, browser, path).await,
+    }
+}
+
+/// The part of the page between two markers.
 fn between<'a>(html: &'a str, from: &str, to: &str) -> &'a str {
     let start = html
         .find(from)
@@ -34,7 +48,7 @@ fn between<'a>(html: &'a str, from: &str, to: &str) -> &'a str {
 }
 
 fn sell_table(html: &str) -> &str {
-    between(html, r#"id="sell-orders""#, r#"id="buy-orders""#)
+    between(html, r#"id="sell-orders""#, "</section>")
 }
 
 fn buy_table(html: &str) -> &str {
@@ -229,7 +243,13 @@ async fn only_orders_of_the_own_account_are_shown(pool: PgPool) {
 #[sqlx::test]
 async fn an_unauthenticated_request_is_redirected_to_the_landing_page(pool: PgPool) {
     let app = app(pool).await;
-    for path in ["/orders", "/orders/tables", "/orders/freshness"] {
+    for path in [
+        "/orders/sell",
+        "/orders/buy",
+        "/orders/sell/content",
+        "/orders/buy/content",
+        "/orders/freshness",
+    ] {
         let res = app.browser().get(&app.url(path)).await;
         assert!(res.status().is_redirection(), "{path}");
         assert_eq!(Browser::location(&res), "/", "{path}");
@@ -339,14 +359,24 @@ async fn the_details_columns_are_no_longer_sortable_and_fall_back_to_the_default
 }
 
 #[sqlx::test]
-async fn the_tables_fragment_has_no_page_around_it_and_follows_the_query(pool: PgPool) {
+async fn the_content_fragments_have_no_page_around_them_and_follow_the_query(pool: PgPool) {
     let (app, browser) = with_polled_fixture(pool).await;
 
-    let html = get(&app, &browser, "/orders/tables?sort=price&dir=desc").await;
+    let sell = get_one(&app, &browser, "/orders/sell/content?sort=price&dir=desc").await;
+    let buy = get_one(&app, &browser, "/orders/buy/content").await;
 
-    assert!(!html.contains("<html") && !html.contains("<nav"));
-    assert!(html.contains(r#"id="sell-orders""#) && html.contains(r#"id="buy-orders""#));
-    assert!(position(&html, 5001) < position(&html, 5002));
+    for html in [&sell, &buy] {
+        assert!(!html.contains("<html"));
+        // The sub-menu comes out of band: its links carry both sortings.
+        assert!(
+            html.contains(r#"<nav class="sub-menu" id="sub-menu""#)
+                && html.contains(r#"hx-swap-oob="true""#)
+        );
+        assert!(html.starts_with(r#"<div class="kpis">"#), "{html}");
+    }
+    assert!(sell.contains(r#"id="sell-orders""#) && !sell.contains(r#"id="buy-orders""#));
+    assert!(buy.contains(r#"id="buy-orders""#) && !buy.contains(r#"id="sell-orders""#));
+    assert!(position(&sell, 5001) < position(&sell, 5002));
 }
 
 #[sqlx::test]
@@ -895,17 +925,415 @@ async fn sorting_by_margin_puts_orders_without_one_last_in_both_directions(pool:
     assert!(unescaped(&asc).contains("sort=margin&dir=desc"));
 }
 
+// ---- the two pages ----
+
 #[sqlx::test]
-async fn every_scrolling_panel_carries_a_stable_scroll_key(pool: PgPool) {
+async fn the_orders_entry_redirects_to_the_sell_page_and_keeps_the_query(pool: PgPool) {
     let (app, browser) = with_polled_fixture(pool).await;
 
-    let key = |name: &str| format!(r#"data-scroll-key="{name}""#);
-    let page = get(&app, &browser, "/orders").await;
-    for name in ["sell-orders", "buy-orders", "freshness"] {
-        assert_eq!(page.matches(&key(name)).count(), 1, "{name}");
+    let plain = browser.get(&app.url("/orders")).await;
+    assert_eq!(plain.status(), 303);
+    assert_eq!(Browser::location(&plain), "/orders/sell");
+
+    let query = format!("chars={ALICE}&sort=price&dir=desc&bsort=amount&bdir=asc&page=2");
+    let with_query = browser.get(&app.url(&format!("/orders?{query}"))).await;
+    assert_eq!(with_query.status(), 303);
+    assert_eq!(
+        Browser::location(&with_query),
+        format!("/orders/sell?{query}")
+    );
+}
+
+#[sqlx::test]
+async fn an_unauthenticated_orders_entry_ends_at_the_landing_page(pool: PgPool) {
+    let app = app(pool).await;
+    let browser = app.browser();
+
+    let entry = browser.get(&app.url("/orders")).await;
+    assert_eq!(Browser::location(&entry), "/orders/sell");
+    let page = browser.get(&app.url("/orders/sell")).await;
+    assert_eq!(Browser::location(&page), "/");
+}
+
+#[sqlx::test]
+async fn each_side_lists_only_its_orders(pool: PgPool) {
+    let (app, browser) = with_polled_fixture(pool).await;
+
+    let sell = get_one(&app, &browser, "/orders/sell").await;
+    let buy = get_one(&app, &browser, "/orders/buy").await;
+
+    assert!(sell.contains(r#"id="order-5001""#) && sell.contains(r#"id="order-5002""#));
+    assert!(!sell.contains(r#"id="order-5003""#) && !sell.contains(r#"id="buy-orders""#));
+    assert!(buy.contains(r#"id="order-5003""#));
+    assert!(!buy.contains(r#"id="order-5001""#) && !buy.contains(r#"id="sell-orders""#));
+}
+
+/// The links of the page's sub-menu: text, href and whether it is the current page.
+fn sub_menu(html: &str) -> Vec<(String, String, bool)> {
+    let menu = between(html, r#"<nav class="sub-menu""#, "</nav>");
+    menu.split("<a ")
+        .skip(1)
+        .map(|a| {
+            let href = a
+                .split(r#"href=""#)
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap();
+            let text = a.split_once('>').unwrap().1.split('<').next().unwrap();
+            (
+                text.to_owned(),
+                unescaped(href),
+                a.contains(r#"aria-current="page""#),
+            )
+        })
+        .collect()
+}
+
+#[sqlx::test]
+async fn the_sub_menu_has_sell_and_buy_as_text_and_marks_the_current_page(pool: PgPool) {
+    let (app, browser) = with_polled_fixture(pool).await;
+
+    let sell = sub_menu(&get_one(&app, &browser, "/orders/sell").await);
+    let buy = sub_menu(&get_one(&app, &browser, "/orders/buy").await);
+
+    assert_eq!(
+        sell,
+        [
+            ("Sell".to_owned(), "/orders/sell".to_owned(), true),
+            ("Buy".to_owned(), "/orders/buy".to_owned(), false)
+        ]
+    );
+    assert_eq!(
+        buy,
+        [
+            ("Sell".to_owned(), "/orders/sell".to_owned(), false),
+            ("Buy".to_owned(), "/orders/buy".to_owned(), true)
+        ]
+    );
+}
+
+#[sqlx::test]
+async fn the_sub_menu_carries_the_selection_and_both_sortings_but_no_paging(pool: PgPool) {
+    let (app, browser) = with_polled_fixture(pool).await;
+    browser.sso_round_trip(&app, "/auth/add", BOB).await;
+
+    let html = get_one(
+        &app,
+        &browser,
+        &format!("/orders/buy?chars={ALICE}&sort=price&dir=desc&bsort=amount&bdir=desc&page=2&per_page=25"),
+    )
+    .await;
+
+    let links = sub_menu(&html);
+    let query = format!("?chars={ALICE}&sort=price&dir=desc&bsort=amount&bdir=desc");
+    assert_eq!(links[0].1, format!("/orders/sell{query}"));
+    assert_eq!(links[1].1, format!("/orders/buy{query}"));
+}
+
+#[sqlx::test]
+async fn sorting_the_buy_table_survives_a_round_trip_through_the_sub_menu(pool: PgPool) {
+    let (app, browser) = with_polled_fixture(pool).await;
+
+    let buy = get_one(&app, &browser, "/orders/buy?bsort=price&bdir=desc").await;
+    let sell_link = sub_menu(&buy)[0].1.clone();
+    let sell = get_one(&app, &browser, &sell_link).await;
+    let back = sub_menu(&sell)[1].1.clone();
+    let buy_again = get_one(&app, &browser, &back).await;
+
+    assert!(back.contains("bsort=price&bdir=desc"), "{back}");
+    assert!(buy_again.contains(r#"aria-sort="descending""#));
+}
+
+// ---- KPI cards ----
+
+#[sqlx::test]
+async fn the_sell_kpis_cover_every_order_with_the_net_margin_on_its_known_cost(pool: PgPool) {
+    let (app, browser) = margin_mix(pool).await;
+
+    let html = get_one(&app, &browser, "/orders/sell").await;
+
+    assert_eq!(kpi(&html, "kpi-sell-count").value, "3");
+    let value = kpi(&html, "kpi-sell-total");
+    // 4 * 150 + 4 * 100 + 4 * 120
+    assert_eq!(
+        (value.value.as_str(), value.title.as_str()),
+        ("1.48k", "1,480.00 ISK")
+    );
+    let net = kpi(&html, "kpi-net-margin");
+    // 171.29 - 19.14 on a known cost of 800.00 (orders 1 and 2); order 3 has no margin.
+    assert_eq!(net.value, "152.15");
+    assert_eq!(net.title, "152.15 ISK; 1 order left out");
+    assert_eq!(net.detail.as_deref(), Some("19.02%"));
+    assert!(!net.class.starts_with("kpi error"), "{}", net.class);
+}
+
+#[sqlx::test]
+async fn a_negative_net_margin_is_in_the_error_style(pool: PgPool) {
+    let (app, browser) = alice_sells(pool, vec![order(2, 36, STATION, false, 100.0)]).await;
+    alice_with_fees(&app).await;
+    alice_bought(&app, &[(2, 36, 8)]).await;
+
+    let html = get_one(&app, &browser, "/orders/sell").await;
+
+    let net = kpi(&html, "kpi-net-margin");
+    assert_eq!(net.value, "-19.14");
+    assert!(net.class.starts_with("kpi error"), "{}", net.class);
+    assert_eq!(net.detail.as_deref(), Some("-4.79%"));
+    assert_eq!(net.title, "-19.14 ISK");
+}
+
+#[sqlx::test]
+async fn without_a_margin_the_net_margin_reads_a_dash(pool: PgPool) {
+    let (app, browser) = with_polled_fixture(pool).await;
+
+    let html = get_one(&app, &browser, "/orders/sell").await;
+
+    let net = kpi(&html, "kpi-net-margin");
+    assert_eq!(net.value, "\u{2014}");
+    assert_eq!(net.detail, None);
+}
+
+#[sqlx::test]
+async fn the_buy_kpis_are_the_count_and_the_escrow_and_there_is_no_net_margin(pool: PgPool) {
+    let (app, browser) = with_polled_fixture(pool).await;
+
+    let html = get_one(&app, &browser, "/orders/buy").await;
+
+    assert_eq!(kpi(&html, "kpi-buy-count").value, "1");
+    let escrow = kpi(&html, "kpi-buy-total");
+    assert_eq!(
+        (escrow.value.as_str(), escrow.title.as_str()),
+        ("2.5m", "2,500,000.00 ISK")
+    );
+    assert!(!html.contains("kpi-net-margin") && !html.contains("kpi-sell-count"));
+}
+
+#[sqlx::test]
+async fn the_corporation_share_is_the_detail_line_of_the_value(pool: PgPool) {
+    let app = app(pool).await;
+    let browser = signed_in(&app, ALICE).await;
+    let mut corp = order(1, 34, STATION, false, 100.0);
+    corp["is_corporation"] = json!(true);
+    app.stub_control(
+        "orders",
+        json!({"character_id": ALICE, "orders": [corp, order(2, 35, STATION, false, 100.0)]}),
+    )
+    .await;
+    app.state.poller.poll_character(ALICE).await;
+
+    let html = get_one(&app, &browser, "/orders/sell").await;
+
+    let value = kpi(&html, "kpi-sell-total");
+    assert_eq!(value.value, "800.00");
+    assert_eq!(value.detail.as_deref(), Some("of which 400.00 corp"));
+}
+
+#[sqlx::test]
+async fn the_sell_and_buy_kpis_equal_the_dashboard_totals_for_the_same_selection(pool: PgPool) {
+    let app = app(pool).await;
+    let browser = signed_in(&app, ALICE).await;
+    browser.sso_round_trip(&app, "/auth/add", BOB).await;
+    let mut corp = order(3, 36, STATION, false, 77.0);
+    corp["is_corporation"] = json!(true);
+    for (character, orders) in [
+        (
+            ALICE,
+            vec![
+                order(1, 34, STATION, false, 150.0),
+                corp,
+                order(4, 34, STATION, true, 5.0),
+            ],
+        ),
+        (
+            BOB,
+            vec![
+                order(2, 35, STATION, false, 12.5),
+                order(5, 35, STATION, true, 6.0),
+            ],
+        ),
+    ] {
+        app.stub_control(
+            "orders",
+            json!({"character_id": character, "orders": orders}),
+        )
+        .await;
+        app.state.poller.poll_character(character).await;
     }
-    let tables = get(&app, &browser, "/orders/tables").await;
-    assert!(tables.contains(&key("sell-orders")) && tables.contains(&key("buy-orders")));
-    let freshness = get(&app, &browser, "/orders/freshness").await;
-    assert!(freshness.contains(&key("freshness")));
+
+    for selection in ["", &format!("?chars={BOB}")] {
+        let dashboard = get_one(&app, &browser, &format!("/dashboard{selection}")).await;
+        let sell = get_one(&app, &browser, &format!("/orders/sell{selection}")).await;
+        let buy = get_one(&app, &browser, &format!("/orders/buy{selection}")).await;
+
+        let tile = |id: &str| {
+            let tile = between(&dashboard, &format!(r#"id="{id}""#), "</article>");
+            let amount = between(tile, r#"class="value""#, "</p>");
+            let title = amount
+                .split(r#"title=""#)
+                .nth(1)
+                .and_then(|t| t.split('"').next());
+            let text = amount.split_once('>').unwrap().1.trim_end_matches("</p>");
+            (text.to_owned(), title.map(str::to_owned))
+        };
+        let card = |html: &str, id: &str| {
+            let k = kpi(html, id);
+            (k.value, Some(k.title))
+        };
+        assert_eq!(
+            card(&sell, "kpi-sell-total"),
+            tile("tile-sell-value"),
+            "{selection}"
+        );
+        assert_eq!(
+            card(&buy, "kpi-buy-total"),
+            tile("tile-escrow"),
+            "{selection}"
+        );
+        assert_eq!(
+            card(&sell, "kpi-sell-count").0,
+            tile("tile-sell-count").0,
+            "{selection}"
+        );
+        assert_eq!(
+            card(&buy, "kpi-buy-count").0,
+            tile("tile-buy-count").0,
+            "{selection}"
+        );
+    }
+}
+
+// ---- pagination ----
+
+/// Alice with `count` sell orders (ids 1..=count, price 10 + id), and one buy order.
+async fn many_sells(pool: PgPool, count: i64) -> (TestApp, Browser) {
+    let mut orders: Vec<Value> = (1..=count)
+        .map(|id| order(id, 34, STATION, false, 10.0 + id as f64))
+        .collect();
+    orders.push(order(9001, 35, STATION, true, 5.0));
+    alice_sells(pool, orders).await
+}
+
+fn ids_in_page(html: &str) -> Vec<i64> {
+    html.split(r#"<tbody id="order-"#)
+        .skip(1)
+        .map(|rest| rest.split('"').next().unwrap().parse().unwrap())
+        .collect()
+}
+
+#[sqlx::test]
+async fn the_second_page_shows_the_51st_to_the_70th_order_by_price(pool: PgPool) {
+    let (app, browser) = many_sells(pool, 70).await;
+
+    let first = get_one(&app, &browser, "/orders/sell?sort=price&dir=asc").await;
+    let second = get_one(&app, &browser, "/orders/sell?sort=price&dir=asc&page=2").await;
+
+    assert_eq!(ids_in_page(&first), (1..=50).collect::<Vec<_>>());
+    assert_eq!(ids_in_page(&second), (51..=70).collect::<Vec<_>>());
+    assert!(first.contains("Page 1 of 2") && second.contains("Page 2 of 2"));
+}
+
+#[sqlx::test]
+async fn the_kpis_cover_every_page(pool: PgPool) {
+    let (app, browser) = many_sells(pool, 70).await;
+
+    let second = get_one(&app, &browser, "/orders/sell?page=2").await;
+
+    assert_eq!(kpi(&second, "kpi-sell-count").value, "70");
+}
+
+#[sqlx::test]
+async fn a_page_past_the_end_shows_the_last_page_and_keeps_it_in_the_refresh_url(pool: PgPool) {
+    let (app, browser) = many_sells(pool, 120).await;
+
+    let html = get_one(&app, &browser, "/orders/sell?page=9").await;
+
+    assert!(html.contains("Page 3 of 3"), "{html}");
+    assert_eq!(ids_in_page(&html).len(), 20);
+    let refresh = unescaped(&html);
+    assert!(
+        refresh.contains(r#"hx-get="/orders/sell/content?page=3""#),
+        "the refresh URL carries the page shown: {refresh}"
+    );
+}
+
+#[sqlx::test]
+async fn the_page_size_is_taken_from_the_url_and_unknown_sizes_fall_back_to_fifty(pool: PgPool) {
+    let (app, browser) = many_sells(pool, 120).await;
+
+    let all = get_one(&app, &browser, "/orders/sell?per_page=200").await;
+    assert_eq!(ids_in_page(&all).len(), 120);
+    assert!(all.contains("Page 1 of 1"));
+    let small = get_one(&app, &browser, "/orders/sell?per_page=25&page=5").await;
+    assert_eq!(ids_in_page(&small).len(), 20);
+    assert!(small.contains("Page 5 of 5"));
+    let odd = get_one(&app, &browser, "/orders/sell?per_page=30").await;
+    assert_eq!(ids_in_page(&odd).len(), 50);
+}
+
+#[sqlx::test]
+async fn sorting_goes_back_to_the_first_page_and_keeps_the_page_size(pool: PgPool) {
+    let (app, browser) = many_sells(pool, 120).await;
+
+    let html = unescaped(&get_one(&app, &browser, "/orders/sell?page=2&per_page=25").await);
+
+    let price_link = html
+        .split("<a ")
+        .find(|a| a.contains("sort=price"))
+        .unwrap_or_else(|| panic!("no price header in {html}"));
+    assert!(price_link.contains("per_page=25"), "{price_link}");
+    assert!(
+        !price_link.contains("&page=") && !price_link.contains("?page="),
+        "{price_link}"
+    );
+}
+
+#[sqlx::test]
+async fn the_pagination_bar_is_not_shown_without_orders(pool: PgPool) {
+    let app = app(pool).await;
+    let browser = signed_in(&app, CAROL).await;
+
+    let html = get_one(&app, &browser, "/orders/sell").await;
+
+    assert!(html.contains("No sell orders."));
+    assert!(!html.contains(r#"class="pagination""#));
+}
+
+#[sqlx::test]
+async fn the_next_link_goes_through_the_content_fragment_with_the_page_url_for_the_address_bar(
+    pool: PgPool,
+) {
+    let (app, browser) = many_sells(pool, 120).await;
+
+    let html = unescaped(&get_one(&app, &browser, "/orders/sell?sort=price&dir=desc").await);
+
+    let next = html
+        .split("<a ")
+        .find(|a| a.contains(r#"rel="next""#))
+        .unwrap();
+    assert!(
+        next.contains(r#"href="/orders/sell?sort=price&dir=desc&page=2""#),
+        "{next}"
+    );
+    assert!(
+        next.contains(r#"hx-get="/orders/sell/content?sort=price&dir=desc&page=2""#),
+        "{next}"
+    );
+    assert!(
+        next.contains(r#"hx-push-url="/orders/sell?sort=price&dir=desc&page=2""#),
+        "{next}"
+    );
+}
+
+#[sqlx::test]
+async fn the_buy_page_has_its_own_paging(pool: PgPool) {
+    let (app, browser) = many_sells(pool, 70).await;
+
+    let sell = get_one(&app, &browser, "/orders/sell?page=2").await;
+    let buy = get_one(&app, &browser, "/orders/buy?page=2").await;
+
+    assert!(sell.contains("Page 2 of 2"));
+    assert!(buy.contains("Page 1 of 1"), "one buy order only: {buy}");
+    assert_eq!(ids_in_page(&buy), [9001]);
 }

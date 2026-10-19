@@ -564,6 +564,58 @@ async fn a_standing_is_kept_as_the_decimal_text_with_every_digit() {
 }
 
 #[tokio::test]
+async fn the_location_is_a_station_a_structure_or_open_space_with_its_expiry() {
+    use sekondo::esi::EsiLocation;
+    let h = common::esi_harness().await;
+    let token = h.token(90000001);
+    h.control("esi-expires", json!({"seconds": 300})).await;
+
+    let docked = h.client.character_location(90000001, &token).await.unwrap();
+    assert_eq!(docked.body.solar_system_id, 30000142);
+    assert_eq!(docked.body.docked(), Some(EsiLocation::Station(60003760)));
+    let ahead = docked.expires_at.unwrap() - h.clock.now();
+    assert!(ahead >= Duration::seconds(299), "{ahead}");
+
+    h.control(
+        "location",
+        json!({"character_id": 90000001, "location": {"solar_system_id": 30000144, "structure_id": 1000000000001u64}}),
+    )
+    .await;
+    let structure = h.client.character_location(90000001, &token).await.unwrap();
+    assert_eq!(
+        structure.body.docked(),
+        Some(EsiLocation::Structure(1000000000001))
+    );
+
+    h.control(
+        "location",
+        json!({"character_id": 90000001, "location": {"solar_system_id": 30000144}}),
+    )
+    .await;
+    let space = h.client.character_location(90000001, &token).await.unwrap();
+    assert_eq!(space.body.docked(), None);
+}
+
+#[tokio::test]
+async fn the_location_without_its_scope_or_for_another_character_is_forbidden_and_failures_are_temporary()
+ {
+    let h = common::esi_harness().await;
+    let foreign = h.token(90000002);
+    assert!(matches!(
+        h.client.character_location(90000001, &foreign).await,
+        Err(EsiError::Forbidden)
+    ));
+
+    let token = h.token(90000001);
+    h.control("esi-fail-next", json!({"route": "location", "status": 503}))
+        .await;
+    assert!(matches!(
+        h.client.character_location(90000001, &token).await,
+        Err(EsiError::Temporary(_))
+    ));
+}
+
+#[tokio::test]
 async fn a_station_names_its_owner_without_a_token() {
     let h = common::esi_harness().await;
     assert_eq!(h.client.station(60003760).await.unwrap().owner, 1000035);

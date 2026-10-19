@@ -67,6 +67,7 @@ fn outcome_text(outcome: PollOutcome) -> &'static str {
         PollOutcome::Failed => "failed",
         PollOutcome::Deferred => "deferred",
         PollOutcome::Dropped => "dropped",
+        PollOutcome::Skipped => "skipped",
     }
 }
 

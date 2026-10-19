@@ -97,6 +97,66 @@ async fn standings_are_a_list_that_a_control_replaces() {
 }
 
 #[tokio::test]
+async fn a_character_is_docked_at_jita_until_a_control_moves_it() {
+    let f = common::start().await;
+    let token = f.stub.issue_access_token(ALICE).unwrap();
+    let path = format!("/characters/{ALICE}/location");
+
+    let res = get(&f, &path, Some(&token)).await;
+    assert_eq!(res.status(), 200);
+    assert!(res.headers().contains_key("expires"));
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(
+        body,
+        json!({"solar_system_id": 30000142, "station_id": JITA})
+    );
+
+    control(
+        &f,
+        "location",
+        json!({"character_id": ALICE, "location": {"solar_system_id": 30000144, "structure_id": 1000000000001u64}}),
+    )
+    .await;
+    let body: Value = get(&f, &path, Some(&token)).await.json().await.unwrap();
+    assert_eq!(
+        body,
+        json!({"solar_system_id": 30000144, "structure_id": 1000000000001u64})
+    );
+
+    control(
+        &f,
+        "location",
+        json!({"character_id": ALICE, "location": {"solar_system_id": 30000144}}),
+    )
+    .await;
+    let body: Value = get(&f, &path, Some(&token)).await.json().await.unwrap();
+    assert_eq!(body, json!({"solar_system_id": 30000144}));
+}
+
+#[tokio::test]
+async fn the_location_is_forbidden_without_its_scope_or_for_another_character() {
+    let f = common::start().await;
+    let path = format!("/characters/{ALICE}/location");
+    let narrow = narrow_token(&f, ALICE);
+    assert_eq!(get(&f, &path, Some(&narrow)).await.status(), 403);
+    let bob = f.stub.issue_access_token(BOB).unwrap();
+    assert_eq!(get(&f, &path, Some(&bob)).await.status(), 403);
+    assert_eq!(get(&f, &path, None).await.status(), 401);
+}
+
+#[tokio::test]
+async fn the_default_character_scopes_include_the_location_scope() {
+    let f = common::start().await;
+    let token = f.stub.issue_access_token(ALICE).unwrap();
+    assert_eq!(
+        get(&f, &format!("/characters/{ALICE}/location"), Some(&token))
+            .await
+            .status(),
+        200
+    );
+}
+
+#[tokio::test]
 async fn skills_and_standings_are_forbidden_without_the_scope_or_for_another_character() {
     let f = common::start().await;
     for what in ["skills", "standings"] {

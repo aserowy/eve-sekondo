@@ -628,6 +628,46 @@ pub fn skills() -> Call {
     }
 }
 
+/// Where a character is: docked in a station or a structure, or in open space (only the solar
+/// system). It needs a scope that is optional for the app, so a missing scope is a 403.
+pub fn character_location() -> Call {
+    let location = |name: &'static str, station: Presence, structure: Presence| {
+        variant(
+            name,
+            StatusSpec::Exact(200),
+            char_route_headers(true),
+            json_object(vec![
+                field("solar_system_id", Ty::Int, Always),
+                field("station_id", Ty::Int, station),
+                field("structure_id", Ty::Int, structure),
+            ]),
+        )
+    };
+    // Which of the three the verification character gets depends on where it happens to be: the
+    // station one is verified (docked in an NPC station), the others are the same shape.
+    let elsewhere = "depends on where the verification character is; it is the same shape with another id field";
+    let mut variants = vec![
+        location("station", Always, Absent),
+        unverifiable(location("structure", Absent, Always), elsewhere),
+        unverifiable(location("in-space", Absent, Absent), elsewhere),
+        variant(
+            "forbidden",
+            StatusSpec::Exact(403),
+            char_route_headers(false),
+            error_body(),
+        ),
+    ];
+    variants.extend(esi_failure_variants());
+    Call {
+        name: "character-location",
+        routes: vec![Route {
+            method: "GET",
+            path: "/characters/{id}/location",
+        }],
+        variants,
+    }
+}
+
 /// The standings of a character towards agents, NPC corporations and factions.
 pub fn standings() -> Call {
     let mut variants = vec![
@@ -718,6 +758,7 @@ pub fn contracts() -> Vec<Call> {
         assets(),
         prices(),
         skills(),
+        character_location(),
         standings(),
         stations(),
     ]
@@ -1642,6 +1683,57 @@ mod tests {
     }
 
     #[test]
+    fn a_location_is_a_station_a_structure_or_open_space() {
+        let call = character_location();
+        let ok = char_ok("char-location");
+        let station = json!({"solar_system_id": 30000142, "station_id": 60003760});
+        let structure = json!({"solar_system_id": 30000142, "structure_id": 1000000000001u64});
+        let space = json!({"solar_system_id": 30000142});
+        for (name, body) in [
+            ("station", station),
+            ("structure", structure),
+            ("in-space", space),
+        ] {
+            assert!(
+                problems(&call, name, Some(200), &ok, Some(body)).is_empty(),
+                "{name}"
+            );
+        }
+        // Docked somewhere without saying where is not a valid answer.
+        assert_eq!(
+            problems(
+                &call,
+                "in-space",
+                Some(200),
+                &ok,
+                Some(json!({"solar_system_id": 30000142, "station_id": 60003760}))
+            ),
+            ["$.station_id is present but must be absent"]
+        );
+        assert_eq!(
+            problems(
+                &call,
+                "station",
+                Some(200),
+                &ok,
+                Some(json!({"solar_system_id": 30000142}))
+            ),
+            ["$.station_id is missing but always present"]
+        );
+        assert!(
+            problems(
+                &call,
+                "forbidden",
+                Some(403),
+                &char_forbidden("char-location"),
+                Some(json!({"error": "forbidden"}))
+            )
+            .is_empty()
+        );
+        assert_eq!(call.routes[0].path, "/characters/{id}/location");
+    }
+
+    #[test]
     fn standings_carry_kind_and_value() {
         let call = standings();
         let body = json!([{"from_id": 1000035, "from_type": "npc_corp", "standing": 1.5}]);
@@ -1829,7 +1921,7 @@ mod tests {
         assert!(problems(&call, "server-error", Some(502), &HeaderMap::new(), None).is_empty());
     }
 
-    const ALL_ROUTES: [(&str, &str); 16] = [
+    const ALL_ROUTES: [(&str, &str); 17] = [
         ("GET", "/oauth/jwks"),
         ("GET", "/v2/oauth/authorize"),
         ("GET", "/v2/oauth/authorize/select"),
@@ -1842,6 +1934,7 @@ mod tests {
         ("GET", "/characters/{id}/wallet/transactions"),
         ("GET", "/characters/{id}/assets"),
         ("GET", "/characters/{id}/skills"),
+        ("GET", "/characters/{id}/location"),
         ("GET", "/characters/{id}/standings"),
         ("GET", "/universe/stations/{id}"),
         ("GET", "/markets/prices"),

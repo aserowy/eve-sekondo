@@ -244,6 +244,9 @@ async fn unlinking_a_character_removes_its_wealth_and_fee_data_and_keeps_the_oth
             "INSERT INTO character_standings (character_id, from_id, from_type, standing) \
              VALUES ($1, 1000035, 'npc_corp', 1.5)",
             "INSERT INTO fee_sync (character_id, kind, next_poll_at) VALUES ($1, 'skills', now())",
+            "INSERT INTO fee_sync (character_id, kind, next_poll_at) VALUES ($1, 'location', now())",
+            "INSERT INTO character_locations (character_id, location_id, kind, updated_at) \
+             VALUES ($1, 60003760, 'station', now())",
             "INSERT INTO wealth_sync (character_id, kind, next_poll_at) VALUES ($1, 'transactions', now())",
             "INSERT INTO purchases (transaction_id, character_id, type_id, location_id, quantity, \
              unit_price, bought_at) VALUES ($1, $1, 34, 60003760, 10, 100, now())",
@@ -275,7 +278,8 @@ async fn unlinking_a_character_removes_its_wealth_and_fee_data_and_keeps_the_oth
         ("sell_order_history", 1),
         ("character_skills", 1),
         ("character_standings", 1),
-        ("fee_sync", 1),
+        ("character_locations", 1),
+        ("fee_sync", 2),
     ] {
         assert_eq!(e.count(table).await, expected, "{table}");
         let gone: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(

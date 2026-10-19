@@ -356,6 +356,32 @@ async fn a_character_linked_with_two_scopes_needs_relogin_until_it_logs_in_with_
 }
 
 #[sqlx::test]
+async fn a_character_without_the_optional_location_scope_does_not_need_relogin(pool: PgPool) {
+    let e = env(pool).await;
+    let account = e.repo.create_account().await.unwrap();
+    e.stub_control(
+        "scopes",
+        json!({"character_id": ALICE, "scopes": sekondo::oauth::REQUIRED_SCOPES}),
+    )
+    .await;
+    e.link(account, ALICE).await;
+    e.clock.advance(TimeDuration::hours(2));
+
+    e.tokens
+        .access_token(ALICE)
+        .await
+        .expect("the required scopes are enough");
+    assert!(!e.needs_relogin(ALICE).await);
+    let character = e.repo.list_characters(account).await.unwrap().remove(0);
+    assert!(
+        !character
+            .scopes
+            .iter()
+            .any(|s| s == sekondo::oauth::LOCATION_SCOPE)
+    );
+}
+
+#[sqlx::test]
 async fn a_character_linked_with_the_four_old_scopes_needs_relogin(pool: PgPool) {
     let e = env(pool).await;
     let account = e.repo.create_account().await.unwrap();

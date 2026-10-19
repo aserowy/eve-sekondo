@@ -38,6 +38,7 @@ pub fn default_characters() -> Vec<Character> {
         "esi-assets.read_assets.v1",
         "esi-skills.read_skills.v1",
         "esi-characters.read_standings.v1",
+        "esi-location.read_location.v1",
     ]
     .map(str::to_owned)
     .into();
@@ -106,7 +107,7 @@ pub const ESI_EXPIRES_SECONDS: u64 = 1200;
 #[derive(Clone, Debug)]
 pub struct EsiFailure {
     /// Only calls to this route fail (`orders`, `names`, `structures`, `market`, `wallet`,
-    /// `history`, `assets`, `prices`, `skills`, `standings`, `stations`); `None`: any route.
+    /// `history`, `assets`, `prices`, `skills`, `standings`, `location`, `stations`); `None`: any route.
     pub route: Option<String>,
     pub remaining: u32,
     pub status: u16,
@@ -177,6 +178,8 @@ pub struct Inner {
     pub skills: HashMap<i64, Vec<Value>>,
     /// Fixture standings per character, as ESI's JSON objects.
     pub standings: HashMap<i64, Vec<Value>>,
+    /// Fixture locations per character, as ESI's JSON objects.
+    pub locations: HashMap<i64, Value>,
     /// Owner corporation per NPC station.
     pub station_owners: HashMap<i64, i64>,
     /// Fixture market prices, as ESI's JSON.
@@ -309,6 +312,7 @@ impl Inner {
             transactions: HashMap::new(),
             skills: default_skills(),
             standings: default_standings(),
+            locations: default_locations(),
             station_owners: default_station_owners(),
             prices: default_prices(),
             esi_expires_secs: ESI_EXPIRES_SECONDS,
@@ -447,6 +451,7 @@ impl Inner {
         self.transactions.clear();
         self.skills = default_skills();
         self.standings = default_standings();
+        self.locations = default_locations();
         self.station_owners = default_station_owners();
         self.prices = default_prices();
         self.esi_expires_secs = ESI_EXPIRES_SECONDS;
@@ -621,6 +626,19 @@ fn default_standings() -> HashMap<i64, Vec<Value>> {
         (90000002, vec![]),
         (90000003, vec![]),
     ])
+}
+
+/// Everyone is docked in Jita IV - Moon 4 - Caldari Navy Assembly Plant.
+fn default_locations() -> HashMap<i64, Value> {
+    [90000001, 90000002, 90000003]
+        .into_iter()
+        .map(|id| {
+            (
+                id,
+                json!({"solar_system_id": 30000142, "station_id": 60003760}),
+            )
+        })
+        .collect()
 }
 
 /// The owners of the stations in `NAMES`, as the static data export lists them.

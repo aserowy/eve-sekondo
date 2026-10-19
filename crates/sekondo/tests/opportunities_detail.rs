@@ -186,7 +186,7 @@ async fn an_item_the_station_no_longer_trades_gets_a_page_that_says_so(pool: PgP
 }
 
 #[sqlx::test]
-async fn an_item_in_the_table_but_not_in_its_top_fifty_counts_as_not_listed(pool: PgPool) {
+async fn with_many_matches_every_item_is_listed_and_none_is_cut_off_by_a_row_limit(pool: PgPool) {
     let (app, browser) = setup(pool.clone()).await;
     for i in 1..=60i64 {
         item(
@@ -210,7 +210,8 @@ async fn an_item_in_the_table_but_not_in_its_top_fifty_counts_as_not_listed(pool
         .await
         .unwrap();
 
-    assert!(weak.contains("No longer listed"), "{weak}");
+    // 60 items pass the table's rules: the table pages through all of them.
+    assert!(!weak.contains("No longer listed"), "{weak}");
     assert!(!strong.contains("No longer listed"));
 }
 
@@ -220,13 +221,14 @@ async fn the_opportunities_page_has_no_floating_window_and_its_rows_open_pages(p
     item(&pool, 34, "Tritanium", "130.00", 100_000_000.0).await;
 
     let page = browser
-        .get(&app.url("/opportunities"))
+        .get(&app.url("/opportunities/classic"))
         .await
         .text()
         .await
         .unwrap();
 
-    assert!(!page.contains("<aside"), "{page}");
+    // No window floats over the page; the only <aside> is the sidebar.
+    assert_eq!(page.matches("<aside").count(), 1, "{page}");
     assert!(!page.contains(r#"role="dialog""#), "{page}");
     // A row opens the detail page of its own table and item, and its item is a real link.
     assert!(
@@ -246,7 +248,7 @@ async fn rows_carry_the_selection_and_sorting_to_the_detail_page(pool: PgPool) {
     item(&pool, 34, "Tritanium", "130.00", 100_000_000.0).await;
 
     let page = browser
-        .get(&app.url("/opportunities?chars=90000002&cs=item&cd=asc"))
+        .get(&app.url("/opportunities/classic?chars=90000002&cs=item&cd=asc"))
         .await
         .text()
         .await
@@ -310,7 +312,9 @@ async fn the_detail_page_is_a_full_page_with_the_filter_box_the_sub_menu_and_the
     assert!(html.contains(r#"id="filter-context""#) && html.contains("base rates"));
     // The sub-menu leads back with the selection and sorting, then to the rows of the page.
     assert!(
-        html.contains(r#"<a href="/opportunities?chars=90000002&cs=item&cd=asc">"#),
+        html.contains(
+            r#"<a href="/opportunities/classic?chars=90000002&cs=item&cd=asc">&larr; Classic spread trade</a>"#
+        ),
         "{html}"
     );
     assert!(

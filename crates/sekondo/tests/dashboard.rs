@@ -1474,7 +1474,7 @@ async fn the_navigation_carries_the_selection_to_the_orders_page(pool: PgPool) {
     .await;
 
     assert!(
-        html.contains(&format!(r#"href="/orders?chars={ALICE}""#)),
+        html.contains(&format!(r#"href="/orders/sell?chars={ALICE}""#)),
         "{html}"
     );
 }

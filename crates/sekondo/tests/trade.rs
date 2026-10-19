@@ -448,7 +448,10 @@ async fn listed(env: &PollEnv) -> Vec<Listed> {
     listed_between(
         env,
         &[ALICE, BOB],
-        (datetime!(2026-09-01 0:00 UTC), datetime!(2026-11-01 0:00 UTC)),
+        (
+            datetime!(2026-09-01 0:00 UTC),
+            datetime!(2026-11-01 0:00 UTC),
+        ),
     )
     .await
 }
@@ -570,7 +573,10 @@ async fn only_the_selected_personal_trades_in_the_range_are_listed_newest_first(
     assert_eq!(alice.len(), 4, "Bob's purchase is left out");
 
     let ranged = listed_between(&env, &[ALICE, BOB], (day(2), day(10))).await;
-    let order: Vec<_> = ranged.iter().map(|r| (r.is_sale, r.transaction_id)).collect();
+    let order: Vec<_> = ranged
+        .iter()
+        .map(|r| (r.is_sale, r.transaction_id))
+        .collect();
     assert_eq!(order, [(false, 3), (true, 32), (true, 31)]);
 }
 

@@ -1,27 +1,27 @@
 import {
   expect, feePoll, loginWith, marketPoll, pollCharacter, stubControl, stubMarket, stubMarketOrder, stubOrder,
-  stubTradeSkills, stubTransaction, test, unfoldFreshness, wealthPoll,
+  stubTradeSkills, stubTransaction, test, wealthPoll,
 } from '../support/fixtures';
 
 test('sell and buy orders show up after a poll, sortable, with exact amounts on hover', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
   await page.locator('#main-nav').getByRole('link', { name: 'Orders' }).click();
-  await expect(page).toHaveURL(/\/orders$/);
+  await expect(page).toHaveURL(/\/orders\/sell$/);
 
   // Nothing has been polled yet.
-  await unfoldFreshness(page);
   await expect(page.getByText('Waiting for first update')).toBeVisible();
   await expect(page.getByText('No sell orders.')).toBeVisible();
+  await expect(page.locator('.pagination')).toHaveCount(0);
+  await page.locator('nav.sub-menu').getByRole('link', { name: 'Buy' }).click();
+  await expect(page).toHaveURL(/\/orders\/buy$/);
   await expect(page.getByText('No buy orders.')).toBeVisible();
 
   expect(await pollCharacter(page, 90000001)).toBe('200 updated');
-  await page.reload();
+  await page.goto('/orders/sell');
 
   // The stub's fixture: two sell orders and a buy order in a structure.
   const sell = page.locator('#sell-orders');
-  const buy = page.locator('#buy-orders');
   await expect(sell.locator('tbody.order')).toHaveCount(2);
-  await expect(buy.locator('tbody.order')).toHaveCount(1);
 
   const tritanium = sell.locator('#order-5001');
   await expect(tritanium).toContainText('Alice Alpha');
@@ -38,12 +38,17 @@ test('sell and buy orders show up after a poll, sortable, with exact amounts on 
     '95,050.00 ISK',
   );
 
+  await page.locator('nav.sub-menu').getByRole('link', { name: 'Buy' }).click();
+  const buy = page.locator('#buy-orders');
+  await expect(buy.locator('tbody.order')).toHaveCount(1);
+  await expect(page.locator('#sell-orders')).toHaveCount(0);
   const mexallon = buy.locator('#order-5003');
   await expect(mexallon).toContainText('Mexallon');
   await expect(mexallon).toContainText('Alpha Keepstar');
   await expect(mexallon.getByText('2.5m', { exact: true })).toHaveAttribute('title', '2,500,000.00 ISK');
 
   // Default sorting: item name ascending.
+  await page.locator('nav.sub-menu').getByRole('link', { name: 'Sell' }).click();
   await expect(sell.locator('tbody.order').first()).toHaveAttribute('id', 'order-5002');
 
   // Sort by price, then reverse it. The URL follows without a reload.
@@ -69,8 +74,7 @@ test('a stale character keeps its orders listed', async ({ page }) => {
   });
   expect(await pollCharacter(page, 90000001)).toBe('200 needs-relogin');
 
-  await page.goto('/orders');
-  await unfoldFreshness(page);
+  await page.goto('/orders/sell');
   await expect(page.locator('#freshness').getByText('Stale')).toBeVisible();
   await expect(page.locator('#freshness').getByRole('link', { name: 'Log in again' })).toBeVisible();
   await expect(page.locator('#sell-orders tbody.order')).toHaveCount(2);
@@ -83,7 +87,7 @@ test('corporation orders carry a marker', async ({ page }) => {
     orders: [{ ...stubOrder(1), is_corporation: true }, stubOrder(2, { type: 35 })],
   });
   await pollCharacter(page, 90000003);
-  await page.goto('/orders');
+  await page.goto('/orders/sell');
 
   await expect(page.locator('#order-1').getByText('Corp', { exact: true })).toBeVisible();
   await expect(page.locator('#order-2').getByText('Corp', { exact: true })).toHaveCount(0);
@@ -92,13 +96,14 @@ test('corporation orders carry a marker', async ({ page }) => {
 test('the headers list the figures only, in order, for the sell and the buy table', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
   expect(await pollCharacter(page, 90000001)).toBe('200 updated');
-  await page.goto('/orders');
 
   const labels = async (section: string) =>
     (await page.locator(`${section} thead th`).allInnerTexts()).map((t) => t.replace(/[\u25B2\u25BC]/g, '').trim());
+  await page.goto('/orders/sell');
   expect(await labels('#sell-orders')).toEqual([
     'Item', 'Price', 'Standing', 'Behind by', 'Undercut volume', 'Volume', 'Value', 'Margin', 'Time left',
   ]);
+  await page.goto('/orders/buy');
   expect(await labels('#buy-orders')).toEqual([
     'Item', 'Price', 'Standing', 'Behind by', 'Undercut volume', 'Volume', 'Escrow', 'Time left',
   ]);
@@ -107,14 +112,16 @@ test('the headers list the figures only, in order, for the sell and the buy tabl
 test('each order has a dimmed details line: issued, character, location, region', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
   expect(await pollCharacter(page, 90000001)).toBe('200 updated');
-  await page.goto('/orders');
+  await page.goto('/orders/sell');
 
   const details = page.locator('#sell-orders #order-5001 tr.details');
   await expect(details).toHaveText(
     /^\s*\d{4}-\d{2}-\d{2} \d{2}:\d{2} · Alice Alpha · Jita IV - Moon 4 - Caldari Navy Assembly Plant · The Forge\s*$/,
   );
   await expect(details.locator('td')).toHaveAttribute('colspan', '9');
+  await page.goto('/orders/buy');
   await expect(page.locator('#buy-orders #order-5003 tr.details td')).toHaveAttribute('colspan', '8');
+  await page.goto('/orders/sell');
   // Dimmed: the details line is less prominent than the figures above it.
   await expect(async () => {
     const colours = await page.locator('#sell-orders #order-5001').evaluate((tbody) => [
@@ -130,7 +137,7 @@ test('the Corp marker sits on the details line after the character name', async 
   await loginWith(page, 'Carol Charlie');
   await stubControl('orders', { character_id: 90000003, orders: [{ ...stubOrder(1), is_corporation: true }] });
   await pollCharacter(page, 90000003);
-  await page.goto('/orders');
+  await page.goto('/orders/sell');
 
   const details = page.locator('#order-1 tr.details');
   await expect(details).toContainText('Carol Charlie Corp ·');
@@ -141,11 +148,11 @@ test('the Corp marker sits on the details line after the character name', async 
 test('hovering the details line highlights the whole order', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
   expect(await pollCharacter(page, 90000001)).toBe('200 updated');
-  await page.goto('/orders');
+  await page.goto('/orders/sell');
 
   const order = page.locator('#sell-orders #order-5001');
   const figures = order.locator('tr:not(.details)');
-  const background = () => order.evaluate((tbody) => getComputedStyle(tbody).backgroundColor);
+  const background = () => order.evaluate((tbody) => getComputedStyle(tbody.querySelector('tr:not(.details) td')!).backgroundColor);
   const resting = await background();
   await order.locator('tr.details').hover();
   await expect.poll(background).not.toBe(resting);
@@ -168,12 +175,12 @@ test('standing and gap show as badges and text, with the exact gap on hover', as
     stubMarketOrder(21, { type: 35, price: 1_800_000 }),
   ]);
 
-  await page.goto('/orders');
+  await page.goto('/orders/sell');
   const dashes = page.locator('#sell-orders #order-1 td').filter({ hasText: '\u2014' });
   await expect(dashes).toHaveCount(4); // no market data yet (standing, gap, undercut volume), and no purchases (margin)
 
   expect(await marketPoll(page)).toBe('200 2');
-  await page.goto('/orders');
+  await page.goto('/orders/sell');
 
   const undercut = page.locator('#sell-orders #order-1');
   await expect(undercut.locator('.badge.undercut')).toHaveText('Undercut 3');
@@ -205,7 +212,7 @@ test('sorting by standing puts top first, reads the number and keeps orders with
   }
   await stubMarket(market);
   await marketPoll(page);
-  await page.goto('/orders');
+  await page.goto('/orders/sell');
 
   const ids = async () => page.locator('#sell-orders tbody.order').evaluateAll((rows) => rows.map((r) => r.id));
   const standing = page.locator('#sell-orders').getByRole('link', { name: 'Standing' });
@@ -242,12 +249,13 @@ test('the undercut volume shows in both tables, empty for top and a dash without
     stubMarketOrder(42, { type: 34, price: 60, buy: true, range: 'region', remain: 1000 }),
   ]);
   expect(await marketPoll(page)).toBe('200 3');
-  await page.goto('/orders');
+  await page.goto('/orders/buy');
 
   const volumeCell = (row: string) => page.locator(`${row} td`).nth(4);
+  await expect(volumeCell('#buy-orders #order-4')).toHaveText('1,300');
+  await page.goto('/orders/sell');
   await expect(page.locator('#sell-orders thead th').nth(4)).toContainText('Undercut volume');
   await expect(volumeCell('#sell-orders #order-1')).toHaveText('1,250');
-  await expect(volumeCell('#buy-orders #order-4')).toHaveText('1,300');
   await expect(volumeCell('#sell-orders #order-2')).toHaveText('');
   await expect(volumeCell('#sell-orders #order-3')).toHaveText('\u2014');
 
@@ -284,7 +292,7 @@ async function aliceWithMargins(page: import('@playwright/test').Page) {
   });
   expect(await wealthPoll(page, 90000001, 'transactions')).toBe('200 updated');
   expect(await feePoll(page)).toBe('200 ok');
-  await page.goto('/orders');
+  await page.goto('/orders/sell');
 }
 
 test('the margin shows after the value with its exact value and cost on hover, and a loss in the error style', async ({ page }) => {
@@ -326,6 +334,84 @@ test('sorting by margin descending puts the best first and orders without a marg
   await expect(page).toHaveURL(/sort=margin&dir=desc/);
   await expect.poll(ids).toEqual(['order-1', 'order-2', 'order-3']);
 
+  await page.locator('nav.sub-menu').getByRole('link', { name: 'Buy' }).click();
   await expect(page.locator('#buy-orders').getByRole('link', { name: 'Margin' })).toHaveCount(0);
   await expect(page.locator('#buy-orders #order-4')).toBeVisible();
+});
+
+test('the sub-menu switches between the sell and the buy page and keeps each sorting', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  expect(await pollCharacter(page, 90000001)).toBe('200 updated');
+  await page.goto('/orders/buy?bsort=price&bdir=desc');
+  const menu = page.locator('nav.sub-menu');
+  await expect(menu.getByRole('link')).toHaveText(['Sell', 'Buy']);
+  await expect(menu.getByRole('link', { name: 'Buy' })).toHaveAttribute('aria-current', 'page');
+
+  await menu.getByRole('link', { name: 'Sell' }).click();
+  await expect(page).toHaveURL(/\/orders\/sell\?bsort=price&bdir=desc$/);
+  await expect(menu.getByRole('link', { name: 'Sell' })).toHaveAttribute('aria-current', 'page');
+  await expect(page.locator('#sell-orders')).toBeVisible();
+
+  await menu.getByRole('link', { name: 'Buy' }).click();
+  await expect(page).toHaveURL(/\/orders\/buy\?bsort=price&bdir=desc$/);
+  await expect(page.locator('#buy-orders th[aria-sort="descending"]')).toContainText('Price');
+});
+
+/** Alice with 120 sell orders, price 10 + id, after her first poll. */
+async function aliceWith120Sells(page: import('@playwright/test').Page) {
+  await loginWith(page, 'Alice Alpha');
+  await stubControl('orders', {
+    character_id: 90000001,
+    orders: Array.from({ length: 120 }, (_, i) => stubOrder(i + 1, { price: 10 + i })),
+  });
+  expect(await pollCharacter(page, 90000001)).toBe('200 updated');
+  await page.goto('/orders/sell?sort=price&dir=asc');
+}
+
+const rowIds = (page: import('@playwright/test').Page) =>
+  page.locator('#sell-orders tbody.order').evaluateAll((rows) => rows.map((r) => Number(r.id.replace('order-', ''))));
+
+test('the next page shows orders 51 to 100 with the sorting and selection unchanged, and a page size of 200 shows all', async ({ page }) => {
+  await aliceWith120Sells(page);
+  const pagination = page.locator('.pagination');
+  await expect(pagination).toContainText('Page 1 of 3');
+  await expect(page.locator('#sell-orders tbody.order')).toHaveCount(50);
+
+  await pagination.getByRole('link', { name: 'Next' }).click();
+  await expect(page).toHaveURL(/sort=price&dir=asc&page=2$/);
+  await expect(pagination).toContainText('Page 2 of 3');
+  expect((await rowIds(page))[0]).toBe(51);
+  expect((await rowIds(page)).at(-1)).toBe(100);
+  await expect(page.locator('#kpi-sell-count .value')).toHaveText('120');
+
+  await pagination.getByLabel('Rows per page').selectOption('200');
+  await expect(page).toHaveURL(/sort=price&dir=asc&per_page=200$/);
+  await expect(page.locator('#sell-orders tbody.order')).toHaveCount(120);
+  await expect(pagination).toContainText('Page 1 of 1');
+  // The table's top is in view after a page change.
+  const top = (await page.locator('#sell-orders').boundingBox())!;
+  expect(top.y).toBeGreaterThanOrEqual(0);
+});
+
+test('a page past the end shows the last page, and sorting goes back to the first page', async ({ page }) => {
+  await aliceWith120Sells(page);
+
+  await page.goto('/orders/sell?page=9');
+  await expect(page.locator('.pagination')).toContainText('Page 3 of 3');
+  await expect(page.locator('#sell-orders tbody.order')).toHaveCount(20);
+
+  await page.locator('#sell-orders').getByRole('link', { name: 'Price' }).click();
+  await expect(page).toHaveURL(/sort=price&dir=asc$/);
+  await expect(page.locator('.pagination')).toContainText('Page 1 of 3');
+});
+
+test('the freshness is below the pagination, unfolded, without a toggle', async ({ page }) => {
+  await aliceWith120Sells(page);
+
+  await expect(page.getByRole('button', { name: 'Freshness' })).toHaveCount(0);
+  const freshness = page.locator('#freshness');
+  await expect(freshness).toContainText('Last update');
+  await expect(freshness).toContainText('Alice Alpha');
+  const bar = (await page.locator('.pagination').boundingBox())!;
+  expect((await freshness.boundingBox())!.y).toBeGreaterThanOrEqual(bar.y + bar.height);
 });

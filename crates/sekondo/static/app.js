@@ -4,25 +4,70 @@ htmx.config.includeIndicatorStyles = false;
 // No eval: the CSP forbids it, and nothing here needs hx-on or hx-vals javascript.
 htmx.config.allowEval = false;
 
-// ---- bars ----
-// The top bar, the sub-menu and the filter box share one wrapper (header.bars). Its height changes
-// when the filter box wraps, so it is measured and published as --bars-height: window pages are
-// that much shorter than the window, and sticky columns and jump targets sit below it.
-function watchBars() {
-  const bars = document.getElementById('bars');
-  if (!bars) return;
-  const publish = () => document.documentElement.style.setProperty('--bars-height', `${bars.getBoundingClientRect().height}px`);
-  publish();
-  new ResizeObserver(publish).observe(bars);
+// ---- sidebar ----
+// The menu is expanded or collapsed per browser (localStorage). The script is loaded in the head, so
+// the state is on <html> before the body renders and the menu never flashes open.
+const MENU_KEY = 'sekondo.menu';
+
+function menuCollapsed() {
+  try {
+    return localStorage.getItem(MENU_KEY) === 'collapsed';
+  } catch {
+    return false;
+  }
 }
 
-document.addEventListener('DOMContentLoaded', watchBars);
+function applyMenu() {
+  const collapsed = menuCollapsed();
+  if (collapsed) document.documentElement.dataset.menu = 'collapsed';
+  else delete document.documentElement.dataset.menu;
+  document.querySelector('.menu-toggle')?.setAttribute('aria-expanded', String(!collapsed));
+}
+
+applyMenu();
+document.addEventListener('DOMContentLoaded', applyMenu);
+document.addEventListener('click', (event) => {
+  if (!(event.target instanceof Element) || !event.target.closest('.menu-toggle')) return;
+  try {
+    localStorage.setItem(MENU_KEY, menuCollapsed() ? 'expanded' : 'collapsed');
+  } catch {
+    // Without storage the menu still toggles for this page.
+    document.documentElement.toggleAttribute('data-menu');
+  }
+  applyMenu();
+});
+
+// ---- sub-menu ----
+// The sub-menu sticks to the top of the window. Its height is published as --sub-menu-height, so
+// that the rows a link jumps to stop below it (scroll-margin-top in app.css). A swapped-in
+// sub-menu is observed again.
+let subMenuObserver = null;
+
+function watchSubMenu() {
+  const menu = document.querySelector('nav.sub-menu');
+  subMenuObserver?.disconnect();
+  subMenuObserver = null;
+  if (!menu) {
+    document.documentElement.style.removeProperty('--sub-menu-height');
+    return;
+  }
+  const publish = () => document.documentElement.style.setProperty('--sub-menu-height', `${menu.getBoundingClientRect().height}px`);
+  publish();
+  subMenuObserver = new ResizeObserver(publish);
+  subMenuObserver.observe(menu);
+}
+
+document.addEventListener('DOMContentLoaded', watchSubMenu);
+document.addEventListener('htmx:load', (event) => {
+  if (event.detail.elt instanceof Element && event.detail.elt.querySelector?.('nav.sub-menu, #section-nav')) watchSubMenu();
+  else if (event.detail.elt instanceof Element && event.detail.elt.matches('nav.sub-menu')) watchSubMenu();
+});
 
 // ---- section sub-menu ----
 // The links of #section-nav jump to the rows of a scrolling page through plain URL fragments. The
 // link of the row being read is marked aria-current="location": right after a jump it is the row
 // jumped to (until the user scrolls on their own, with wheel, keys, touch or the scrollbar);
-// otherwise it is the last row whose top has reached the bottom edge of the bars, or the last row
+// otherwise it is the last row whose top has reached the bottom edge of the sub-menu, or the last row
 // once the page is scrolled to its end. Only the marker changes: scrolling never touches the URL.
 let jumpTarget = null;
 
@@ -39,7 +84,7 @@ function markSection() {
     if (scrolls && window.scrollY + window.innerHeight >= root.scrollHeight - 1) {
       current = links[links.length - 1];
     } else {
-      const line = document.getElementById('bars').getBoundingClientRect().bottom + 1;
+      const line = (document.querySelector('nav.sub-menu')?.getBoundingClientRect().bottom ?? 0) + 1;
       current = links.filter((entry) => entry.row.getBoundingClientRect().top <= line).pop() ?? links[0];
     }
   }
@@ -94,11 +139,20 @@ document.addEventListener('DOMContentLoaded', () => {
 // Swapped markup (a live refresh, a new sub-menu) gets its marker back.
 document.addEventListener('htmx:load', scheduleMark);
 
+// The view state of a table page lives in the address bar: the selection, the sortings, the range
+// and the page size. Sorting, paging and range links push it there without reloading, so the
+// address bar is always current, while the markup of a filter form is not (it is rendered once).
+// Both filter forms therefore read the state from the address bar when they send their request.
+const VIEW_STATE_KEYS = [
+  'sort', 'dir', 'bsort', 'bdir', 'range', 'xs', 'xd', 'cs', 'cd', 'ms', 'md', 'ts', 'td', 'per_page',
+];
+
 // The character filter is a list of checkboxes, but the URL carries one comma-separated `chars`
-// value (and none at all when every character is selected), plus whatever else the page's view
-// state holds, only when it is not the default: the orders page's sorting, the dashboard's range.
-// A plain form would send `chars` once per box and every field, so the request URL is built here,
-// for the page named by the form's own `hx-get`. Nothing here evaluates code: the CSP forbids it.
+// value (and none at all when every character is selected). A plain form would send `chars` once
+// per box, so the request URL is built here, for the page named by the form's own `hx-get`: the
+// checked boxes, and the rest of the view state as the address bar holds it, without the page
+// number (a different selection starts on the first page). Nothing here evaluates code: the CSP
+// forbids it.
 document.addEventListener('htmx:configRequest', (event) => {
   const form = event.detail.elt;
   if (!(form instanceof HTMLElement) || !form.hasAttribute('data-character-filter')) return;
@@ -110,30 +164,34 @@ document.addEventListener('htmx:configRequest', (event) => {
   if (selected.length > 0 && selected.length < boxes.length) {
     query.push('chars=' + selected.map(encodeURIComponent).join(','));
   }
-  const value = (name) => form.querySelector(`input[name="${name}"]`)?.value;
-  // The default sorting is per page: the orders tables sort by item, the wealth list by value.
-  const defaultSort = form.dataset.defaultSort ?? 'item';
-  const defaultDir = form.dataset.defaultDir ?? 'asc';
-  const defaults = { sort: [defaultSort, defaultDir], bsort: ['item', 'asc'] };
-  for (const [sort, dir] of [['sort', 'dir'], ['bsort', 'bdir']]) {
-    if (value(sort) && !(value(sort) === defaults[sort][0] && value(dir) === defaults[sort][1])) {
-      query.push(`${sort}=${encodeURIComponent(value(sort))}`, `${dir}=${encodeURIComponent(value(dir))}`);
-    }
-  }
-  if (value('range') && value('range') !== '7d') {
-    query.push(`range=${encodeURIComponent(value('range'))}`);
-  }
-  // The Opportunities page sorts each of its four tables on its own; every one defaults to ISK/day.
-  if (form.hasAttribute('data-opportunity-sorts')) {
-    for (const [sort, dir] of [['xs', 'xd'], ['cs', 'cd'], ['ms', 'md'], ['ts', 'td']]) {
-      if (value(sort) && !(value(sort) === 'isk-day' && value(dir) === 'desc')) {
-        query.push(`${sort}=${encodeURIComponent(value(sort))}`, `${dir}=${encodeURIComponent(value(dir))}`);
-      }
-    }
+  const current = new URLSearchParams(location.search);
+  for (const key of VIEW_STATE_KEYS) {
+    if (current.get(key)) query.push(`${key}=${encodeURIComponent(current.get(key))}`);
   }
 
   for (const key of Object.keys(event.detail.parameters)) delete event.detail.parameters[key];
   event.detail.path = query.length > 0 ? `${path}?${query.join('&')}` : path;
+});
+
+// The opportunity filters save through a POST: it carries the view state of the address bar too,
+// so that the answer is the table the user is looking at, and not the one the page was rendered with.
+document.addEventListener('htmx:configRequest', (event) => {
+  const form = event.detail.elt;
+  if (!(form instanceof HTMLElement) || !form.hasAttribute('data-view-state')) return;
+  const current = new URLSearchParams(location.search);
+  for (const key of ['chars', ...VIEW_STATE_KEYS]) {
+    if (current.get(key)) event.detail.parameters[key] = current.get(key);
+    else delete event.detail.parameters[key];
+  }
+});
+
+// A live-refreshing element (`data-live`) asks for its fragment with the query of the address bar,
+// which is the view state at the time of the request: a refresh that waited for a user's change
+// (sorting, a page, a filter) never brings the old view back.
+document.addEventListener('htmx:configRequest', (event) => {
+  const element = event.detail.elt;
+  if (!(element instanceof HTMLElement) || !element.hasAttribute('data-live')) return;
+  event.detail.path = element.getAttribute('data-live') + location.search;
 });
 
 // A form that is rejected with 422 names where its answer goes (`data-invalid-target`): the form
@@ -151,12 +209,26 @@ document.addEventListener('htmx:beforeSwap', (event) => {
 });
 
 // ---- scroll positions ----
-// Live refreshes replace panels that scroll on their own (`[data-scroll-key]`), which would send
-// them back to the top. For swaps caused by a stream signal or a reconnect, the positions are
-// recorded per request before the swap and put back by key after it; the browser clamps a position
-// beyond the new content to its end. Changes the user makes (filter, sorting, range) are triggered
-// by clicks and changes, so they keep showing the new view from the top.
+// A live refresh (a stream signal or a reconnect) must not move what the user is reading: the
+// window's scroll position and the sideways scroll of every `.table-wrap` are recorded per request
+// before the swap and put back after it and once more after settling (the page is shorter for a
+// moment, and charts redraw in between); the browser clamps a position beyond the new content to
+// its end. A position is not put back once the user has scrolled or followed a link in between.
+// Changes the user makes (filter, sorting, range, page) ask for the top of the table through
+// `show:` on their own swap.
 const scrollPositions = new WeakMap();
+let scrollInputs = 0;
+
+for (const type of ['wheel', 'touchmove', 'keydown']) {
+  window.addEventListener(type, () => (scrollInputs += 1), { passive: true });
+}
+document.addEventListener('click', (event) => {
+  if (event.target instanceof Element && event.target.closest('a[href^="#"]')) scrollInputs += 1;
+});
+document.addEventListener('pointerdown', (event) => {
+  // A press on the page's own scrollbar targets the root element.
+  if (event.target === document.documentElement) scrollInputs += 1;
+});
 
 function isLiveRefresh(detail) {
   const type = detail.requestConfig?.triggeringEvent?.type ?? '';
@@ -164,52 +236,41 @@ function isLiveRefresh(detail) {
 }
 
 document.addEventListener('htmx:beforeSwap', (event) => {
-  const { target, xhr } = event.detail;
-  if (!(target instanceof Element) || !isLiveRefresh(event.detail)) return;
-  const positions = new Map();
-  for (const el of target.querySelectorAll('[data-scroll-key]')) {
-    positions.set(el.dataset.scrollKey, [el.scrollTop, el.scrollLeft]);
-  }
-  if (positions.size > 0) scrollPositions.set(xhr, positions);
+  if (!isLiveRefresh(event.detail)) return;
+  scrollPositions.set(event.detail.xhr, {
+    y: window.scrollY,
+    wraps: [...document.querySelectorAll('.table-wrap')].map((wrap) => wrap.scrollLeft),
+    inputs: scrollInputs,
+  });
 });
 
-document.addEventListener('htmx:afterSwap', (event) => {
-  const positions = scrollPositions.get(event.detail.xhr);
-  if (!positions) return;
-  scrollPositions.delete(event.detail.xhr);
-  // A swapped freshness column arrives collapsed; unfold it first, or its list has no height to scroll.
-  applyFreshness();
-  for (const el of document.querySelectorAll('[data-scroll-key]')) {
-    const position = positions.get(el.dataset.scrollKey);
-    if (position) [el.scrollTop, el.scrollLeft] = position;
-  }
-});
-
-// ---- freshness column ----
-// The freshness side column of the orders and wealth pages starts collapsed. Whether the user has
-// unfolded it lives here, for the life of the page: live refreshes and view changes swap the
-// column's HTML (always rendered collapsed), and every htmx load puts the state back on it.
-// A reload or another page starts collapsed again. Nothing is stored.
-let freshnessOpen = false;
-
-function applyFreshness() {
-  for (const section of document.querySelectorAll('[data-freshness]')) {
-    section.toggleAttribute('data-open', freshnessOpen);
-    const toggle = section.querySelector('.freshness-toggle');
-    toggle?.setAttribute('aria-expanded', String(freshnessOpen));
-    toggle?.setAttribute('title', freshnessOpen ? 'Hide freshness' : 'Show freshness');
-    const body = section.querySelector('.freshness-body');
-    if (body) body.hidden = !freshnessOpen;
-  }
+function restoreScroll(event) {
+  const saved = scrollPositions.get(event.detail.xhr);
+  if (!saved || saved.inputs !== scrollInputs) return;
+  document.querySelectorAll('.table-wrap').forEach((wrap, index) => {
+    if (saved.wraps[index] !== undefined) wrap.scrollLeft = saved.wraps[index];
+  });
+  window.scrollTo(window.scrollX, saved.y);
 }
 
-document.addEventListener('click', (event) => {
-  if (!(event.target instanceof Element) || !event.target.closest('.freshness-toggle')) return;
-  freshnessOpen = !freshnessOpen;
-  applyFreshness();
+document.addEventListener('htmx:afterSwap', restoreScroll);
+document.addEventListener('htmx:afterSettle', (event) => {
+  restoreScroll(event);
+  scrollPositions.delete(event.detail.xhr);
 });
 
-document.addEventListener('htmx:load', applyFreshness);
+// ---- pagination ----
+// Previous and next are links with their own hx-get. The page-size <select> has one URL per option,
+// so a change fetches the option's content fragment and then puts the option's page URL in the
+// address bar, the same pair of URLs the links carry.
+document.addEventListener('change', (event) => {
+  const select = event.target instanceof Element && event.target.closest('select[data-page-size]');
+  const option = select?.selectedOptions[0];
+  if (!option) return;
+  htmx
+    .ajax('GET', option.dataset.content, { target: '#content', swap: 'innerHTML show:#content:top' })
+    .then(() => history.pushState({}, '', option.dataset.href));
+});
 
 // ---- charts ----
 // Chart.js 4.5.1, vendored as static/chart.umd.min.js (MIT, see chart.js.LICENSE.md),
@@ -307,7 +368,6 @@ function baseOptions(extra) {
   return {
     animation: false,
     responsive: true,
-    maintainAspectRatio: false,
     interaction: { mode: 'nearest', intersect: true },
     plugins: {
       legend: { display: true, labels: LEGEND_LABELS },

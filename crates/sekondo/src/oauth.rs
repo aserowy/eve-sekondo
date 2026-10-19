@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
 
-/// Exactly the scopes the app asks for, and requires on every token.
+/// The scopes the app requires on every token.
 pub const REQUIRED_SCOPES: [&str; 6] = [
     "esi-markets.read_character_orders.v1",
     "esi-universe.read_structures.v1",
@@ -14,6 +14,13 @@ pub const REQUIRED_SCOPES: [&str; 6] = [
     "esi-skills.read_skills.v1",
     "esi-characters.read_standings.v1",
 ];
+
+/// The scope that tells where a character is, for the fee cards. The app asks for it but works
+/// without it: characters that linked before it existed are not asked to log in again.
+pub const LOCATION_SCOPE: &str = "esi-location.read_location.v1";
+
+/// Scopes the app asks for and makes use of when granted.
+pub const OPTIONAL_SCOPES: [&str; 1] = [LOCATION_SCOPE];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Intent {
@@ -54,7 +61,15 @@ impl PendingFlow {
             .append_pair("response_type", "code")
             .append_pair("redirect_uri", redirect_uri)
             .append_pair("client_id", client_id)
-            .append_pair("scope", &REQUIRED_SCOPES.join(" "))
+            .append_pair(
+                "scope",
+                &REQUIRED_SCOPES
+                    .iter()
+                    .chain(&OPTIONAL_SCOPES)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
             .append_pair("code_challenge", &code_challenge(&self.code_verifier))
             .append_pair("code_challenge_method", "S256")
             .append_pair("state", &self.state);

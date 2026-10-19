@@ -1,5 +1,5 @@
-<nav class="section-nav" id="section-nav" aria-label="Sections"{% if oob %} hx-swap-oob="true"{% endif %}>
-  <a href="{{ view.back_url }}">&larr; Opportunities</a>
+<nav class="sub-menu" id="section-nav" aria-label="Sections"{% if oob %} hx-swap-oob="true"{% endif %}>
+  <a href="{{ view.back_url }}">&larr; {{ view.table_title }}</a>
   {% for section in view.sections %}
   <a href="#{{ section.id }}">{{ section.label }}</a>
   {% endfor %}

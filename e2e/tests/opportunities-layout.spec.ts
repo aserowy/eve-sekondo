@@ -1,7 +1,7 @@
 import type { Page } from '@playwright/test';
 import { aliceTrained, bookOf, calm, crossed, fill } from '../support/opportunities';
-import { expect, openCharacters, stationBook, stationSeed, stubControl, stubMarket, test, unfoldFreshness } from '../support/fixtures';
-import { horizontalOverflow, verticalOverflow } from '../support/layout';
+import { expect, openCharacters, stationBook, stationSeed, stubControl, stubMarket, test } from '../support/fixtures';
+import { horizontalOverflow } from '../support/layout';
 
 const TABLES = [
   ['expansion', 'Recurring spread expansion'],
@@ -10,12 +10,11 @@ const TABLES = [
   ['trend', 'Trend'],
 ] as const;
 
-const filterBox = (page: Page) => page.locator('header.bars #filter-box');
+const filterBox = (page: Page) => page.locator('#filter-box');
 
-async function openOpportunities(page: Page) {
+async function openOpportunities(page: Page, table = 'classic') {
   await aliceTrained(page);
-  await page.locator('#main-nav').getByRole('link', { name: 'Opportunities' }).click();
-  await expect(page).toHaveURL(/\/opportunities$/);
+  await page.goto(`/opportunities/${table}`);
 }
 
 /** `count` items with a classic spread each: the buy at 100, the sell at 130, and calm history. */
@@ -32,14 +31,14 @@ async function setFilter(page: Page, label: string, value: string) {
   await input.press('Tab');
 }
 
-test('the opportunities page has no heading or loose text, and its filter box holds the filters and the context', async ({ page }) => {
+test('the page has no loose text, shows its one table, and its filter section holds the filters and the context', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openOpportunities(page);
 
   await expect(page.locator('h1')).toHaveCount(0);
   await expect(page.locator('main .station-title')).toHaveCount(0);
-  expect(await page.locator('main p').evaluateAll((ps) => ps.filter((p) => !p.closest('.panel')).length)).toBe(0);
-  for (const [id, title] of TABLES) await expect(page.locator(`main #${id} .panel-title`)).toContainText(title);
+  await expect(page.locator('#classic h2')).toHaveText('Classic spread trade');
+  for (const [id] of TABLES.filter(([id]) => id !== 'classic')) await expect(page.locator(`main #${id}`)).toHaveCount(0);
 
   const box = filterBox(page);
   await expect(box.locator('#character-filter').getByRole('checkbox', { name: 'Alice Alpha' })).toBeChecked();
@@ -53,30 +52,7 @@ test('the opportunities page has no heading or loose text, and its filter box ho
   await expect(page.locator('#main-nav #character-filter')).toHaveCount(0);
 });
 
-test('the classic table shows twenty rows, scrolls inside itself and keeps the page free of sideways scrolling', async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 600 });
-  await withItems(page, 50);
-  await expect(page.locator('#classic tbody tr')).toHaveCount(50);
-
-  await expect(async () => {
-    const scroller = page.locator('#classic .scroll');
-    const box = (await scroller.boundingBox())!;
-    const visible = await page.locator('#classic tbody tr').evaluateAll(
-      (trs, bottom) => trs.filter((tr) => tr.getBoundingClientRect().bottom <= bottom + 0.5).length,
-      box.y + box.height,
-    );
-    expect(visible).toBe(20);
-    const { scrollHeight, clientHeight } = await scroller.evaluate((el) => ({ scrollHeight: el.scrollHeight, clientHeight: el.clientHeight }));
-    expect(scrollHeight).toBeGreaterThan(clientHeight);
-  }).toPass();
-  expect(await verticalOverflow(page)).toBeGreaterThan(0);
-  expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
-  // Cells never wrap: every body row is a single line.
-  const heights = await page.locator('#classic tbody tr').evaluateAll((trs) => trs.map((tr) => tr.getBoundingClientRect().height));
-  expect(Math.max(...heights)).toBeLessThanOrEqual(22);
-});
-
-test('the sub-menu has a link per table with its row count, and the counts follow the filters', async ({ page }) => {
+test('the sub-menu switches between the four tables without row counts, keeping the selection and the sortings', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openOpportunities(page);
   await stubMarket([...bookOf(34, 100, 130, 1), ...bookOf(35, 100, 130, 3)]);
@@ -84,25 +60,47 @@ test('the sub-menu has a link per table with its row count, and the counts follo
   expect(await stationBook(page)).toBe('200 updated');
   expect((await stationSeed(page, { history: [...crossed(34, 1.1), ...crossed(35, 1.2)] })).startsWith('200 ')).toBe(true);
   await page.reload();
+  await expect(page.locator('#classic tbody tr')).toHaveCount(2);
 
-  const menu = page.locator('header.bars #section-nav');
-  await expect(menu.getByRole('link')).toHaveCount(4);
-  for (const [id, title] of TABLES) {
-    const link = menu.locator(`a[href="#${id}"]`);
-    await expect(link).toContainText(title);
-    const rows = await page.locator(`#${id} tbody tr`).count();
-    await expect(link.locator('.count')).toHaveText(String(rows));
-  }
-  await expect(menu.locator('a[href="#classic"] .count')).toHaveText('2');
+  const menu = page.locator('nav.sub-menu');
+  await expect(menu.getByRole('link')).toHaveText(TABLES.map(([, title]) => title));
+  await expect(menu.locator('.count')).toHaveCount(0);
+  await expect(menu.getByRole('link', { name: 'Classic spread trade' })).toHaveAttribute('aria-current', 'page');
+  // Not a single digit in the menu: the entries are only titles.
+  expect(await menu.innerText()).not.toMatch(/\d/);
 
+  await page.locator('#classic').getByRole('link', { name: 'Item' }).click();
+  await expect(page).toHaveURL(/cs=item&cd=asc/);
+  await menu.getByRole('link', { name: 'Trend' }).click();
+  await expect(page).toHaveURL(/\/opportunities\/trend\?cs=item&cd=asc$/);
+  await expect(menu.getByRole('link', { name: 'Trend' })).toHaveAttribute('aria-current', 'page');
+  await expect(page.locator('#trend')).toBeVisible();
+  await expect(page.locator('#classic')).toHaveCount(0);
+
+  // Raising the minimum margin until a table is empty still shows no number.
   await setFilter(page, 'Minimum margin (%)', '99');
-
-  await expect(page.locator('#classic tbody tr')).toHaveCount(0);
-  await expect(menu.locator('a[href="#classic"] .count')).toHaveText('0');
-  await expect(menu.locator('a[href="#trend"] .count')).toHaveText(String(await page.locator('#trend tbody tr').count()));
+  await expect(page.locator('#trend tbody tr')).toHaveCount(0);
+  expect(await menu.innerText()).not.toMatch(/\d/);
 });
 
-test('a rejected filter value is reported inside the filter box and leaves the tables alone', async ({ page }) => {
+test('more than fifty matches are paged: the first page has fifty, the second the rest, and a filter goes back to page 1', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await withItems(page, 80);
+  await expect(page.locator('#classic tbody tr')).toHaveCount(50);
+  const pagination = page.locator('.pagination');
+  await expect(pagination).toContainText('Page 1 of 2');
+
+  await pagination.getByRole('link', { name: 'Next' }).click();
+  await expect(page).toHaveURL(/page=2$/);
+  await expect(page.locator('#classic tbody tr')).toHaveCount(30);
+  await expect(pagination).toContainText('Page 2 of 2');
+
+  await setFilter(page, 'Item name', 'Type 10');
+  await expect(page).not.toHaveURL(/page=/);
+  await expect(pagination).not.toContainText('Page 2');
+});
+
+test('a rejected filter value is reported inside the filter section and leaves the table alone', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await withItems(page, 1);
   await expect(page.locator('#classic tbody tr')).toHaveCount(1);
@@ -120,54 +118,62 @@ test('a rejected filter value is reported inside the filter box and leaves the t
   await expect(page.locator('#classic tbody tr')).toHaveCount(1);
 });
 
-test('deselecting a character updates the fees text in the filter box', async ({ page }) => {
+test('deselecting a character updates the fees text in the filter section', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openOpportunities(page);
   await openCharacters(page);
   await page.getByRole('button', { name: 'Add character' }).click();
   await page.getByRole('link', { name: 'Bob Bravo' }).click();
-  await page.locator('#main-nav').getByRole('link', { name: 'Opportunities' }).click();
+  await page.goto('/opportunities/classic');
   const context = filterBox(page).locator('#filter-context');
   await expect(context).toContainText('Fees of Alice Alpha');
 
   await filterBox(page).getByRole('checkbox', { name: 'Alice Alpha' }).uncheck();
 
-  await expect(page).toHaveURL(/chars=90000002/);
+  await expect(page).toHaveURL(/\/opportunities\/classic\?chars=90000002/);
   await expect(context).not.toContainText('Fees of Alice Alpha');
   await expect(context).toContainText('base rates');
-  await expect(page.locator('header.bars #section-nav a')).toHaveCount(4);
+  await expect(page.locator('nav.sub-menu a')).toHaveCount(4);
+  await expect(page.locator('nav.sub-menu a').first()).toHaveAttribute('href', /chars=90000002/);
 });
 
-test('the freshness column starts collapsed, counts its warnings and stays in the window while the page scrolls', async ({ page }) => {
+test('the freshness is at the end of the page, unfolded and without a warning count', async ({ page }) => {
   await page.setViewportSize({ width: 1920, height: 500 });
   await withItems(page, 30);
-  const strip = page.locator('#opportunity-freshness');
+  const strip = page.locator('#freshness');
   await expect(strip).toBeVisible();
-  await expect(strip).not.toHaveAttribute('data-open', /.*/);
-  await expect(page.getByRole('button', { name: 'Freshness' })).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.getByRole('button', { name: 'Freshness' })).toHaveCount(0);
   await expect(strip.locator('.warnings')).toHaveCount(0);
-  await expect(strip.locator('#opportunity-freshness-body')).toBeHidden();
-
-  await unfoldFreshness(page);
   await expect(strip).toContainText('Order book');
-  await page.locator('#section-nav').getByRole('link', { name: 'Trend' }).click();
-  await expect(async () => {
-    const side = (await strip.boundingBox())!;
-    const bars = (await page.locator('header.bars').boundingBox())!;
-    expect(side.y).toBeGreaterThanOrEqual(bars.y + bars.height - 1);
-    expect(side.y + side.height).toBeLessThanOrEqual(500);
-    const tables = (await page.locator('#classic').boundingBox())!;
-    expect(side.x).toBeGreaterThanOrEqual(tables.x + tables.width);
-  }).toPass();
-  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+  await expect(strip).toContainText('Market history');
+
+  const pagination = (await page.locator('.pagination').boundingBox())!;
+  expect((await strip.boundingBox())!.y).toBeGreaterThanOrEqual(pagination.y + pagination.height - 1);
+  expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
 });
 
-test('a stale book with a failed refresh shows two warnings on the collapsed strip', async ({ page }) => {
+test('a stale book with a failed refresh shows stale and the error in the freshness', async ({ page }) => {
   await openOpportunities(page);
   await stubMarket(bookOf(34, 100, 130, 1));
   await stubControl('market-fail', { region_id: 10000002, page: 1, status: 500 });
   expect(await stationBook(page)).not.toBe('200 updated');
   await page.reload();
 
-  await expect(page.locator('#opportunity-freshness .warnings')).toHaveText('2');
+  const strip = page.locator('#freshness');
+  await expect(strip).toContainText('Stale');
+  await expect(strip).toContainText('Last error');
+  await expect(strip.locator('.warnings')).toHaveCount(0);
+});
+
+test('the filter section wraps in a narrow window and the page does not scroll sideways', async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 700 });
+  await openOpportunities(page);
+  await openCharacters(page);
+  await page.getByRole('button', { name: 'Add character' }).click();
+  await page.getByRole('link', { name: 'Bob Bravo' }).click();
+  await page.goto('/opportunities/classic');
+
+  expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
+  const box = (await filterBox(page).boundingBox())!;
+  expect(box.width).toBeLessThanOrEqual(1024);
 });

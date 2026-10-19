@@ -281,13 +281,6 @@ export async function openCharacters(page: Page): Promise<void> {
   await expect(page).toHaveURL(/\/characters$/);
 }
 
-/** Unfolds the freshness column of the orders or wealth page, if it is collapsed. */
-export async function unfoldFreshness(page: Page): Promise<void> {
-  const toggle = page.getByRole('button', { name: 'Freshness' });
-  if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
-  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
-}
-
 /** Every test starts with an empty database, a reset stub, and no network access for portraits. */
 export const test = base.extend<{ cspGuard: void; cleanSlate: void }>({
   cspGuard: [

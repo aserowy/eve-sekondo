@@ -1,6 +1,6 @@
 mod common;
 
-use common::{AppBuilder, Browser, TestApp};
+use common::{AppBuilder, Browser, TestApp, kpi};
 use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 
@@ -48,7 +48,7 @@ async fn sync(pool: &PgPool, character: i64, kind: &str, last: Option<OffsetDate
 #[sqlx::test]
 async fn unauthenticated_requests_are_redirected_to_the_landing_page(pool: PgPool) {
     let app = app(pool).await;
-    for path in ["/wealth", "/wealth/freshness"] {
+    for path in ["/wealth", "/wealth/content", "/wealth/freshness"] {
         let res = app.browser().get(&app.url(path)).await;
         assert!(res.status().is_redirection(), "{path}");
         assert_eq!(Browser::location(&res), "/", "{path}");
@@ -65,23 +65,31 @@ async fn the_page_shows_the_filter_and_the_wealth_link_as_current(pool: PgPool) 
     assert!(!html.contains("<h1"), "the navigation names the page");
     assert!(html.contains(r#"data-character-filter"#));
     assert!(html.contains(r#"hx-get="/wealth""#));
-    assert!(html.contains("Alice Alpha"));
+    let filter = html.split(r#"id="filter-box""#).nth(1).unwrap();
+    let filter = &filter[..filter.find(r#"id="content""#).unwrap()];
+    assert!(filter.contains("Alice Alpha"), "{filter}");
+    assert!(
+        filter.contains(r#"id="wealth-range-control""#),
+        "the range sits in the filter section"
+    );
+    assert!(!html.contains("panel"), "no self-made panels");
+    assert!(
+        !html.contains("<nav class=\"sub-menu\""),
+        "no sub-menu on the wealth page"
+    );
     let current: Vec<_> = html
         .split("<a ")
         .skip(1)
-        .filter(|tag| {
-            tag.split_once('>')
-                .is_some_and(|(a, _)| a.contains(r#"aria-current="page""#))
-        })
-        .map(|tag| {
-            tag.split_once('>')
+        .filter_map(|tag| tag.split_once('>'))
+        .filter(|(attrs, _)| attrs.contains(r#"aria-current="page""#))
+        .map(|(attrs, _)| {
+            attrs
+                .split(r#"aria-label=""#)
+                .nth(1)
                 .unwrap()
-                .1
-                .split('<')
+                .split('"')
                 .next()
                 .unwrap()
-                .trim()
-                .to_owned()
         })
         .collect();
     assert_eq!(current, ["Wealth"]);
@@ -288,7 +296,7 @@ fn rows(html: &str) -> Vec<Vec<String>> {
 #[sqlx::test]
 async fn unauthenticated_requests_for_the_list_are_redirected(pool: PgPool) {
     let app = app(pool).await;
-    let res = app.browser().get(&app.url("/wealth/items")).await;
+    let res = app.browser().get(&app.url("/wealth/content")).await;
     assert!(res.status().is_redirection());
     assert_eq!(Browser::location(&res), "/");
 }
@@ -307,7 +315,7 @@ async fn the_list_is_sorted_by_value_with_unpriced_rows_last_and_shows_the_total
     holds(&pool, 3, ALICE, 35, 2, true).await; // a blueprint copy: unpriced
     holds(&pool, 4, ALICE, 99, 1, false).await; // no name, no price
 
-    let html = get(&app, &browser, "/wealth/items").await;
+    let html = get(&app, &browser, "/wealth/content").await;
     let rows = rows(&html);
 
     assert_eq!(rows.len(), 4);
@@ -323,8 +331,9 @@ async fn the_list_is_sorted_by_value_with_unpriced_rows_last_and_shows_the_total
     }
     assert_eq!(rows[0][2], "1234");
     assert_eq!(rows[0][5], "Jita IV");
-    assert!(html.contains("2 unpriced"), "{html}");
-    assert!(html.contains("Total value"), "{html}");
+    // The inventory card counts the unpriced rows.
+    let inventory = kpi(&html, "kpi-inventory");
+    assert_eq!(inventory.detail.as_deref(), Some("2 unpriced rows"));
 }
 
 #[sqlx::test]
@@ -334,7 +343,7 @@ async fn amounts_are_shortened_with_the_exact_value_on_hover(pool: PgPool) {
     price(&pool, 35, Some("1234567890.12")).await;
     holds(&pool, 1, ALICE, 35, 1, false).await;
 
-    let html = get(&app, &browser, "/wealth/items").await;
+    let html = get(&app, &browser, "/wealth/content").await;
 
     assert!(html.contains(">1.235b<"), "{html}");
     assert!(html.contains(r#"title="1,234,567,890.12 ISK""#), "{html}");
@@ -346,7 +355,7 @@ async fn the_headers_sort_and_the_sorted_one_reverses(pool: PgPool) {
     let browser = signed_in(&app).await;
     holds(&pool, 1, ALICE, 34, 10, false).await;
 
-    let html = get(&app, &browser, "/wealth/items").await;
+    let html = get(&app, &browser, "/wealth/content").await;
     assert!(
         html.contains(r#"aria-sort="descending""#),
         "value is sorted by default"
@@ -363,7 +372,7 @@ async fn the_headers_sort_and_the_sorted_one_reverses(pool: PgPool) {
     let by_item = get(
         &app,
         &browser,
-        "/wealth/items?sort=item&dir=asc&range=30d&chars=90000001",
+        "/wealth/content?sort=item&dir=asc&range=30d&chars=90000001",
     )
     .await;
     assert!(by_item.contains(r#"aria-sort="ascending""#));
@@ -378,7 +387,7 @@ async fn an_empty_list_says_so(pool: PgPool) {
     let app = app(pool).await;
     let browser = signed_in(&app).await;
 
-    let html = get(&app, &browser, "/wealth/items").await;
+    let html = get(&app, &browser, "/wealth/content").await;
 
     assert!(html.contains("No items."), "{html}");
     assert!(!html.contains("<table"));
@@ -396,12 +405,12 @@ async fn the_list_covers_only_the_selected_characters_of_the_account(pool: PgPoo
     holds(&pool, 2, BOB, 34, 2, false).await;
     holds(&pool, 3, 90000003, 34, 999, false).await;
 
-    let all = rows(&get(&app, &alice, "/wealth/items").await);
+    let all = rows(&get(&app, &alice, "/wealth/content").await);
     assert_eq!(all.len(), 2);
-    let narrowed = rows(&get(&app, &alice, &format!("/wealth/items?chars={BOB}")).await);
+    let narrowed = rows(&get(&app, &alice, &format!("/wealth/content?chars={BOB}")).await);
     assert_eq!(narrowed.len(), 1);
     assert_eq!(narrowed[0][0], "Bob Bravo");
-    let sneaky = rows(&get(&app, &alice, "/wealth/items?chars=90000003").await);
+    let sneaky = rows(&get(&app, &alice, "/wealth/content?chars=90000003").await);
     assert_eq!(
         sneaky.len(),
         2,
@@ -417,7 +426,7 @@ async fn the_page_embeds_the_list_with_its_live_refresh(pool: PgPool) {
     let html = get(&app, &browser, "/wealth?sort=item&dir=asc").await;
 
     assert!(html.contains(r#"id="wealth-items""#));
-    assert!(html.contains(r#"hx-get="/wealth/items?sort=item&#38;dir=asc""#));
+    assert!(html.contains(r#"hx-get="/wealth/content?sort=item&#38;dir=asc""#));
     assert!(html.contains("sse:wealth-updated, sse:orders-updated, htmx:sseOpen from:body"));
     assert!(!html.contains("sse:market-updated"));
 }
@@ -427,7 +436,7 @@ async fn the_page_embeds_the_list_with_its_live_refresh(pool: PgPool) {
 #[sqlx::test]
 async fn unauthenticated_requests_for_the_graph_are_redirected(pool: PgPool) {
     let app = app(pool).await;
-    let res = app.browser().get(&app.url("/wealth/graph")).await;
+    let res = app.browser().get(&app.url("/wealth/content")).await;
     assert!(res.status().is_redirection());
     assert_eq!(Browser::location(&res), "/");
 }
@@ -437,7 +446,7 @@ async fn without_history_the_graph_says_so_and_draws_nothing(pool: PgPool) {
     let app = app(pool).await;
     let browser = signed_in(&app).await;
 
-    let html = get(&app, &browser, "/wealth/graph").await;
+    let html = get(&app, &browser, "/wealth/content").await;
 
     assert!(html.contains("No history yet."));
     assert!(!html.contains("<canvas"));
@@ -453,7 +462,7 @@ async fn the_graph_carries_four_series_and_the_range_links_push_the_page_url(poo
         .await
         .unwrap();
 
-    let html = get(&app, &browser, "/wealth/graph?range=30d&chars=90000001").await;
+    let html = get(&app, &browser, "/wealth/content?range=30d&chars=90000001").await;
 
     assert!(html.contains(r#"data-chart="wealth-stack""#));
     for name in ["Sell orders", "Buy escrow", "Wallet", "Inventory"] {
@@ -467,15 +476,14 @@ async fn the_graph_carries_four_series_and_the_range_links_push_the_page_url(poo
         html.contains(r#"hx-push-url="/wealth?range=90d""#),
         "{html}"
     );
-    assert!(html.contains(r#"hx-get="/wealth/graph?range=90d""#));
+    assert!(html.contains(r#"hx-get="/wealth/content?range=90d""#));
     // A switch cancels a refresh still in flight, which would put the old range back.
-    assert!(html.contains(r##"hx-sync="#wealth-graph:replace""##));
+    assert!(html.contains(r##"hx-sync="#content:replace""##));
     // The default range links to the bare page.
     assert!(html.contains(r#"hx-push-url="/wealth""#));
     // The live refresh keeps the range, and the filter's hidden input follows the switch.
-    assert!(html.contains(r#"hx-get="/wealth/graph?range=30d""#));
+    assert!(html.contains(r#"hx-get="/wealth/content?range=30d""#));
     assert!(html.contains(r#"id="wealth-range" name="range" value="30d" hx-swap-oob="true""#));
-    assert!(html.contains("sse:wealth-updated, sse:orders-updated, htmx:sseOpen from:body"));
 }
 
 #[sqlx::test]
@@ -483,13 +491,11 @@ async fn an_unknown_range_selects_seven_days(pool: PgPool) {
     let app = app(pool).await;
     let browser = signed_in(&app).await;
 
-    let html = get(&app, &browser, "/wealth/graph?range=1y").await;
+    let html = get(&app, &browser, "/wealth/content?range=1y").await;
 
     assert!(html.contains(r#"value="7d""#));
     assert_eq!(html.matches(r#"aria-current="true""#).count(), 1);
 }
-
-const WARNINGS_BADGE: &str = r#"class="badge stale warnings">"#;
 
 #[sqlx::test]
 async fn a_character_needing_relogin_with_stale_wallet_and_assets_counts_once(pool: PgPool) {
@@ -502,10 +508,8 @@ async fn a_character_needing_relogin_with_stale_wallet_and_assets_counts_once(po
 
     let html = get(&app, &browser, "/wealth/freshness").await;
 
-    assert!(
-        html.contains(&format!("{WARNINGS_BADGE}1</mark>")),
-        "{html}"
-    );
+    assert!(html.contains("Stale"), "{html}");
+    assert!(!html.contains("warnings"), "no warning count: {html}");
 }
 
 #[sqlx::test]
@@ -518,10 +522,8 @@ async fn stale_assets_alone_count_as_a_warning(pool: PgPool) {
 
     let html = get(&app, &browser, "/wealth/freshness").await;
 
-    assert!(
-        html.contains(&format!("{WARNINGS_BADGE}1</mark>")),
-        "{html}"
-    );
+    assert!(html.contains("Stale"), "{html}");
+    assert!(!html.contains("warnings"), "no warning count: {html}");
 }
 
 #[sqlx::test]
@@ -535,4 +537,157 @@ async fn fresh_wallet_and_assets_show_no_warning_count(pool: PgPool) {
     let html = get(&app, &browser, "/wealth/freshness").await;
 
     assert!(!html.contains("warnings"), "{html}");
+}
+
+// ---- KPI cards ----
+
+/// Alice holds 50m ISK in her wallet, sells 100m and has 20m in escrow, and her priced inventory is
+/// worth 30m, with two rows without a price (blueprint copies).
+async fn alice_worth_200m(pool: &PgPool) {
+    for statement in [
+        "INSERT INTO wallet_balances (character_id, polled_at, balance) VALUES (90000001, now(), 50000000)",
+        "INSERT INTO order_poll_totals (character_id, polled_at, sell_value, escrow, sell_corp, \
+         escrow_corp, sell_count, buy_count) VALUES (90000001, now(), 100000000, 20000000, 0, 0, 1, 1)",
+        "INSERT INTO inventory_values (character_id, recorded_at, value) VALUES (90000001, now(), 30000000)",
+    ] {
+        sqlx::query(statement).execute(pool).await.unwrap();
+    }
+    holds(pool, 1, ALICE, 34, 1, true).await;
+    holds(pool, 2, ALICE, 35, 1, true).await;
+}
+
+#[sqlx::test]
+async fn the_cards_read_the_current_figures_and_count_the_unpriced_rows(pool: PgPool) {
+    let app = app(pool.clone()).await;
+    let browser = signed_in(&app).await;
+    alice_worth_200m(&pool).await;
+
+    let html = get(&app, &browser, "/wealth").await;
+
+    for (id, name, value) in [
+        ("kpi-wealth", "Wealth", "200m"),
+        ("kpi-wallet", "Wallet", "50m"),
+        ("kpi-sell", "Sell orders", "100m"),
+        ("kpi-escrow", "Buy escrow", "20m"),
+        ("kpi-inventory", "Inventory", "30m"),
+    ] {
+        assert_eq!(kpi(&html, id).value, value, "{name}");
+        assert!(html.contains(&format!("<header>{name}</header>")), "{name}");
+    }
+    assert_eq!(
+        kpi(&html, "kpi-inventory").detail.as_deref(),
+        Some("2 unpriced rows")
+    );
+    assert_eq!(kpi(&html, "kpi-wealth").detail, None);
+    assert_eq!(kpi(&html, "kpi-wealth").title, "200,000,000.00 ISK");
+}
+
+#[sqlx::test]
+async fn the_total_equals_the_dashboard_wealth_card_for_the_same_selection(pool: PgPool) {
+    let app = app(pool.clone()).await;
+    let browser = signed_in(&app).await;
+    alice_worth_200m(&pool).await;
+
+    let wealth = get(&app, &browser, "/wealth").await;
+    let dashboard = get(&app, &browser, "/dashboard").await;
+
+    let tile = dashboard.split(r#"id="tile-wealth""#).nth(1).unwrap();
+    let tile = &tile[..tile.find("</article>").unwrap()];
+    let title = tile
+        .split(r#"title=""#)
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    assert_eq!(kpi(&wealth, "kpi-wealth").title, title);
+}
+
+#[sqlx::test]
+async fn the_range_does_not_change_the_cards(pool: PgPool) {
+    let app = app(pool.clone()).await;
+    let browser = signed_in(&app).await;
+    alice_worth_200m(&pool).await;
+
+    let cards = |html: &str| {
+        [
+            "kpi-wealth",
+            "kpi-wallet",
+            "kpi-sell",
+            "kpi-escrow",
+            "kpi-inventory",
+        ]
+        .map(|id| kpi(html, id).title)
+    };
+    let week = cards(&get(&app, &browser, "/wealth/content").await);
+    let day = cards(&get(&app, &browser, "/wealth/content?range=24h").await);
+    let quarter = cards(&get(&app, &browser, "/wealth/content?range=90d").await);
+
+    assert_eq!(week, day);
+    assert_eq!(week, quarter);
+}
+
+// ---- pagination ----
+
+#[sqlx::test]
+async fn three_hundred_rows_read_page_one_of_six_and_the_cards_do_not_depend_on_the_page(
+    pool: PgPool,
+) {
+    let app = app(pool.clone()).await;
+    let browser = signed_in(&app).await;
+    for i in 0..300 {
+        price(&pool, 1000 + i, Some("1.00")).await;
+        holds(&pool, 100 + i, ALICE, 1000 + i, 1, false).await;
+    }
+
+    let first = get(&app, &browser, "/wealth/content?sort=item&dir=asc").await;
+    let second = get(&app, &browser, "/wealth/content?sort=item&dir=asc&page=2").await;
+
+    assert!(first.contains("Page 1 of 6"), "{first}");
+    assert_eq!(rows(&first).len(), 50);
+    assert!(second.contains("Page 2 of 6"));
+    assert_eq!(rows(&second).len(), 50);
+    assert_ne!(rows(&first)[0], rows(&second)[0]);
+    assert_eq!(
+        kpi(&first, "kpi-wealth").title,
+        kpi(&second, "kpi-wealth").title
+    );
+    // The sorting survives in the links of the second page.
+    let page = get(&app, &browser, "/wealth?sort=item&dir=asc&page=2")
+        .await
+        .replace("&#38;", "&");
+    assert!(
+        page.contains(r#"hx-get="/wealth/content?sort=item&dir=asc&page=2""#),
+        "{page}"
+    );
+}
+
+#[sqlx::test]
+async fn a_range_switch_and_a_sorting_start_on_the_first_page(pool: PgPool) {
+    let app = app(pool.clone()).await;
+    let browser = signed_in(&app).await;
+    holds(&pool, 1, ALICE, 34, 1, false).await;
+
+    let html = get(
+        &app,
+        &browser,
+        "/wealth/content?page=2&per_page=25&range=24h",
+    )
+    .await
+    .replace("&#38;", "&");
+
+    let link = |needle: &str| {
+        html.split("<a ")
+            .find(|a| a.contains(needle))
+            .unwrap()
+            .to_owned()
+    };
+    for needle in ["range=30d", "sort=item"] {
+        let link = link(needle);
+        assert!(
+            !link.contains("&page=") && !link.contains("?page="),
+            "{link}"
+        );
+        assert!(link.contains("per_page=25"), "{link}");
+    }
 }

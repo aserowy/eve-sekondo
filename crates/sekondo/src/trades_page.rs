@@ -15,8 +15,10 @@ use crate::{
     app::AppState,
     csrf, format,
     freshness::{FreshnessView, freshness_view, list_transactions_freshness},
+    kpi::Kpi,
     orders::FilterEntry,
     pages::{self, Nav, Page},
+    pagination::{Link, PageView, Paging, paginate},
     range::Range,
     selection::{CharacterSelection, ViewQuery},
     trades::{self, TradeRow},
@@ -48,21 +50,12 @@ pub struct RowView {
     pub margin_negative: bool,
 }
 
-pub struct TotalsView {
-    pub bought: String,
-    pub bought_exact: String,
-    pub sold: String,
-    pub sold_exact: String,
-    pub margin: String,
-    /// The exact margin sum, and how many sales it leaves out.
-    pub margin_title: String,
-}
-
 pub struct RangeLink {
     pub label: &'static str,
-    /// The page's URL with this range, for the address bar and without scripts.
+    /// The page's URL with this range, from the first page, for the address bar and without
+    /// scripts.
     pub href: String,
-    /// The table fragment's URL with this range.
+    /// The content fragment's URL with this range.
     pub table_url: String,
     pub current: bool,
 }
@@ -72,24 +65,25 @@ pub struct TradesView {
     pub characters: Vec<FilterEntry>,
     pub range: Range,
     pub ranges: Vec<RangeLink>,
+    /// The content fragment's URL with the whole view state, for live refreshes.
     pub table_url: String,
     pub freshness_url: String,
+    pub kpis: Vec<Kpi>,
     pub rows: Vec<RowView>,
-    pub totals: TotalsView,
+    pub pager: PageView,
     pub freshness: Vec<FreshnessView>,
-    /// How many of the selected characters are stale or need re-login.
-    pub warnings: usize,
 }
 
-/// The view state a URL carries: the selection and the range, each only when it is not the
-/// default.
+/// The view state a URL carries: the selection, the range and the paging, each only when it is
+/// not the default.
 struct ViewState {
     chars: Option<String>,
     range: Range,
+    paging: Paging,
 }
 
 impl ViewState {
-    fn query(&self, with_range: bool) -> String {
+    fn query(&self, with_range: bool, with_paging: bool) -> String {
         let mut pairs = url::form_urlencoded::Serializer::new(String::new());
         if let Some(chars) = &self.chars {
             pairs.append_pair("chars", chars);
@@ -98,7 +92,16 @@ impl ViewState {
             pairs.append_pair("range", self.range.name());
         }
         // The commas stay readable in the URL, as in bookmarks people write by hand.
-        let query = pairs.finish().replace("%2C", ",");
+        let mut query = pairs.finish().replace("%2C", ",");
+        if with_paging {
+            let paging = self.paging.query();
+            if !paging.is_empty() {
+                if !query.is_empty() {
+                    query.push('&');
+                }
+                query.push_str(&paging);
+            }
+        }
         if query.is_empty() {
             query
         } else {
@@ -106,10 +109,20 @@ impl ViewState {
         }
     }
 
+    /// Another range, from the first page.
     fn with_range(&self, range: Range) -> Self {
         Self {
             chars: self.chars.clone(),
             range,
+            paging: self.paging.first(),
+        }
+    }
+
+    fn with_paging(&self, paging: Paging) -> Self {
+        Self {
+            chars: self.chars.clone(),
+            range: self.range,
+            paging,
         }
     }
 }
@@ -176,8 +189,8 @@ fn row_view(row: &TradeRow) -> RowView {
     }
 }
 
-/// Summed over the listed rows, so the totals always match the table.
-fn totals_view(rows: &[TradeRow]) -> TotalsView {
+/// Summed over every transaction of the range, not only the ones on the shown page.
+fn kpis(rows: &[TradeRow]) -> Vec<Kpi> {
     let mut bought: i128 = 0;
     let mut sold: i128 = 0;
     let mut margin: i128 = 0;
@@ -201,14 +214,22 @@ fn totals_view(rows: &[TradeRow]) -> TotalsView {
             if left_out == 1 { "sale" } else { "sales" }
         ));
     }
-    TotalsView {
-        bought: format::isk_short(bought),
-        bought_exact: format::isk_exact(bought),
-        sold: format::isk_short(sold),
-        sold_exact: format::isk_exact(sold),
-        margin: format::isk_short(margin),
-        margin_title,
-    }
+    let margin_card =
+        Kpi::new("Margin", format::isk_short(margin), margin_title).with_id("kpi-margin");
+    vec![
+        Kpi::new(
+            "Bought",
+            format::isk_short(bought),
+            format::isk_exact(bought),
+        )
+        .with_id("kpi-bought"),
+        Kpi::new("Sold", format::isk_short(sold), format::isk_exact(sold)).with_id("kpi-sold"),
+        if margin < 0 {
+            margin_card.as_error()
+        } else {
+            margin_card
+        },
+    ]
 }
 
 async fn build_view(
@@ -230,9 +251,10 @@ async fn build_view(
     let ids: Vec<i64> = characters.iter().map(|c| c.character_id).collect();
     let selection = query.selection(&ids);
     let now: OffsetDateTime = state.clock.now();
-    let view_state = ViewState {
+    let mut view_state = ViewState {
         chars: selection.param(),
         range: Range::parse(query.range.as_deref()),
+        paging: query.paging(),
     };
     let listed = trades::list(
         &state.pool,
@@ -248,10 +270,16 @@ async fn build_view(
             .iter()
             .map(|r| freshness_view(r, now, TRANSACTIONS_INTERVAL))
             .collect();
-    let warnings = freshness
-        .iter()
-        .filter(|f| f.stale || f.needs_relogin)
-        .count();
+    let link_to = |paging: Paging| {
+        let query = view_state.with_paging(paging).query(true, true);
+        Link {
+            href: format!("/trades{query}"),
+            content: format!("/trades/table{query}"),
+        }
+    };
+    let (page_rows, pager) = paginate(&listed, view_state.paging, link_to);
+    // What the URLs below carry is the page actually shown, after clamping.
+    view_state.paging = pager.paging;
     let view = TradesView {
         characters: characters
             .iter()
@@ -268,18 +296,18 @@ async fn build_view(
                 let target = view_state.with_range(range);
                 RangeLink {
                     label: range.label(),
-                    href: format!("/trades{}", target.query(true)),
-                    table_url: format!("/trades/table{}", target.query(true)),
+                    href: format!("/trades{}", target.query(true, true)),
+                    table_url: format!("/trades/table{}", target.query(true, true)),
                     current: range == view_state.range,
                 }
             })
             .collect(),
-        table_url: format!("/trades/table{}", view_state.query(true)),
-        freshness_url: format!("/trades/freshness{}", view_state.query(false)),
-        rows: listed.iter().map(row_view).collect(),
-        totals: totals_view(&listed),
+        table_url: format!("/trades/table{}", view_state.query(true, true)),
+        freshness_url: format!("/trades/freshness{}", view_state.query(false, false)),
+        kpis: kpis(&listed),
+        rows: page_rows.iter().map(row_view).collect(),
+        pager,
         freshness,
-        warnings,
     };
     Ok(Some((view, selection)))
 }

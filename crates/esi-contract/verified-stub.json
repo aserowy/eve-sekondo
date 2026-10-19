@@ -1,11 +1,13 @@
 {
-  "fingerprint": "6f79cc00b1f61a94835957d4b66b3fc015fcb7974ae97e1888c8989297d94f57",
-  "verified_at": "2026-10-17T14:40:27.55317409Z",
+  "fingerprint": "63e4ae21c2533cd0c853c0e9c7f588bdf61f74af8638cec8819f36aa26537733",
+  "verified_at": "2026-10-19T06:55:18.534000186Z",
   "variants": [
     "assets/forbidden",
     "assets/items",
     "authorization/callback",
     "authorization/request",
+    "character-location/forbidden",
+    "character-location/station",
     "jwks/rsa-keys",
     "market-history/history",
     "market-orders/orders",

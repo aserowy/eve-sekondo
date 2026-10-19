@@ -19,9 +19,6 @@ use super::{
 };
 use crate::orders::Dir;
 
-/// Rows per table.
-pub const ROWS: usize = 50;
-
 /// The four tables, in the order the page shows them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Table {
@@ -638,7 +635,7 @@ pub fn detail<'a>(
                 if !search.is_empty() && !stats.display_name().to_lowercase().contains(&search) {
                     "Your name search excludes it.".to_owned()
                 } else {
-                    format!("It is not among the {ROWS} shown.")
+                    "It is not listed.".to_owned()
                 }
             }
         },
@@ -653,8 +650,8 @@ pub fn detail<'a>(
     })
 }
 
-/// The rows of one table: the items it lists that pass the shared rules and the filters, sorted,
-/// at most [`ROWS`] of them.
+/// The rows of one table: every item it lists that passes the shared rules and the filters, sorted.
+/// The page shows a slice of them.
 pub fn rows(table: Table, all: &[Stats], context: &Context<'_>, sort: Sort) -> Vec<Row> {
     let settings = context.settings;
     let search = settings.search.trim().to_lowercase();
@@ -698,6 +695,5 @@ pub fn rows(table: Table, all: &[Stats], context: &Context<'_>, sort: Sort) -> V
         };
         ordering.then(a.type_id.cmp(&b.type_id))
     });
-    rows.truncate(ROWS);
     rows
 }

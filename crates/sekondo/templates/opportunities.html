@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Opportunities · Sekondo{% endblock %}
+{% block title %}{{ view.table.title }} · Opportunities · Sekondo{% endblock %}
 
 {% block head %}
 <script src="/static/chart.umd.min.js"></script>
@@ -8,18 +8,19 @@
 
 {% block subnav %}
 {% let oob = false %}
-{% include "opportunities_section_nav.html" %}
+{% include "opportunities_sub_menu.html" %}
 {% endblock %}
 
 {% block filters %}
 {% let oob = false %}
 <div class="filter-box" id="filter-box">
-<form id="character-filter" data-character-filter data-opportunity-sorts hx-get="/opportunities" hx-trigger="change" hx-target="#opportunities-view" hx-select="#opportunities-view" hx-select-oob="#main-nav, #filter-box, #section-nav" hx-swap="outerHTML" hx-push-url="true">
+<form id="character-filter" data-character-filter data-opportunity-sorts hx-get="{{ view.page_path }}" hx-trigger="change" hx-target="#content" hx-sync="#content:replace" hx-select="#content > *" hx-select-oob="#main-nav, #sub-menu, #filter-box, #freshness" hx-swap="innerHTML show:#content:top" hx-push-url="true">
   {% let characters = view.characters %}
   {% include "character_filter.html" %}
   {% for (name, value) in view.filters.sorts %}
   <input type="hidden" name="{{ name }}" value="{{ value }}">
   {% endfor %}
+  <input type="hidden" name="per_page" value="{{ view.filters.per_page }}">
 </form>
 {% include "opportunities_filters.html" %}
 {% include "opportunities_filter_error.html" %}
@@ -29,13 +30,11 @@
 
 {% block content %}
 <div hx-ext="sse" sse-connect="/events">
-<div id="opportunities-view">
-  <div id="opportunity-tables" hx-get="{{ view.tables_url }}" hx-trigger="sse:opportunities-updated, sse:orders-updated, sse:fees-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
-    {% include "opportunities_tables.html" %}
-  </div>
-  <section id="opportunity-freshness" class="panel" data-freshness hx-get="{{ view.freshness_url }}" hx-trigger="sse:opportunities-updated, sse:orders-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
+  <section id="content" data-live="{{ view.content_path }}" hx-get="{{ view.content_url }}" hx-trigger="sse:opportunities-updated, sse:orders-updated, sse:fees-updated, htmx:sseOpen from:body" hx-swap="innerHTML" hx-sync="this:queue last">
+    {% include "opportunities_content.html" %}
+  </section>
+  <section id="freshness" data-live="/opportunities/freshness" hx-get="{{ view.freshness_url }}" hx-trigger="sse:opportunities-updated, sse:orders-updated, htmx:sseOpen from:body" hx-swap="innerHTML" hx-sync="this:queue last">
     {% include "opportunities_freshness.html" %}
   </section>
-</div>
 </div>
 {% endblock %}

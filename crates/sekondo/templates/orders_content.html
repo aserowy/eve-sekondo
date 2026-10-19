@@ -1,0 +1,13 @@
+<div class="kpis">
+  {% for kpi in view.kpis %}{% include "kpi_card.html" %}{% endfor %}
+</div>
+<section id="{{ view.table_id }}">
+  {% if view.table.rows.is_empty() %}
+  <p>{{ view.empty }}</p>
+  {% else %}
+  {% let table = view.table %}
+  {% include "orders_table.html" %}
+  {% endif %}
+</section>
+{% let pager = view.pager %}
+{% include "pagination.html" %}

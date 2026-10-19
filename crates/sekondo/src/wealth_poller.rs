@@ -232,7 +232,10 @@ impl WealthPoller {
                 );
             }
         };
-        let fetched = match self.fetch_transactions(character_id, token, full_read).await {
+        let fetched = match self
+            .fetch_transactions(character_id, token, full_read)
+            .await
+        {
             Ok(fetched) => fetched,
             Err(e) => {
                 return (

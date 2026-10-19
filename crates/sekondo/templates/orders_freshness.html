@@ -1,13 +1,5 @@
-<div class="freshness-head">
-  <button type="button" class="freshness-toggle" aria-controls="freshness-body" aria-expanded="false" aria-label="Freshness" title="Show freshness"{% if view.warnings > 0 %} aria-describedby="freshness-warnings"{% endif %}>
-    <span class="when-closed">{% include "icons/panel-right-open.html" %}</span><span class="when-open">{% include "icons/panel-right-close.html" %}</span>
-    {% if view.warnings > 0 %}<mark class="badge stale warnings">{{ view.warnings }}</mark>{% endif %}
-  </button>
-  {% if view.warnings > 0 %}<span id="freshness-warnings" hidden>{% if view.warnings == 1 %}1 character needs attention{% else %}{{ view.warnings }} characters need attention{% endif %}</span>{% endif %}
-</div>
-<div id="freshness-body" class="freshness-body" hidden>
-<h2 class="panel-title">Freshness</h2>
-<ul class="freshness scroll" data-scroll-key="freshness">
+<h2>Freshness</h2>
+<ul class="freshness">
   {% for f in view.freshness %}
   <li>
     <strong>{{ f.name }}</strong>
@@ -15,24 +7,6 @@
     {% if f.needs_relogin %}<a class="relogin" href="/auth/add">{% include "icons/log-in.html" %}Log in again</a>{% endif %}
     {% if f.waiting_for_first_update %}<mark class="badge">Waiting for first update</mark>{% endif %}
     <small>Last update: {{ f.last_update }} EVE time · Next update: {{ f.next_update }}</small>
-    {% if !f.locations.is_empty() %}
-    <table class="fees">
-      <thead>
-        <tr><th>Location</th><th>Sales tax</th><th>Broker fee</th><th>Min. margin</th></tr>
-      </thead>
-      <tbody>
-        {% for l in f.locations %}
-        <tr>
-          <td>{{ l.name }}</td>
-          <td data-fee="sales-tax"{% if let Some(title) = l.sales_tax.title %} title="{{ title }}"{% endif %}>{{ l.sales_tax.text }}</td>
-          <td data-fee="broker-fee"{% if let Some(title) = l.broker_fee.title %} title="{{ title }}"{% endif %}>{{ l.broker_fee.text }}</td>
-          <td data-fee="min-margin"{% if let Some(title) = l.min_margin.title %} title="{{ title }}"{% endif %}>{{ l.min_margin.text }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-    {% endif %}
   </li>
   {% endfor %}
 </ul>
-</div>

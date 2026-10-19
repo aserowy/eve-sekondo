@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="{{ csrf_token }}">
   <title>{% block title %}Sekondo{% endblock %}</title>
+  <link rel="stylesheet" href="/static/pico.min.css">
   <link rel="stylesheet" href="/static/app.css">
   <script src="/static/htmx.min.js"></script>
   <script src="/static/htmx-ext-sse.min.js"></script>
@@ -12,26 +13,28 @@
   <script src="/static/app.js"></script>
 </head>
 <body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
+  <div class="shell">
   {% if let Some(nav) = nav %}
-  <header class="bars" id="bars">
-  <nav class="main-nav" id="main-nav" aria-label="Main">
-    <strong class="brand">Sekondo</strong>
-    <ul class="links">
-      <li><a href="{{ nav.dashboard_href() }}"{% if nav.dashboard_current() %} aria-current="page"{% endif %}>Dashboard</a></li>
-      <li><a href="{{ nav.orders_href() }}"{% if nav.orders_current() %} aria-current="page"{% endif %}>Orders</a></li>
-      <li><a href="{{ nav.wealth_href() }}"{% if nav.wealth_current() %} aria-current="page"{% endif %}>Wealth</a></li>
-      <li><a href="{{ nav.trades_href() }}"{% if nav.trades_current() %} aria-current="page"{% endif %}>Trades</a></li>
-      <li><a href="{{ nav.opportunities_href() }}"{% if nav.opportunities_current() %} aria-current="page"{% endif %}>Opportunities</a></li>
-    </ul>
-    <a class="icon-control" href="{{ nav.characters_href() }}" aria-label="Characters" title="Characters"{% if nav.characters_current() %} aria-current="page"{% endif %}>{% include "icons/users.html" %}</a>
-    <button class="icon-control" hx-post="/auth/logout" aria-label="Sign out" title="Sign out">{% include "icons/log-out.html" %}</button>
-  </nav>
-  {% block subnav %}{% endblock %}
-  {% block filters %}{% endblock %}
-  </header>
+  <aside class="sidebar" id="sidebar">
+    <button class="menu-toggle" type="button" aria-controls="main-nav" aria-expanded="true" aria-label="Menu" title="Menu"><span class="when-expanded">{% include "icons/panel-left-close.html" %}</span><span class="when-collapsed">{% include "icons/panel-left-open.html" %}</span></button>
+    <nav aria-label="Main" id="main-nav">
+      <ul>
+        <li><a href="{{ nav.dashboard_href() }}" aria-label="Dashboard" title="Dashboard"{% if nav.dashboard_current() %} aria-current="page"{% endif %}>{% include "icons/layout-dashboard.html" %}<span class="label">Dashboard</span></a></li>
+        <li><a href="{{ nav.characters_href() }}" aria-label="Characters" title="Characters"{% if nav.characters_current() %} aria-current="page"{% endif %}>{% include "icons/users.html" %}<span class="label">Characters</span></a></li>
+        <li><a href="{{ nav.wealth_href() }}" aria-label="Wealth" title="Wealth"{% if nav.wealth_current() %} aria-current="page"{% endif %}>{% include "icons/wallet.html" %}<span class="label">Wealth</span></a></li>
+        <li><a href="{{ nav.trades_href() }}" aria-label="Trades" title="Trades"{% if nav.trades_current() %} aria-current="page"{% endif %}>{% include "icons/arrow-left-right.html" %}<span class="label">Trades</span></a></li>
+        <li><a href="{{ nav.orders_href() }}" aria-label="Orders" title="Orders"{% if nav.orders_current() %} aria-current="page"{% endif %}>{% include "icons/list.html" %}<span class="label">Orders</span></a></li>
+        <li><a href="{{ nav.opportunities_href() }}" aria-label="Opportunities" title="Opportunities"{% if nav.opportunities_current() %} aria-current="page"{% endif %}>{% include "icons/lightbulb.html" %}<span class="label">Opportunities</span></a></li>
+        <li class="bottom"><button class="link" hx-post="/auth/logout" aria-label="Sign out" title="Sign out">{% include "icons/log-out.html" %}<span class="label">Sign out</span></button></li>
+      </ul>
+    </nav>
+  </aside>
   {% endif %}
-  <main class="{% block page_type %}page-scroll{% endblock %}">
+  <main class="container-fluid">
+    {% block subnav %}{% endblock %}
+    {% block filters %}{% endblock %}
     {% block content %}{% endblock %}
   </main>
+  </div>
 </body>
 </html>

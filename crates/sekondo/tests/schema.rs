@@ -500,6 +500,7 @@ async fn the_fee_tables_exist_and_the_public_ones_have_no_owner(pool: PgPool) {
         "character_skills",
         "character_standings",
         "station_owners",
+        "character_locations",
         "fee_sync",
     ] {
         assert_eq!(count(&pool, table).await, 0, "{table}");
@@ -545,7 +546,7 @@ async fn the_faction_table_is_loaded_from_the_checked_in_csv(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn fee_sync_only_knows_skills_and_standings(pool: PgPool) {
+async fn fee_sync_only_knows_skills_standings_and_location(pool: PgPool) {
     let account = insert_account(&pool).await;
     insert_character(&pool, account, 1).await;
     let bad = sqlx::query(
@@ -554,7 +555,7 @@ async fn fee_sync_only_knows_skills_and_standings(pool: PgPool) {
     .execute(&pool)
     .await;
     assert!(bad.is_err());
-    for kind in ["skills", "standings"] {
+    for kind in ["skills", "standings", "location"] {
         sqlx::query(
             "INSERT INTO fee_sync (character_id, kind, next_poll_at) VALUES (1, $1, now())",
         )
@@ -569,6 +570,30 @@ async fn fee_sync_only_knows_skills_and_standings(pool: PgPool) {
     .execute(&pool)
     .await;
     assert!(twice.is_err(), "one row per character and kind");
+}
+
+#[sqlx::test]
+async fn a_character_has_one_location_that_is_a_station_or_a_structure(pool: PgPool) {
+    let account = insert_account(&pool).await;
+    insert_character(&pool, account, 1).await;
+    let insert = |kind: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO character_locations (character_id, location_id, kind, updated_at) \
+                 VALUES (1, 60003760, $1, now())",
+            )
+            .bind(kind)
+            .execute(&pool)
+            .await
+        }
+    };
+    assert!(
+        insert("system").await.is_err(),
+        "only stations and structures"
+    );
+    insert("structure").await.unwrap();
+    assert!(insert("station").await.is_err(), "one row per character");
 }
 
 #[sqlx::test]
@@ -604,6 +629,7 @@ async fn deleting_a_character_removes_its_fee_data_and_keeps_the_public_tables(p
         "INSERT INTO character_skills (character_id, skill_id, active_level) VALUES (1, 16622, 4)",
         "INSERT INTO character_standings (character_id, from_id, from_type, standing) VALUES (1, 500001, 'faction', 2)",
         "INSERT INTO fee_sync (character_id, kind, next_poll_at) VALUES (1, 'skills', now())",
+        "INSERT INTO character_locations (character_id, location_id, kind, updated_at) VALUES (1, 60003760, 'station', now())",
         "INSERT INTO station_owners (station_id, owner_id, resolved_at) VALUES (60003760, 1000035, now())",
     ] {
         sqlx::query(statement).execute(&pool).await.unwrap();
@@ -614,7 +640,12 @@ async fn deleting_a_character_removes_its_fee_data_and_keeps_the_public_tables(p
         .await
         .unwrap();
 
-    for table in ["character_skills", "character_standings", "fee_sync"] {
+    for table in [
+        "character_skills",
+        "character_standings",
+        "character_locations",
+        "fee_sync",
+    ] {
         assert_eq!(count(&pool, table).await, 0, "{table}");
     }
     assert_eq!(count(&pool, "station_owners").await, 1);
@@ -824,10 +855,12 @@ async fn sales_and_their_costs_are_keyed_indexed_and_cascade(pool: PgPool) {
         sqlx::query(sale).execute(&pool).await.is_err(),
         "transaction_id is the key"
     );
-    sqlx::query("INSERT INTO sale_costs (transaction_id, covered_units, cost) VALUES (7, 10, 1000.00)")
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO sale_costs (transaction_id, covered_units, cost) VALUES (7, 10, 1000.00)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     let indexes: Vec<String> =
         sqlx::query_scalar("SELECT indexdef FROM pg_indexes WHERE tablename = 'sales'")
             .fetch_all(&pool)
@@ -837,14 +870,21 @@ async fn sales_and_their_costs_are_keyed_indexed_and_cascade(pool: PgPool) {
         "(character_id, type_id, sold_at, transaction_id)",
         "(character_id, sold_at)",
     ] {
-        assert!(indexes.iter().any(|d| d.contains(columns)), "{columns}: {indexes:?}");
+        assert!(
+            indexes.iter().any(|d| d.contains(columns)),
+            "{columns}: {indexes:?}"
+        );
     }
 
     sqlx::query("DELETE FROM sales WHERE transaction_id = 7")
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(count(&pool, "sale_costs").await, 0, "costs go with the sale");
+    assert_eq!(
+        count(&pool, "sale_costs").await,
+        0,
+        "costs go with the sale"
+    );
 }
 
 async fn columns_of(pool: &PgPool, table: &str) -> Vec<String> {

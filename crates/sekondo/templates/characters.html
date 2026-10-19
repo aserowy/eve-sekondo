@@ -4,11 +4,11 @@
 
 {% block content %}
 {% if let Some(message) = flash %}
-<div class="alert" role="alert" id="flash">{{ message }}</div>
+<article class="alert" role="alert" id="flash">{{ message }}</article>
 {% endif %}
 
-<section id="characters" class="panel">
-  <h2 class="panel-title">Characters</h2>
+<section id="characters">
+  <h2>Characters</h2>
   {% for c in characters %}
   <div class="character" id="character-{{ c.id }}">
     <img src="https://images.evetech.net/characters/{{ c.id }}/portrait?size=64" width="32" height="32" alt="Portrait of {{ c.name }}">
@@ -23,7 +23,7 @@
   </div>
   {% endfor %}
   <div class="actions">
-    <a class="button" role="button" href="/auth/add">{% include "icons/user-plus.html" %}Add character</a>
+    <a role="button" href="/auth/add">{% include "icons/user-plus.html" %}Add character</a>
   </div>
 </section>
 {% endblock %}

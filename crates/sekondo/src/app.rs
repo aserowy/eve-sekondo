@@ -214,22 +214,23 @@ pub fn router(state: AppState, extra_routes: Router<AppState>) -> Router {
         .route("/", get(pages::index))
         .route("/dashboard", get(dashboard::page))
         .route("/dashboard/summary", get(dashboard::summary))
-        .route("/orders", get(orders::page))
-        .route("/orders/tables", get(orders::tables))
+        .route("/orders", get(orders::index))
+        .route("/orders/sell", get(orders::sell_page))
+        .route("/orders/buy", get(orders::buy_page))
+        .route("/orders/sell/content", get(orders::sell_content))
+        .route("/orders/buy/content", get(orders::buy_content))
         .route("/orders/freshness", get(orders::freshness))
         .route("/wealth", get(wealth_page::page))
         .route("/wealth/freshness", get(wealth_page::freshness))
-        .route("/wealth/graph", get(wealth_page::graph))
-        .route("/wealth/items", get(wealth_page::items))
+        .route("/wealth/content", get(wealth_page::content))
         .route("/trades", get(trades_page::page))
         .route("/trades/table", get(trades_page::table))
         .route("/trades/freshness", get(trades_page::freshness))
-        .route("/opportunities", get(opportunities::page::page))
+        .route("/opportunities", get(opportunities::page::index))
         .route(
             "/opportunities/freshness",
             get(opportunities::page::freshness_fragment),
         )
-        .route("/opportunities/tables", get(opportunities::page::tables))
         .route(
             "/opportunities/detail/{table}/{type_id}",
             get(opportunities::page::detail),
@@ -241,6 +242,14 @@ pub fn router(state: AppState, extra_routes: Router<AppState>) -> Router {
         .route(
             "/opportunities/{table}/{type_id}",
             get(opportunities::page::detail_page),
+        )
+        .route(
+            "/opportunities/{table}",
+            get(opportunities::page::table_page),
+        )
+        .route(
+            "/opportunities/{table}/content",
+            get(opportunities::page::content),
         )
         .route("/characters", get(pages::characters))
         .route("/characters/{id}/unlink", post(characters::unlink))

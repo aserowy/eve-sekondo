@@ -64,6 +64,7 @@ eve_routes! {
     ("GET", "/markets/prices", market_prices),
     ("GET", "/characters/{id}/skills", character_skills),
     ("GET", "/characters/{id}/standings", character_standings),
+    ("GET", "/characters/{id}/location", character_location),
     ("GET", "/universe/stations/{id}", universe_station),
 }
 
@@ -83,6 +84,7 @@ pub fn router(shared: Shared) -> Router {
         .route("/prices", post(set_prices))
         .route("/skills", post(set_skills))
         .route("/standings", post(set_standings))
+        .route("/location", post(set_location))
         .route("/stations", post(set_station_owner))
         .route("/esi-expires", post(set_esi_expires))
         .route("/structure-access", post(set_structure_access))
@@ -448,6 +450,7 @@ async fn stats(State(shared): State<Shared>) -> Json<Value> {
         "prices_calls": calls("prices"),
         "skills_calls": calls("skills"),
         "standings_calls": calls("standings"),
+        "location_calls": calls("location"),
         "stations_calls": calls("stations"),
     }))
 }
@@ -470,6 +473,7 @@ const WALLET_SCOPE: &str = "esi-wallet.read_character_wallet.v1";
 const ASSETS_SCOPE: &str = "esi-assets.read_assets.v1";
 const SKILLS_SCOPE: &str = "esi-skills.read_skills.v1";
 const STANDINGS_SCOPE: &str = "esi-characters.read_standings.v1";
+const LOCATION_SCOPE: &str = "esi-location.read_location.v1";
 
 /// Counts the call and, while a failure is armed, answers it instead of the route.
 fn begin_esi_call(
@@ -1189,6 +1193,34 @@ async fn character_standings(
     (response_headers, Json(standings)).into_response()
 }
 
+/// Where a character is: a station, a structure, or open space (the solar system only).
+async fn character_location(
+    State(shared): State<Shared>,
+    Path(character_id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let mut inner = shared.lock().unwrap();
+    if let Some(response) = begin_esi_call(&mut inner, "location", &headers) {
+        return response;
+    }
+    let response_headers = char_route_headers(&inner, "char-location", "1200/15m");
+    if let Err(response) = authorize_character(
+        &inner,
+        &headers,
+        character_id,
+        LOCATION_SCOPE,
+        response_headers.clone(),
+    ) {
+        return response;
+    }
+    let location = inner
+        .locations
+        .get(&character_id)
+        .cloned()
+        .unwrap_or_else(|| json!({"solar_system_id": 30000142}));
+    (response_headers, Json(location)).into_response()
+}
+
 /// An NPC station. Needs no token; an unknown station is a 404.
 async fn universe_station(
     State(shared): State<Shared>,
@@ -1246,6 +1278,22 @@ async fn set_standings(
         .unwrap()
         .standings
         .insert(body.character_id, body.standings);
+    StatusCode::NO_CONTENT
+}
+
+#[derive(Deserialize)]
+struct LocationBody {
+    character_id: i64,
+    location: Value,
+}
+
+/// Replaces what ESI returns as a character's location.
+async fn set_location(State(shared): State<Shared>, Json(body): Json<LocationBody>) -> StatusCode {
+    shared
+        .lock()
+        .unwrap()
+        .locations
+        .insert(body.character_id, body.location);
     StatusCode::NO_CONTENT
 }
 

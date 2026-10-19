@@ -1,6 +1,6 @@
 import { chartData, chartDrawn, expectTooltip } from '../support/charts';
 import {
-  expect, loginWith, openCharacters, pollCharacter, priceRefresh, query, stubAsset, stubControl, stubOrder, test, unfoldFreshness, wealthPoll,
+  expect, loginWith, openCharacters, pollCharacter, priceRefresh, query, stubAsset, stubControl, stubOrder, test, wealthPoll,
 } from '../support/fixtures';
 import type { Page } from '@playwright/test';
 
@@ -26,8 +26,7 @@ test('the wealth page opens from the dashboard with the narrowed selection and s
   await expect(page).toHaveURL(/\/wealth\?chars=90000001$/);
   await expect(page.locator('#wealth-items')).toBeVisible();
   await expect(page.locator('#main-nav').getByRole('link', { name: 'Wealth' })).toHaveAttribute('aria-current', 'page');
-  await unfoldFreshness(page);
-  const freshness = page.locator('#wealth-freshness');
+  const freshness = page.locator('#freshness');
   await expect(freshness).toContainText('Alice Alpha');
   await expect(freshness).not.toContainText('Bob Bravo');
   await expect(freshness.locator('[data-kind="wallet"]')).toContainText('Last update:');
@@ -42,13 +41,12 @@ test('narrowing the selection on the wealth page keeps the page and leaves the d
   await twoCharacters(page);
   await page.locator('#main-nav').getByRole('link', { name: 'Wealth' }).click();
   await expect(page).toHaveURL(/\/wealth$/);
-  await unfoldFreshness(page);
 
   await page.getByRole('checkbox', { name: 'Alice Alpha' }).uncheck();
 
   await expect(page).toHaveURL(/\/wealth\?chars=90000002$/);
-  await expect(page.locator('#wealth-freshness')).not.toContainText('Alice Alpha');
-  await expect(page.locator('#wealth-freshness')).toContainText('Bob Bravo');
+  await expect(page.locator('#freshness')).not.toContainText('Alice Alpha');
+  await expect(page.locator('#freshness')).toContainText('Bob Bravo');
 });
 
 test('a character that needs a new login shows stale wallet and assets and a link to log in', async ({ page }) => {
@@ -56,9 +54,8 @@ test('a character that needs a new login shows stale wallet and assets and a lin
   await query('UPDATE characters SET needs_relogin = true');
 
   await page.goto('/wealth');
-  await unfoldFreshness(page);
 
-  const freshness = page.locator('#wealth-freshness');
+  const freshness = page.locator('#freshness');
   await expect(freshness.locator('[data-kind="wallet"]').getByText('Stale')).toBeVisible();
   await expect(freshness.locator('[data-kind="assets"]').getByText('Stale')).toBeVisible();
   await expect(freshness.getByRole('link', { name: 'Log in again' })).toBeVisible();
@@ -91,8 +88,7 @@ test('the inventory is sorted by value, highest first, with unpriced rows last',
   await expect(itemNames(page).nth(1)).toHaveText('Tritanium');
   await expect(page.locator('#inventory tbody tr')).toHaveCount(4);
   await expect(page.locator('#inventory th[aria-sort="descending"]')).toContainText('Value');
-  await expect(page.locator('#wealth-items')).toContainText('2 unpriced');
-  await expect(page.locator('#wealth-items')).toContainText('Total value:');
+  await expect(page.locator('#kpi-inventory .detail')).toHaveText('2 unpriced rows');
 });
 
 test('sorting by item puts the order in the URL and the same header reverses it', async ({ page }) => {
@@ -172,14 +168,16 @@ test('the stack ends at the total wealth and the tooltip lists the four values a
   ]);
 });
 
-test('switching the range updates the URL and the graph but not the list', async ({ page }) => {
+test('switching the range updates the URL and the graph but not the cards or the list', async ({ page }) => {
   await aliceWithEverything(page);
   await page.goto('/wealth');
   await expect(page.locator('#wealth-range-control [aria-current="true"]')).toHaveText('7 days');
   await chartData(page, STACK);
-  // Let the refresh the page makes when its stream opens settle before marking the list.
+  // Let the refresh the page makes when its stream opens settle before reading the cards.
   await page.waitForTimeout(1000);
-  await page.evaluate(() => ((document.querySelector('#inventory') as any).marker = 'same list'));
+  const cards = () => page.locator('.kpi .value').allTextContents();
+  const before = await cards();
+  expect(before).toEqual(['200m', '100m', '30m', '20m', '50m']);
   const span = async () => {
     await chartDrawn(page, STACK);
     return page.evaluate(() => {
@@ -194,7 +192,9 @@ test('switching the range updates the URL and the graph but not the list', async
   await expect(page).toHaveURL(/\/wealth\?range=30d$/);
   await expect(page.locator('#wealth-range-control [aria-current="true"]')).toHaveText('30 days');
   await expect.poll(async () => Math.round(await span())).toBe(30);
-  expect(await page.evaluate(() => (document.querySelector('#inventory') as any).marker)).toBe('same list');
+  // The range only changes the graph: the cards read the same.
+  expect(await cards()).toEqual(before);
+  await expect(page.locator('#inventory tbody tr')).toHaveCount(1);
 });
 
 test('an unknown range falls back to seven days', async ({ page }) => {
@@ -237,4 +237,57 @@ test('the range chosen on the graph survives a change of the selection', async (
 
   await expect(page).toHaveURL(/\/wealth\?chars=90000001&range=90d$/);
   await expect(page.locator('#wealth-range-control [aria-current="true"]')).toHaveText('90 days');
+});
+
+test('the cards read the current figures, wealth first, with the unpriced rows counted on the inventory card', async ({ page }) => {
+  await aliceWithEverything(page);
+  await page.goto('/wealth');
+
+  await expect(page.locator('.kpis .kpi header')).toHaveText(['Wealth', 'Wallet', 'Sell orders', 'Buy escrow', 'Inventory']);
+  await expect(page.locator('.kpi .value')).toHaveText(['200m', '100m', '30m', '20m', '50m']);
+  await expect(page.locator('#kpi-wealth .value')).toHaveAttribute('title', '200,000,000.00 ISK');
+  await expect(page.locator('#kpi-inventory .detail')).toHaveCount(0);
+});
+
+test('the page reads, top to bottom: filter, cards, graph, items, pagination, freshness', async ({ page }) => {
+  await aliceWithEverything(page);
+  // The stream's first refresh replaces the content; measure after it.
+  const opened = page.waitForResponse((r) => r.url().includes('/wealth/content'));
+  await page.goto('/wealth');
+  await opened;
+  await expect(page.locator('#inventory tbody tr')).toHaveCount(1);
+  await chartDrawn(page, STACK);
+  await page.waitForTimeout(300);
+
+  const top = async (selector: string) => (await page.locator(selector).first().boundingBox())!.y;
+  const order = [
+    await top('#filter-box'), await top('.kpis'), await top('#wealth-graph'), await top('#inventory'),
+    await top('.pagination'), await top('#freshness'),
+  ];
+  expect([...order].sort((a, b) => a - b)).toEqual(order);
+  expect(new Set(order).size).toBe(order.length);
+  await expect(page.getByRole('button', { name: 'Freshness' })).toHaveCount(0);
+  await expect(page.locator('#freshness')).toContainText('Last update');
+});
+
+test('the inventory is paginated after sorting and a page-size change starts on page 1', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  await stubControl('assets', {
+    character_id: 90000001,
+    assets: Array.from({ length: 120 }, (_, i) => stubAsset(i + 1, { type: 1000 + i, quantity: 1 })),
+  });
+  await wealthPoll(page, 90000001, 'assets');
+  await page.goto('/wealth?sort=item&dir=asc');
+  const pagination = page.locator('.pagination');
+  await expect(pagination).toContainText('Page 1 of 3');
+  await expect(page.locator('#inventory tbody tr')).toHaveCount(50);
+
+  await pagination.getByRole('link', { name: 'Next' }).click();
+  await expect(page).toHaveURL(/sort=item&dir=asc&page=2$/);
+  await expect(pagination).toContainText('Page 2 of 3');
+
+  await pagination.getByLabel('Rows per page').selectOption('100');
+  await expect(page).toHaveURL(/per_page=100$/);
+  await expect(pagination).toContainText('Page 1 of 2');
+  await expect(page.locator('#inventory tbody tr')).toHaveCount(100);
 });

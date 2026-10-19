@@ -1,0 +1,14 @@
+<section id="{{ view.table.id }}">
+  <h2>{{ view.table.title }}</h2>
+  {% if view.table.id == "expansion" && view.freshness.own_days < view.freshness.own_days_needed as i64 %}
+  <p class="note">Collecting hourly data ({{ view.freshness.own_days }}/{{ view.freshness.own_days_needed }} days)</p>
+  {% endif %}
+  {% if view.table.rows.is_empty() %}
+  <p>No opportunities.</p>
+  {% else %}
+  {% let table = view.table %}
+  {% include "opportunities_table.html" %}
+  {% endif %}
+</section>
+{% let pager = view.pager %}
+{% include "pagination.html" %}

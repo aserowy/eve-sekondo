@@ -595,3 +595,47 @@ impl PollEnv {
         self.repo.create_account().await.unwrap()
     }
 }
+
+/// A KPI card read from a page: its class list, value, the value's hover text and detail line.
+pub struct Card {
+    pub class: String,
+    pub value: String,
+    pub title: String,
+    pub detail: Option<String>,
+}
+
+/// The KPI card with this id.
+pub fn kpi(html: &str, id: &str) -> Card {
+    let at = html
+        .find(&format!(r#"id="{id}""#))
+        .unwrap_or_else(|| panic!("no card {id} in {html}"));
+    let card = &html[at..];
+    let card = &card[..card.find("</article>").unwrap_or(card.len())];
+    let class = html[..at]
+        .rsplit_once("<article class=\"")
+        .map_or("", |(_, c)| c)
+        .to_owned();
+    let value_tag = &card[card.find(r#"<p class="value""#).unwrap()..];
+    let value_tag = &value_tag[..value_tag.find("</p>").unwrap()];
+    let title = value_tag
+        .split(r#"title=""#)
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    let detail = card.find("<small").map(|at| {
+        let small = &card[at..];
+        small[small.find('>').unwrap() + 1..]
+            .split("</small>")
+            .next()
+            .unwrap()
+            .to_owned()
+    });
+    Card {
+        class,
+        value: value_tag.split_once('>').unwrap().1.to_owned(),
+        title: title.to_owned(),
+        detail,
+    }
+}

@@ -3,9 +3,9 @@
 {% block title %}{{ title }} · Sekondo{% endblock %}
 
 {% block content %}
-<section class="panel card">
+<article class="card">
   <h1>{{ title }}</h1>
   <p>{{ message }}</p>
-  <a class="button" role="button" href="/auth/login">Try again</a>
-</section>
+  <a role="button" href="/auth/login">Try again</a>
+</article>
 {% endblock %}

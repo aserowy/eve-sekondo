@@ -1,34 +1,11 @@
-<section class="tiles" id="totals">
-  <article id="tile-sell-value">
-    <h2>Sell value</h2>
-    <p class="amount" title="{{ view.sell.total.exact }}">{{ view.sell.total.short }}</p>
-    {% if let Some(corp) = view.sell.corp %}
-    <small class="corp-share">of which <span title="{{ corp.exact }}">{{ corp.short }}</span> corp</small>
-    {% endif %}
-  </article>
-  <article id="tile-escrow">
-    <h2>Buy escrow</h2>
-    <p class="amount" title="{{ view.escrow.total.exact }}">{{ view.escrow.total.short }}</p>
-    {% if let Some(corp) = view.escrow.corp %}
-    <small class="corp-share">of which <span title="{{ corp.exact }}">{{ corp.short }}</span> corp</small>
-    {% endif %}
-  </article>
-  <article id="tile-wealth">
-    <h2><a href="{{ view.wealth.href }}">Wealth</a></h2>
-    <p class="amount" title="{{ view.wealth.total.exact }}">{{ view.wealth.total.short }}</p>
-  </article>
-  <article id="tile-sell-count">
-    <h2>Sell orders</h2>
-    <p class="amount">{{ view.sell_count }}</p>
-  </article>
-  <article id="tile-buy-count">
-    <h2>Buy orders</h2>
-    <p class="amount">{{ view.buy_count }}</p>
-  </article>
+<section id="totals">
+  <div class="kpis">
+    {% for kpi in view.tiles %}{% include "kpi_card.html" %}{% endfor %}
+  </div>
 </section>
-<section class="panel breakdown" id="characters">
-  <h2 class="panel-title">Characters</h2>
-  <div class="scroll" data-scroll-key="breakdown">
+<section id="characters">
+  <h2>Characters</h2>
+  <div class="table-wrap">
   <table class="data" id="breakdown">
     <thead>
       <tr>
@@ -60,43 +37,45 @@
   </table>
   </div>
 </section>
-<section class="panel split" id="split">
-  <h2 class="panel-title">Per character</h2>
+<div id="split" class="graph-row">
+<section>
+  <h2>Per character</h2>
   <div class="chart"><canvas data-chart="split" data-series="{{ view.split_series }}" role="img" aria-label="{{ view.split_label }}"></canvas></div>
 </section>
-<section class="panel top-sell">
-  <h2 class="panel-title">Top items by sell value</h2>
+<section class="top-sell">
+  <h2>Top items by sell value</h2>
   {% if let Some(chart) = view.top_sell %}
   <div class="chart"><canvas data-chart="top-sell" data-series="{{ chart.series }}" role="img" aria-label="{{ chart.label }}"></canvas></div>
   {% else %}
   <p>No sell orders.</p>
   {% endif %}
 </section>
-<section class="panel top-buy">
-  <h2 class="panel-title">Top items by buy escrow</h2>
+<section class="top-buy">
+  <h2>Top items by buy escrow</h2>
   {% if let Some(chart) = view.top_buy %}
   <div class="chart"><canvas data-chart="top-buy" data-series="{{ chart.series }}" role="img" aria-label="{{ chart.label }}"></canvas></div>
   {% else %}
   <p>No buy orders.</p>
   {% endif %}
 </section>
+</div>
 {% if let Some(history) = view.history %}
-<section class="panel history-value" id="value">
-  <h2 class="panel-title">Over time: value</h2>
+<section id="value">
+  <h2>Over time: value</h2>
   <div class="chart"><canvas data-chart="value-history" data-series="{{ history.value.series }}" role="img" aria-label="{{ history.value.label }}"></canvas></div>
 </section>
-<section class="panel history-count" id="orders">
-  <h2 class="panel-title">Over time: orders</h2>
+<section id="orders">
+  <h2>Over time: orders</h2>
   <div class="chart"><canvas data-chart="count-history" data-series="{{ history.count.series }}" role="img" aria-label="{{ history.count.label }}"></canvas></div>
 </section>
 {% else %}
-<section class="panel history-value history-count" id="value">
-  <h2 class="panel-title" id="orders">Over time</h2>
+<section id="value">
+  <h2 id="orders">Over time</h2>
   <p>No history yet.</p>
 </section>
 {% endif %}
-<section class="panel history-wealth" id="wealth">
-  <h2 class="panel-title">Over time: wealth</h2>
+<section id="wealth">
+  <h2>Over time: wealth</h2>
   {% if let Some(wealth) = view.wealth_history %}
   <div class="chart"><canvas data-chart="wealth-history" data-series="{{ wealth.series }}" role="img" aria-label="{{ wealth.label }}"></canvas></div>
   {% else %}

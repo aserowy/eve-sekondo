@@ -1,4 +1,5 @@
-//! The market fees under each character's freshness entry on the orders page.
+//! The fee cards of the orders pages: sales tax, broker fee and minimum margin per character at
+//! its fee location.
 
 mod common;
 
@@ -95,96 +96,182 @@ async fn trained(pool: &PgPool, character: i64) {
         .unwrap();
 }
 
-async fn fragment(app: &TestApp, browser: &Browser, query: &str) -> String {
-    let res = browser
-        .get(&app.url(&format!("/orders/freshness{query}")))
-        .await;
-    assert_eq!(res.status(), 200);
+const LOCATION_SCOPE: &str = "esi-location.read_location.v1";
+
+async fn grant_location_scope(pool: &PgPool, character: i64) {
+    sqlx::query("UPDATE characters SET scopes = ARRAY[$2] WHERE character_id = $1")
+        .bind(character)
+        .bind(LOCATION_SCOPE)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn revoke_location_scope(pool: &PgPool, character: i64) {
+    sqlx::query("UPDATE characters SET scopes = array_remove(scopes, $2) WHERE character_id = $1")
+        .bind(character)
+        .bind(LOCATION_SCOPE)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn docked(pool: &PgPool, character: i64, location: i64, kind: &str) {
+    sqlx::query(
+        "INSERT INTO character_locations (character_id, location_id, kind, updated_at) \
+         VALUES ($1, $2, $3, now())",
+    )
+    .bind(character)
+    .bind(location)
+    .bind(kind)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn page(app: &TestApp, browser: &Browser, path: &str) -> String {
+    let res = browser.get(&app.url(path)).await;
+    assert_eq!(res.status(), 200, "{path}");
     res.text().await.unwrap()
 }
 
-/// The cells of the row whose location is `location`, as `(text, title)` per figure.
-fn figures(html: &str, location: &str) -> Vec<(String, Option<String>)> {
-    let row = html
-        .split("<tr>")
-        .find(|row| row.contains(&format!("<td>{location}</td>")))
-        .unwrap_or_else(|| panic!("no row for {location} in {html}"));
-    row.split("<td data-fee=")
-        .skip(1)
-        .map(|cell| {
-            let tag_end = cell.find('>').unwrap();
-            let text = cell[tag_end + 1..].split("</td>").next().unwrap().trim();
-            let title = cell[..tag_end]
+/// One fee card: what it reads, what hovering adds, its detail line and whether it offers to log
+/// in again.
+#[derive(Debug, PartialEq, Eq)]
+struct Fee {
+    text: String,
+    title: Option<String>,
+    detail: String,
+    relogin: bool,
+}
+
+/// The three fee cards of a character: sales tax, broker fee, minimum margin.
+fn fees_of(html: &str, character: i64) -> Vec<Fee> {
+    ["sales-tax", "broker-fee", "min-margin"]
+        .into_iter()
+        .map(|key| {
+            let id = format!(r#"id="fee-{character}-{key}""#);
+            let at = html
+                .find(&id)
+                .unwrap_or_else(|| panic!("no card {id} in {html}"));
+            let card = &html[at..];
+            let card = &card[..card.find("</article>").unwrap()];
+            let value = &card[card.find(r#"<p class="value""#).unwrap()..];
+            let value = &value[..value.find("</p>").unwrap()];
+            let title = value
                 .split("title=\"")
                 .nth(1)
-                .map(|t| t.split('"').next().unwrap().to_owned());
-            (text.to_owned(), title)
+                .map(|t| t.split('"').next().unwrap().to_owned())
+                .filter(|t| !t.is_empty());
+            let detail = &card[card.find("<small").unwrap()..];
+            let detail = detail[detail.find('>').unwrap() + 1..]
+                .split("</small>")
+                .next()
+                .unwrap();
+            Fee {
+                text: value.split_once('>').unwrap().1.to_owned(),
+                title,
+                detail: detail.to_owned(),
+                relogin: card.contains("Log in again"),
+            }
         })
         .collect()
 }
 
+const JITA_NAME: &str = "Jita IV - Moon 4 - Caldari Navy Assembly Plant";
+
 #[sqlx::test]
-async fn an_npc_station_lists_its_rates_with_the_inputs_on_hover(pool: PgPool) {
+async fn an_npc_station_gives_its_rates_with_the_inputs_on_hover_and_names_character_and_station(
+    pool: PgPool,
+) {
     let (app, browser) = setup(&pool).await;
-    name(
-        &pool,
-        JITA,
-        "Jita IV - Moon 4 - Caldari Navy Assembly Plant",
-    )
-    .await;
-    order(&pool, 1, ALICE, JITA).await;
+    name(&pool, JITA, JITA_NAME).await;
     trained(&pool, ALICE).await;
+    grant_location_scope(&pool, ALICE).await;
+    docked(&pool, ALICE, JITA, "station").await;
 
-    let html = fragment(&app, &browser, "").await;
+    let html = page(&app, &browser, "/orders/sell").await;
 
-    let figures = figures(&html, "Jita IV - Moon 4 - Caldari Navy Assembly Plant");
-    assert_eq!(figures[0].0, "3.38%");
-    assert_eq!(figures[0].1.as_deref(), Some("3.3750% (Accounting 5)"));
-    assert_eq!(figures[1].0, "1.41%");
+    let fees = fees_of(&html, ALICE);
+    assert_eq!(fees[0].text, "3.38%");
+    assert_eq!(fees[0].title.as_deref(), Some("3.3750% (Accounting 5)"));
+    assert_eq!(fees[1].text, "1.41%");
     assert_eq!(
-        figures[1].1.as_deref(),
+        fees[1].title.as_deref(),
         Some("1.4100% (Broker Relations 5, faction standing 2.00, corporation standing 1.50)")
     );
-    assert_eq!(figures[2].0, "6.51%");
-    assert_eq!(figures[2].1.as_deref(), Some("6.5063%"));
-    for header in ["Location", "Sales tax", "Broker fee", "Min. margin"] {
-        assert!(html.contains(header), "{header}");
+    assert_eq!(fees[2].text, "6.51%");
+    assert_eq!(fees[2].title.as_deref(), Some("6.5063%"));
+    for fee in &fees {
+        assert_eq!(fee.detail, format!("Alice Alpha \u{b7} {JITA_NAME}"));
+        assert!(!fee.relogin);
+    }
+    for card in ["Sales tax", "Broker fee", "Min. margin"] {
+        assert!(html.contains(&format!("<header>{card}</header>")), "{card}");
     }
 }
 
 #[sqlx::test]
-async fn a_station_and_a_structure_are_listed_side_by_side_ordered_by_name(pool: PgPool) {
+async fn the_cards_are_on_the_buy_page_too(pool: PgPool) {
     let (app, browser) = setup(&pool).await;
-    name(&pool, JITA, "Jita IV").await;
-    name(&pool, STRUCTURE, "Alpha Keepstar").await;
-    order(&pool, 1, ALICE, JITA).await;
-    order(&pool, 2, ALICE, STRUCTURE).await;
     trained(&pool, ALICE).await;
 
-    let html = fragment(&app, &browser, "").await;
+    let html = page(&app, &browser, "/orders/buy").await;
 
-    let structure = figures(&html, "Alpha Keepstar");
-    assert_eq!(structure[0].0, "3.38%");
-    assert_eq!(structure[1].0, "0.5% + owner fee");
-    assert_eq!(structure[2].0, "\u{2014}");
-    assert_eq!(figures(&html, "Jita IV")[1].0, "1.41%");
-    assert!(
-        html.find("Alpha Keepstar").unwrap() < html.find("Jita IV").unwrap(),
-        "ordered by location name"
+    assert_eq!(fees_of(&html, ALICE)[0].text, "3.38%");
+}
+
+#[sqlx::test]
+async fn a_docked_character_has_its_fees_at_its_station_whether_or_not_it_has_orders_there(
+    pool: PgPool,
+) {
+    let (app, browser) = setup(&pool).await;
+    name(&pool, AMARR, "Amarr VIII").await;
+    order(&pool, 1, ALICE, JITA).await;
+    trained(&pool, ALICE).await;
+    grant_location_scope(&pool, ALICE).await;
+    docked(&pool, ALICE, AMARR, "station").await;
+    sqlx::query("INSERT INTO station_owners (station_id, owner_id, resolved_at) VALUES ($1, 1000086, now())")
+        .bind(AMARR)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let html = page(&app, &browser, "/orders/sell").await;
+
+    let fees = fees_of(&html, ALICE);
+    assert!(fees[0].detail.ends_with("Amarr VIII"), "{}", fees[0].detail);
+    assert_eq!(
+        fees[1].text, "1.50%",
+        "no standings towards Amarr: 3 - 0.3 * 5"
     );
+}
+
+#[sqlx::test]
+async fn a_structure_reads_owner_fee_and_no_minimum_margin(pool: PgPool) {
+    let (app, browser) = setup(&pool).await;
+    name(&pool, STRUCTURE, "Alpha Keepstar").await;
+    trained(&pool, ALICE).await;
+    grant_location_scope(&pool, ALICE).await;
+    docked(&pool, ALICE, STRUCTURE, "structure").await;
+
+    let fees = fees_of(&page(&app, &browser, "/orders/sell").await, ALICE);
+
+    assert_eq!(fees[0].text, "3.38%");
+    assert_eq!(fees[1].text, "0.5% + owner fee");
+    assert_eq!(fees[2].text, "\u{2014}");
+    assert!(fees[0].detail.ends_with("Alpha Keepstar"));
 }
 
 #[sqlx::test]
 async fn a_character_whose_skills_were_not_polled_shows_dashes(pool: PgPool) {
     let (app, browser) = setup(&pool).await;
-    name(&pool, JITA, "Jita IV").await;
-    order(&pool, 1, ALICE, JITA).await;
 
-    let html = fragment(&app, &browser, "").await;
+    let fees = fees_of(&page(&app, &browser, "/orders/sell").await, ALICE);
 
-    for (text, title) in figures(&html, "Jita IV") {
-        assert_eq!(text, "\u{2014}");
-        assert_eq!(title, None);
+    for fee in fees {
+        assert_eq!(fee.text, "\u{2014}");
+        assert_eq!(fee.title, None);
     }
 }
 
@@ -192,67 +279,83 @@ async fn a_character_whose_skills_were_not_polled_shows_dashes(pool: PgPool) {
 async fn a_station_without_a_known_owner_has_a_tax_but_no_fee(pool: PgPool) {
     let (app, browser) = setup(&pool).await;
     name(&pool, AMARR, "Amarr VIII").await;
-    order(&pool, 1, ALICE, AMARR).await;
     trained(&pool, ALICE).await;
+    grant_location_scope(&pool, ALICE).await;
+    docked(&pool, ALICE, AMARR, "station").await;
 
-    let figures = figures(&fragment(&app, &browser, "").await, "Amarr VIII");
+    let fees = fees_of(&page(&app, &browser, "/orders/sell").await, ALICE);
 
-    assert_eq!(figures[0].0, "3.38%");
-    assert_eq!(figures[1].0, "\u{2014}");
-    assert_eq!(figures[2].0, "\u{2014}");
+    assert_eq!(fees[0].text, "3.38%");
+    assert_eq!(fees[1].text, "\u{2014}");
+    assert_eq!(fees[2].text, "\u{2014}");
 }
 
 #[sqlx::test]
-async fn a_character_without_orders_lists_no_locations(pool: PgPool) {
+async fn without_the_location_scope_the_cards_name_jita_and_offer_to_log_in_again(pool: PgPool) {
     let (app, browser) = setup(&pool).await;
     trained(&pool, ALICE).await;
+    revoke_location_scope(&pool, ALICE).await;
 
-    let html = fragment(&app, &browser, "").await;
+    let html = page(&app, &browser, "/orders/sell").await;
 
-    assert!(html.contains("Alice Alpha"));
-    assert!(!html.contains("<table"), "{html}");
+    let fees = fees_of(&html, ALICE);
+    for fee in &fees {
+        assert_eq!(fee.detail, format!("Alice Alpha \u{b7} {JITA_NAME}"));
+        assert!(fee.relogin, "{fee:?}");
+    }
+    assert!(html.contains(r#"href="/auth/add""#));
 }
 
 #[sqlx::test]
-async fn an_unnamed_location_shows_its_id(pool: PgPool) {
+async fn a_character_with_the_scope_that_was_never_docked_uses_jita_without_the_link(pool: PgPool) {
     let (app, browser) = setup(&pool).await;
-    order(&pool, 1, ALICE, JITA).await;
+    trained(&pool, ALICE).await;
+    grant_location_scope(&pool, ALICE).await;
 
-    let html = fragment(&app, &browser, "").await;
+    let fees = fees_of(&page(&app, &browser, "/orders/sell").await, ALICE);
 
-    assert!(html.contains(&format!("<td>#{JITA}</td>")), "{html}");
+    assert!(fees[0].detail.ends_with(JITA_NAME));
+    assert!(fees.iter().all(|f| !f.relogin));
 }
 
 #[sqlx::test]
-async fn only_the_selected_characters_are_listed(pool: PgPool) {
+async fn only_the_selected_characters_have_cards_in_the_order_they_were_linked(pool: PgPool) {
     let (app, browser) = setup(&pool).await;
     add_bob(&app, &browser).await;
-    name(&pool, JITA, "Jita IV").await;
-    name(&pool, AMARR, "Amarr VIII").await;
-    order(&pool, 1, ALICE, JITA).await;
-    order(&pool, 2, BOB, AMARR).await;
     trained(&pool, ALICE).await;
     polled(&pool, BOB).await;
 
-    let both = fragment(&app, &browser, "").await;
-    assert!(both.contains("Jita IV") && both.contains("Amarr VIII"));
+    let both = page(&app, &browser, "/orders/sell").await;
+    assert!(
+        both.find("fee-90000001-sales-tax").unwrap() < both.find("fee-90000002-sales-tax").unwrap()
+    );
 
-    let only_bob = fragment(&app, &browser, &format!("?chars={BOB}")).await;
-    assert!(only_bob.contains("Amarr VIII"), "{only_bob}");
-    assert!(!only_bob.contains("Jita IV"), "{only_bob}");
-    assert!(!only_bob.contains("Alice Alpha"), "{only_bob}");
+    let only_bob = page(&app, &browser, &format!("/orders/sell?chars={BOB}")).await;
+    assert!(only_bob.contains("fee-90000002-sales-tax"));
+    assert!(!only_bob.contains("fee-90000001-sales-tax"), "{only_bob}");
+    assert_eq!(only_bob.matches(r#"id="fee-"#).count(), 3);
 }
 
 #[sqlx::test]
-async fn the_orders_page_follows_fees_updated_in_both_sections_and_no_other_page_does(
-    pool: PgPool,
-) {
+async fn the_freshness_does_not_list_fees(pool: PgPool) {
+    let (app, browser) = setup(&pool).await;
+    trained(&pool, ALICE).await;
+    order(&pool, 1, ALICE, JITA).await;
+
+    for path in ["/orders/freshness", "/orders/sell"] {
+        let html = page(&app, &browser, path).await;
+        let freshness = &html[html.find("<h2>Freshness</h2>").unwrap()..];
+        assert!(freshness.contains("Alice Alpha"));
+        assert!(!freshness.contains("<table"), "{path}: {freshness}");
+        assert!(!freshness.contains("Sales tax"), "{path}");
+    }
+}
+
+#[sqlx::test]
+async fn the_orders_pages_follow_fees_updated_in_the_content_and_no_other_page_does(pool: PgPool) {
     let (app, browser) = setup(&pool).await;
 
-    let res = browser.get(&app.url("/orders")).await;
-    let html = res.text().await.unwrap();
-
-    let trigger = |id: &str| {
+    let trigger = |html: &str, id: &str| {
         let start = html.find(&format!(r#"id="{id}""#)).unwrap();
         let tag = &html[start..];
         let tag = &tag[..tag.find('>').unwrap()];
@@ -264,18 +367,25 @@ async fn the_orders_page_follows_fees_updated_in_both_sections_and_no_other_page
             .unwrap()
             .to_owned()
     };
-    assert!(trigger("freshness").contains("sse:fees-updated"));
-    assert!(trigger("freshness").contains("sse:orders-updated"));
-    // The margins in the tables depend on the fees.
-    assert!(trigger("order-tables").contains("sse:fees-updated"));
+    for path in ["/orders/sell", "/orders/buy"] {
+        let html = page(&app, &browser, path).await;
+        assert!(
+            trigger(&html, "freshness").contains("sse:fees-updated"),
+            "{path}"
+        );
+        assert!(
+            trigger(&html, "freshness").contains("sse:orders-updated"),
+            "{path}"
+        );
+        // The fee cards and the margins in the table depend on the fees.
+        assert!(
+            trigger(&html, "content").contains("sse:fees-updated"),
+            "{path}"
+        );
+    }
 
-    let wealth = browser.get(&app.url("/wealth")).await.text().await.unwrap();
-    let dashboard = browser
-        .get(&app.url("/dashboard"))
-        .await
-        .text()
-        .await
-        .unwrap();
+    let wealth = page(&app, &browser, "/wealth").await;
+    let dashboard = page(&app, &browser, "/dashboard").await;
     assert!(!wealth.contains("fees-updated"));
     assert!(!dashboard.contains("fees-updated"));
 }

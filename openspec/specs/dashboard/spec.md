@@ -152,8 +152,8 @@ The dashboard SHALL accept the `chars` parameter and show the filter control as 
 - **THEN** the URL is the dashboard with `chars` holding the first character's ID and `range=30d`, the breakdown lists only the first character, and the totals and graphs cover only its orders
 
 #### Scenario: Selection carried to the orders page
-- **WHEN** a user with a narrowed selection on the dashboard follows the "Orders" navigation link
-- **THEN** the orders page opens with the same selection
+- **WHEN** a user with a narrowed selection on the dashboard follows the "Orders" menu entry
+- **THEN** the sell orders page opens with the same selection
 
 ### Requirement: Live dashboard
 The dashboard SHALL re-fetch its totals, breakdown and graphs, including the wealth tile and the wealth graph, when an `orders-updated` or `wealth-updated` signal arrives and after the event stream reconnects. It SHALL keep the current selection and time range, and SHALL NOT do a full page reload.
@@ -171,15 +171,19 @@ The dashboard SHALL re-fetch its totals, breakdown and graphs, including the wea
 - **THEN** the refreshed totals, breakdown and graphs still cover only that character, and the over-time graphs still cover 24 hours
 
 ### Requirement: Wealth tile
-The dashboard SHALL show a "Wealth" tile with the current total wealth of the selected characters, as defined by the wealth-sync capability, and SHALL link it to the wealth page with the current character selection. The amount SHALL follow the ISK amount rule of the dashboard.
+The dashboard SHALL show a "Wealth" KPI card with the current total wealth of the selected characters, as defined by the wealth-sync capability, and SHALL link it to the wealth page with the current character selection. The amount SHALL follow the ISK amount rule of the dashboard. Every dashboard tile, including the sell value, buy escrow, sell order and buy order tiles, SHALL be a KPI card as described by the ui-layout capability.
 
 #### Scenario: Wealth across characters
 - **WHEN** the first selected character's wealth is 200,000,000.00 ISK and the second's is 50,000,000.00 ISK
-- **THEN** the wealth tile reads "250m" and hovering it shows "250,000,000.00 ISK"
+- **THEN** the wealth card reads "250m" and hovering it shows "250,000,000.00 ISK"
 
 #### Scenario: Tile links to the wealth page
-- **WHEN** a user with `?chars=<id>` activates the wealth tile
+- **WHEN** a user with `?chars=<id>` activates the wealth card
 - **THEN** the wealth page opens with `chars=<id>`
+
+#### Scenario: Tiles are cards
+- **WHEN** a signed-in user opens the dashboard
+- **THEN** the sell value, buy escrow, wealth, sell order and buy order figures are each a square KPI card of the same size
 
 ### Requirement: Wealth over time on the dashboard
 The dashboard SHALL show a graph of total wealth over the selected time range as a single line. At every point, the line SHALL equal the top edge of the wealth page's graph for the same selection and range. Its last point SHALL equal the wealth tile. When there is no wealth history in the range, the graph SHALL say that there is no history yet.

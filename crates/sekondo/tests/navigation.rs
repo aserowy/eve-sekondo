@@ -21,9 +21,14 @@ async fn page(app: &TestApp, browser: &Browser, path: &str) -> String {
     res.text().await.unwrap()
 }
 
-/// The nav links marked as the current page.
+/// The sidebar's links marked as the current page.
 fn current_links(html: &str) -> Vec<String> {
-    html.split("<a ")
+    let sidebar = html
+        .split_once("<aside")
+        .and_then(|(_, rest)| rest.split_once("</aside>"))
+        .map_or("", |(aside, _)| aside);
+    sidebar
+        .split("<a ")
         .skip(1)
         .filter_map(|tag| tag.split_once('>'))
         .filter(|(attrs, _)| attrs.contains(r#"aria-current="page""#))
@@ -69,7 +74,7 @@ async fn completing_the_sign_in_lands_on_the_dashboard_showing_the_totals_of_the
     assert!(html.contains(r#"id="tile-sell-value""#), "{html}");
     assert!(html.contains(r#"id="breakdown""#));
     assert!(
-        html.contains(r#"href="/orders""#),
+        html.contains(r#"href="/orders/sell""#),
         "the navigation leads to the orders"
     );
 }
@@ -84,6 +89,15 @@ async fn an_unauthenticated_request_for_the_dashboard_goes_to_the_landing_page(p
     assert_eq!(Browser::location(&res), "/");
 }
 
+const NAV_LINKS: [&str; 6] = [
+    "/dashboard",
+    "/characters",
+    "/wealth",
+    "/trades",
+    "/orders/sell",
+    "/opportunities/expansion",
+];
+
 #[sqlx::test]
 async fn every_signed_in_page_has_the_navigation_with_its_own_entry_marked(pool: PgPool) {
     let app = app(pool).await;
@@ -93,18 +107,13 @@ async fn every_signed_in_page_has_the_navigation_with_its_own_entry_marked(pool:
         ("/dashboard", "Dashboard"),
         ("/wealth", "Wealth"),
         ("/trades", "Trades"),
-        ("/opportunities", "Opportunities"),
+        ("/orders/sell", "Orders"),
+        ("/orders/buy", "Orders"),
+        ("/opportunities/expansion", "Opportunities"),
         ("/characters", "Characters"),
     ] {
         let html = page(&app, &browser, path).await;
-        for link in [
-            "/dashboard",
-            "/orders",
-            "/wealth",
-            "/trades",
-            "/opportunities",
-            "/characters",
-        ] {
+        for link in NAV_LINKS {
             assert!(
                 html.contains(&format!(r#"href="{link}""#)),
                 "{path} lacks {link}"
@@ -122,7 +131,7 @@ async fn the_landing_page_has_no_signed_in_navigation(pool: PgPool) {
     let html = page(&app, &app.browser(), "/").await;
 
     assert!(!html.contains("Sign out"));
-    assert!(!html.contains(r#"href="/orders""#));
+    assert!(!html.contains(r#"href="/orders/sell""#));
     assert!(!html.contains(r#"href="/dashboard""#));
 }
 
@@ -148,19 +157,12 @@ async fn navigation_links_carry_a_narrowed_selection(pool: PgPool) {
     for path in [
         format!("/dashboard?chars={BOB}"),
         format!("/characters?chars={BOB}"),
-        format!("/orders?chars={BOB}"),
+        format!("/orders/sell?chars={BOB}"),
         format!("/trades?chars={BOB}"),
-        format!("/opportunities?chars={BOB}"),
+        format!("/opportunities/expansion?chars={BOB}"),
     ] {
         let html = unescaped(&page(&app, &browser, &path).await);
-        for link in [
-            "/dashboard",
-            "/orders",
-            "/wealth",
-            "/trades",
-            "/opportunities",
-            "/characters",
-        ] {
+        for link in NAV_LINKS {
             assert!(
                 html.contains(&format!(r#"href="{link}?chars={BOB}""#)),
                 "{path}: {link} lacks the selection"
@@ -180,33 +182,45 @@ async fn navigation_links_stay_plain_without_a_filter_or_with_every_character(po
         format!("/dashboard?chars={CAROL}"),
     ] {
         let html = page(&app, &browser, &path).await;
-        assert!(html.contains(r#"href="/orders""#), "{path}");
+        assert!(html.contains(r#"href="/orders/sell""#), "{path}");
         assert!(!html.contains("chars="), "{path}");
     }
 }
 
+/// The markup of the main navigation, inside the sidebar.
+fn sidebar(html: &str) -> &str {
+    let aside = html
+        .split_once(r#"<aside class="sidebar""#)
+        .expect("no sidebar")
+        .1;
+    aside.split_once("</aside>").expect("unclosed sidebar").0
+}
+
 #[sqlx::test]
-async fn characters_and_sign_out_are_icon_only_controls_that_keep_their_names(pool: PgPool) {
+async fn every_entry_has_an_icon_a_label_and_keeps_its_name_when_the_label_is_hidden(pool: PgPool) {
     let app = app(pool).await;
     let browser = signed_in(&app).await;
 
     for path in [
         "/dashboard",
-        "/orders",
+        "/orders/sell",
         "/wealth",
         "/trades",
-        "/opportunities",
         "/characters",
     ] {
         let html = page(&app, &browser, path).await;
-        let nav = html
-            .split_once(r#"id="main-nav""#)
-            .and_then(|(_, rest)| rest.split_once("</nav>"))
-            .unwrap_or_else(|| panic!("{path} has no navigation"))
-            .0;
-        for name in ["Characters", "Sign out"] {
-            let control = nav
-                .split(['<'])
+        let side = sidebar(&html);
+        for name in [
+            "Dashboard",
+            "Characters",
+            "Wealth",
+            "Trades",
+            "Orders",
+            "Opportunities",
+            "Sign out",
+        ] {
+            let control = side
+                .split('<')
                 .find(|tag| {
                     (tag.starts_with("a ") || tag.starts_with("button "))
                         && tag.contains(&format!(r#"aria-label="{name}""#))
@@ -216,34 +230,53 @@ async fn characters_and_sign_out_are_icon_only_controls_that_keep_their_names(po
                 control.contains(&format!(r#"title="{name}""#)),
                 "{path}: {control}"
             );
+            assert!(
+                side.contains(&format!(r#"<span class="label">{name}</span>"#)),
+                "{path}: no visible label for {name}"
+            );
         }
-        assert!(nav.matches("<svg").count() >= 2, "{path}: icons in the bar");
+        let entries = side.split_once(r#"id="main-nav""#).unwrap().1;
+        assert_eq!(
+            entries.matches("<svg").count(),
+            7,
+            "{path}: one icon per entry"
+        );
         assert!(!html.contains("<h1"), "{path} has a page heading");
     }
 }
 
 #[sqlx::test]
-async fn the_trades_link_sits_between_wealth_and_opportunities_and_never_carries_a_range(
-    pool: PgPool,
-) {
+async fn the_entries_are_ordered_and_sign_out_comes_last(pool: PgPool) {
     let app = app(pool).await;
     let browser = signed_in(&app).await;
 
-    let html = page(&app, &browser, "/dashboard?range=30d").await;
+    let html = page(&app, &browser, "/dashboard?range=30d&page=2&per_page=100").await;
 
-    let links: Vec<&str> = html
-        .split_once(r#"class="links""#)
-        .unwrap()
-        .1
-        .split_once("</ul>")
-        .unwrap()
-        .0
-        .split(r#"href=""#)
+    let nav = sidebar(&html)
+        .split_once(r#"id="main-nav""#)
+        .expect("no main nav")
+        .1;
+    let entries: Vec<&str> = nav
+        .split(r#"aria-label=""#)
         .skip(1)
         .map(|rest| rest.split('"').next().unwrap())
         .collect();
     assert_eq!(
-        links,
-        ["/dashboard", "/orders", "/wealth", "/trades", "/opportunities"]
+        entries,
+        [
+            "Dashboard",
+            "Characters",
+            "Wealth",
+            "Trades",
+            "Orders",
+            "Opportunities",
+            "Sign out"
+        ]
     );
+    let links: Vec<&str> = nav
+        .split(r#"href=""#)
+        .skip(1)
+        .map(|rest| rest.split('"').next().unwrap())
+        .collect();
+    assert_eq!(links, NAV_LINKS, "no range, page or per-page in the links");
 }

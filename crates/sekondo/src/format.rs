@@ -111,6 +111,25 @@ pub fn percent_of(part_cents: i64, whole_cents: i64) -> String {
     format!("{}.{}", tenths / 10, tenths % 10)
 }
 
+/// `part` as a percentage of `whole` (both in cents) with two decimals, rounded half up (half away
+/// from zero for a negative part), without floating point: `2,000,000` of `8,000,000` is `25.00`.
+/// A whole of nothing or less has no percentage: it reads `0.00`.
+pub fn percent_of_hundredths(part_cents: i64, whole_cents: i64) -> String {
+    if whole_cents <= 0 {
+        return "0.00".to_owned();
+    }
+    let whole = i128::from(whole_cents);
+    let magnitude = i128::from(part_cents).abs();
+    // Hundredths of a percent: part / whole * 10000, half up.
+    let hundredths = (magnitude * 10_000 * 2 + whole) / (whole * 2);
+    let sign = if part_cents < 0 && hundredths > 0 {
+        "-"
+    } else {
+        ""
+    };
+    format!("{sign}{}.{:02}", hundredths / 100, hundredths % 100)
+}
+
 /// A fraction as a percentage with two decimals: `0.1287` is `12.87%`. Not finite shows a dash.
 pub fn percent(fraction: f64) -> String {
     if !fraction.is_finite() {
@@ -243,6 +262,29 @@ mod tests {
         assert_eq!(percent_of(124, 10_000), "1.2");
         assert_eq!(percent_of(isk(100, 0), isk(100, 0)), "100.0");
         assert_eq!(percent_of(isk(250, 0), isk(100, 0)), "250.0");
+    }
+
+    #[test]
+    fn a_share_is_a_percentage_rounded_half_up_to_two_decimals() {
+        assert_eq!(
+            percent_of_hundredths(isk(2_000_000, 0), isk(8_000_000, 0)),
+            "25.00"
+        );
+        assert_eq!(percent_of_hundredths(1, 3), "33.33");
+        assert_eq!(percent_of_hundredths(1, 6), "16.67");
+        assert_eq!(percent_of_hundredths(5, 8), "62.50");
+        // Exactly on a half: 0.125 % is 0.13, 0.124 % is 0.12.
+        assert_eq!(percent_of_hundredths(125, 100_000), "0.13");
+        assert_eq!(percent_of_hundredths(124, 100_000), "0.12");
+        assert_eq!(percent_of_hundredths(0, 100), "0.00");
+    }
+
+    #[test]
+    fn a_negative_share_rounds_away_from_zero_and_never_reads_minus_zero() {
+        assert_eq!(percent_of_hundredths(-150_000, 10_000_000), "-1.50");
+        assert_eq!(percent_of_hundredths(-125, 100_000), "-0.13");
+        assert_eq!(percent_of_hundredths(-1, 100_000), "0.00");
+        assert_eq!(percent_of_hundredths(5, 0), "0.00");
     }
 
     #[test]

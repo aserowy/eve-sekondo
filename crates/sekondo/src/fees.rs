@@ -12,7 +12,11 @@ use sqlx::{PgConnection, PgExecutor, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::esi::{EsiClient, EsiError};
+use crate::{
+    esi::{EsiClient, EsiError},
+    oauth::LOCATION_SCOPE,
+    opportunities::{STATION_ID, STATION_NAME},
+};
 
 /// ESI's skill IDs of the two skills that matter.
 pub const ACCOUNTING: i64 = 16622;
@@ -45,6 +49,20 @@ macro_rules! fixed_location_sql {
     () => {
         "SELECT c.character_id, $3::bigint AS location_id
             FROM characters c
+            WHERE c.character_id = ANY($1) AND ($2::uuid IS NULL OR c.account_id = $2)"
+    };
+}
+
+/// The fee location of every character of `$1` that belongs to the account `$2` (`NULL`: any): the
+/// station or structure it is docked in when it has granted the location scope (`$3`) and has been
+/// reported docked, otherwise Jita 4-4 (`$4`).
+macro_rules! fee_location_sql {
+    () => {
+        "SELECT c.character_id,
+                CASE WHEN $3::text = ANY(c.scopes) THEN COALESCE(cl.location_id, $4::bigint)
+                     ELSE $4::bigint END AS location_id
+            FROM characters c
+            LEFT JOIN character_locations cl ON cl.character_id = c.character_id
             WHERE c.character_id = ANY($1) AND ($2::uuid IS NULL OR c.account_id = $2)"
     };
 }
@@ -152,6 +170,24 @@ const LOCATION_FEES_SQL: &str = concat!(
     ORDER BY f.character_id"
 );
 
+/// Like [`LOCATION_FEES_SQL`], at the fee location of each character (see [`fee_location_sql`]).
+const FEE_LOCATION_FEES_SQL: &str = concat!(
+    "
+    SELECT f.character_id, f.location_id, f.is_structure,
+           f.accounting, f.broker_relations,
+           f.faction_standing::text AS faction_standing, f.corp_standing::text AS corp_standing,
+           f.sales_tax::text AS sales_tax, f.broker_fee::text AS broker_fee,
+           CASE WHEN f.broker_fee IS NOT NULL AND f.sales_tax IS NOT NULL THEN
+               (((1 + f.broker_fee / 100) / (1 - f.broker_fee / 100 - f.sales_tax / 100) - 1) * 100)::text
+           END AS min_margin,
+           NOT ($3::text = ANY(ch.scopes)) AS needs_location_scope
+    FROM (",
+    fee_rates_sql!(fee_location_sql!()),
+    ") f
+    JOIN characters ch ON ch.character_id = f.character_id
+    ORDER BY f.character_id"
+);
+
 /// The rates part of [`FEES_SQL`], with its `$1` and `$2`: one row per (character, location) of the
 /// current orders with `sales_tax` and `broker_fee` as `numeric` percent (and the inputs they are
 /// worked out from). The orders listing joins it to work out the margin.
@@ -174,6 +210,21 @@ pub struct FeeRow {
     pub sales_tax: Option<String>,
     pub broker_fee: Option<String>,
     pub min_margin: Option<String>,
+}
+
+/// The fees of a character at its fee location, and whether the missing location scope is why
+/// that is Jita 4-4 (the page then offers to log in again).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CharacterFee {
+    pub row: FeeRow,
+    pub needs_location_scope: bool,
+}
+
+#[derive(sqlx::FromRow)]
+struct CharacterFeeRow {
+    #[sqlx(flatten)]
+    row: FeeRow,
+    needs_location_scope: bool,
 }
 
 /// The rows of these characters, whoever owns them. For the pollers, which work per character.
@@ -207,10 +258,12 @@ pub async fn sale_rates_for_characters<'e>(
 }
 
 /// What the pages show of the fees of these characters: the rates at the locations of their orders
-/// and of their sales. Two snapshots differ exactly when a signal is due.
+/// and of their sales, and at their fee location. Two snapshots differ exactly when a signal is
+/// due.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeeSnapshot {
     pub orders: Vec<FeeRow>,
+    pub fee_location: Vec<CharacterFee>,
     pub sales: Vec<(i64, i64, Option<String>, Option<String>)>,
 }
 
@@ -218,6 +271,7 @@ impl FeeSnapshot {
     pub async fn of(conn: &mut PgConnection, character_ids: &[i64]) -> Result<Self, sqlx::Error> {
         Ok(Self {
             orders: for_characters(&mut *conn, character_ids).await?,
+            fee_location: fee_locations(&mut *conn, None, character_ids).await?,
             sales: sale_rates_for_characters(&mut *conn, character_ids).await?,
         })
     }
@@ -229,6 +283,12 @@ impl FeeSnapshot {
                 .orders
                 .iter()
                 .filter(|r| r.character_id == character_id)
+                .cloned()
+                .collect(),
+            fee_location: self
+                .fee_location
+                .iter()
+                .filter(|r| r.row.character_id == character_id)
                 .cloned()
                 .collect(),
             sales: self
@@ -269,6 +329,37 @@ pub async fn at_location(
         .bind(location_id)
         .fetch_all(pool)
         .await
+}
+
+/// The fees of these characters at their fee location, whether or not they have an order there.
+/// Only characters of the account count, so a selection can never reach another account's data.
+pub async fn at_fee_location(
+    pool: &PgPool,
+    account_id: Uuid,
+    character_ids: &[i64],
+) -> Result<Vec<CharacterFee>, sqlx::Error> {
+    fee_locations(pool, Some(account_id), character_ids).await
+}
+
+async fn fee_locations<'e>(
+    executor: impl PgExecutor<'e>,
+    account_id: Option<Uuid>,
+    character_ids: &[i64],
+) -> Result<Vec<CharacterFee>, sqlx::Error> {
+    let rows: Vec<CharacterFeeRow> = sqlx::query_as(FEE_LOCATION_FEES_SQL)
+        .bind(character_ids)
+        .bind(account_id)
+        .bind(LOCATION_SCOPE)
+        .bind(STATION_ID)
+        .fetch_all(executor)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| CharacterFee {
+            row: r.row,
+            needs_location_scope: r.needs_location_scope,
+        })
+        .collect())
 }
 
 /// Makes sure the owner of an NPC station is known: asks ESI once when it is not, and stores it
@@ -437,15 +528,40 @@ fn location_view(row: &FeeRow, name: String) -> FeeLocationView {
     }
 }
 
-/// The fee table of every selected character of the account, by character: one row per location
-/// with orders, ordered by location name.
-pub async fn locations_by_character(
+/// The fees of one selected character at its fee location, ready for the fee cards.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeeCard {
+    pub character_id: i64,
+    pub character: String,
+    /// The location scope is missing, so the location is Jita 4-4: the cards offer to log in again.
+    pub needs_location_scope: bool,
+    pub location: FeeLocationView,
+}
+
+/// The name of a location as the pages show it: the cached name, Jita 4-4 by its known name, a
+/// structure that cannot be described, or the bare ID.
+fn location_name(
+    names: &HashMap<i64, Option<String>>,
+    location_id: i64,
+    is_structure: bool,
+) -> String {
+    match names.get(&location_id) {
+        Some(Some(name)) => name.clone(),
+        Some(None) if is_structure => format!("Unknown structure ({location_id})"),
+        _ if location_id == STATION_ID => STATION_NAME.to_owned(),
+        _ => format!("#{location_id}"),
+    }
+}
+
+/// One card set per selected character of the account, in the order the characters were linked:
+/// its fees at its fee location.
+pub async fn fee_cards(
     pool: &PgPool,
     account_id: Uuid,
     character_ids: &[i64],
-) -> Result<HashMap<i64, Vec<FeeLocationView>>, sqlx::Error> {
-    let rows = for_account(pool, account_id, character_ids).await?;
-    let location_ids: Vec<i64> = rows.iter().map(|r| r.location_id).collect();
+) -> Result<Vec<FeeCard>, sqlx::Error> {
+    let fees = at_fee_location(pool, account_id, character_ids).await?;
+    let location_ids: Vec<i64> = fees.iter().map(|f| f.row.location_id).collect();
     let names: HashMap<i64, Option<String>> =
         sqlx::query_as::<_, (i64, Option<String>)>("SELECT id, name FROM names WHERE id = ANY($1)")
             .bind(&location_ids)
@@ -453,27 +569,26 @@ pub async fn locations_by_character(
             .await?
             .into_iter()
             .collect();
-    let mut by_character: HashMap<i64, Vec<(String, i64, FeeLocationView)>> = HashMap::new();
-    for row in &rows {
-        let name = match names.get(&row.location_id) {
-            Some(Some(name)) => name.clone(),
-            Some(None) if row.is_structure => format!("Unknown structure ({})", row.location_id),
-            _ => format!("#{}", row.location_id),
-        };
-        by_character.entry(row.character_id).or_default().push((
-            name.to_lowercase(),
-            row.location_id,
-            location_view(row, name),
-        ));
-    }
-    Ok(by_character
+    let characters: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT character_id, name FROM characters
+         WHERE account_id = $1 AND character_id = ANY($2)
+         ORDER BY created_at, character_id",
+    )
+    .bind(account_id)
+    .bind(character_ids)
+    .fetch_all(pool)
+    .await?;
+    Ok(characters
         .into_iter()
-        .map(|(character, mut locations)| {
-            locations.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
-            (
+        .filter_map(|(character_id, character)| {
+            let fee = fees.iter().find(|f| f.row.character_id == character_id)?;
+            let name = location_name(&names, fee.row.location_id, fee.row.is_structure);
+            Some(FeeCard {
+                character_id,
                 character,
-                locations.into_iter().map(|(_, _, view)| view).collect(),
-            )
+                needs_location_scope: fee.needs_location_scope,
+                location: location_view(&fee.row, name),
+            })
         })
         .collect())
 }

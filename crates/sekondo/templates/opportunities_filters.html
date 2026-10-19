@@ -1,5 +1,7 @@
-<form id="opportunity-filters" class="filters" data-invalid-target="#filter-error" hx-post="/opportunities/settings" hx-trigger="change" hx-target="#opportunity-tables" hx-swap="innerHTML">
+<form id="opportunity-filters" class="filters" data-view-state data-invalid-target="#filter-error" hx-post="/opportunities/settings" hx-trigger="change" hx-target="#content" hx-sync="#content:replace" hx-swap="innerHTML show:#content:top">
   <input type="hidden" name="chars" value="{{ view.filters.chars }}">
+  <input type="hidden" name="table" value="{{ view.filters.table }}">
+  <input type="hidden" name="per_page" value="{{ view.filters.per_page }}">
   {% for (name, value) in view.filters.sorts %}
   <input type="hidden" name="{{ name }}" value="{{ value }}">
   {% endfor %}

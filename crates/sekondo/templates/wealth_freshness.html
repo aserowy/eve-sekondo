@@ -1,13 +1,5 @@
-<div class="freshness-head">
-  <button type="button" class="freshness-toggle" aria-controls="wealth-freshness-body" aria-expanded="false" aria-label="Freshness" title="Show freshness"{% if view.warnings > 0 %} aria-describedby="wealth-freshness-warnings"{% endif %}>
-    <span class="when-closed">{% include "icons/panel-right-open.html" %}</span><span class="when-open">{% include "icons/panel-right-close.html" %}</span>
-    {% if view.warnings > 0 %}<mark class="badge stale warnings">{{ view.warnings }}</mark>{% endif %}
-  </button>
-  {% if view.warnings > 0 %}<span id="wealth-freshness-warnings" hidden>{% if view.warnings == 1 %}1 character needs attention{% else %}{{ view.warnings }} characters need attention{% endif %}</span>{% endif %}
-</div>
-<div id="wealth-freshness-body" class="freshness-body" hidden>
-<h2 class="panel-title">Freshness</h2>
-<ul class="freshness scroll" data-scroll-key="wealth-freshness">
+<h2>Freshness</h2>
+<ul class="freshness">
   {% for f in view.freshness %}
   <li>
     <strong>{{ f.name }}</strong>
@@ -27,4 +19,3 @@
   </li>
   {% endfor %}
 </ul>
-</div>

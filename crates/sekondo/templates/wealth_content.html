@@ -1,0 +1,43 @@
+<div class="kpis">
+  {% for kpi in view.kpis %}{% include "kpi_card.html" %}{% endfor %}
+</div>
+<section id="wealth-graph" class="history">
+  <h2>Over time</h2>
+  {% if let Some(chart) = view.graph.chart %}
+  <div class="chart"><canvas data-chart="wealth-stack" data-series="{{ chart.series }}" role="img" aria-label="{{ chart.label }}"></canvas></div>
+  {% else %}
+  <p>No history yet.</p>
+  {% endif %}
+</section>
+<section id="wealth-items">
+  <h2>Inventory</h2>
+  {% if view.items.rows.is_empty() %}
+  <p>No items.</p>
+  {% else %}
+  <div class="table-wrap">
+  <table class="data" id="inventory">
+    <thead>
+      <tr>
+        {% for h in view.items.headers %}
+        <th scope="col"{% if !h.aria_sort.is_empty() %} aria-sort="{{ h.aria_sort }}"{% endif %}{% if h.numeric %} class="num"{% endif %}><a href="{{ h.href }}" hx-get="{{ h.content_href }}" hx-target="#content" hx-swap="innerHTML show:#content:top" hx-sync="#content:replace" hx-push-url="{{ h.href }}">{{ h.label }}{{ h.arrow }}</a></th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in view.items.rows %}
+      <tr>
+        <td>{{ r.character }}</td>
+        <td>{{ r.item }}</td>
+        <td class="num">{{ r.quantity }}</td>
+        <td class="num"{% if !r.price_exact.is_empty() %} title="{{ r.price_exact }}"{% endif %}>{{ r.price }}</td>
+        <td class="num"{% if !r.value_exact.is_empty() %} title="{{ r.value_exact }}"{% endif %}>{{ r.value }}</td>
+        <td>{{ r.location }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+</section>
+{% let pager = view.pager %}
+{% include "pagination.html" %}

@@ -21,6 +21,8 @@ pub struct ViewQuery {
     pub md: Option<String>,
     pub ts: Option<String>,
     pub td: Option<String>,
+    pub page: Option<String>,
+    pub per_page: Option<String>,
 }
 
 impl ViewQuery {
@@ -43,11 +45,18 @@ impl ViewQuery {
                 "md" => &mut parsed.md,
                 "ts" => &mut parsed.ts,
                 "td" => &mut parsed.td,
+                "page" => &mut parsed.page,
+                "per_page" => &mut parsed.per_page,
                 _ => continue,
             };
             slot.get_or_insert_with(|| value.into_owned());
         }
         parsed
+    }
+
+    /// The paging of the table the view shows; never fails.
+    pub fn paging(&self) -> crate::pagination::Paging {
+        crate::pagination::Paging::parse(self.page.as_deref(), self.per_page.as_deref())
     }
 
     pub fn selection(&self, account_characters: &[i64]) -> CharacterSelection {

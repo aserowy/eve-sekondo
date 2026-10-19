@@ -49,13 +49,39 @@ test('Add character and Unlink keep their text and carry an icon in front of it'
   }
 });
 
-test('the characters page lists characters as dense rows', async ({ page }) => {
+test('the characters page uses Pico: no panels, one line per character, and the body keeps its default size', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
   await openCharacters(page);
 
   const portrait = (await page.locator('#character-90000001 img').boundingBox())!;
   expect(portrait.width).toBe(32);
   expect(portrait.height).toBe(32);
-  const row = (await page.locator('#character-90000001').boundingBox())!;
-  expect(row.height).toBeLessThanOrEqual(44);
+  // Portrait, name and Unlink share one line.
+  const centre = async (selector: string) => {
+    const box = (await page.locator(selector).boundingBox())!;
+    return box.y + box.height / 2;
+  };
+  const centres = [
+    await centre('#character-90000001 img'),
+    await centre('#character-90000001 strong'),
+    await centre('#character-90000001 .unlink'),
+  ];
+  expect(Math.max(...centres) - Math.min(...centres)).toBeLessThanOrEqual(2);
+  await expect(page.locator('.panel, .panel-title')).toHaveCount(0);
+  const fonts = await page.evaluate(() => ({
+    body: getComputedStyle(document.body).fontSize,
+    root: getComputedStyle(document.documentElement).fontSize,
+  }));
+  expect(fonts.body).toBe(fonts.root);
+});
+
+test('the error and landing pages are Pico articles with a button', async ({ page }) => {
+  await page.goto('/');
+  const article = page.locator('main article.card');
+  await expect(article).toBeVisible();
+  await expect(article.getByRole('button', { name: 'Log in with EVE Online' })).toHaveAttribute('href', '/auth/login');
+  await expect(page.locator('.panel')).toHaveCount(0);
+  // Without a sidebar the page has the whole width.
+  const main = (await page.locator('main').boundingBox())!;
+  expect(main.width).toBeGreaterThan(1200);
 });

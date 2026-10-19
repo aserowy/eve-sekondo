@@ -1,10 +1,10 @@
-<section id="figures" class="panel">
-  <h2 class="panel-title">{{ view.name }} &middot; {{ view.table_title }}</h2>
+<section id="figures">
+  <h2>{{ view.name }} &middot; {{ view.table_title }}</h2>
   {% if let Some(reason) = view.reason %}
-  <p id="opportunity-detail-unlisted" class="alert">No longer listed in this table. {{ reason }}</p>
+  <p id="opportunity-detail-unlisted" class="alert" role="status">No longer listed in this table. {{ reason }}</p>
   {% endif %}
   {% if !view.figures.is_empty() %}
-  <div class="scroll">
+  <div class="table-wrap">
     <table class="data figures">
       <tbody>
         {% for f in view.figures %}
@@ -16,14 +16,14 @@
   {% endif %}
 </section>
 {% for c in view.charts %}
-<section id="{{ c.kind }}" class="panel chart-row">
-  <h2 class="panel-title">{{ c.title }}</h2>
+<section id="{{ c.kind }}" class="chart-row">
+  <h2>{{ c.title }}</h2>
   <div class="chart"><canvas data-chart="{{ c.kind }}" data-series="{{ c.json }}" role="img" aria-label="{{ c.title }}"></canvas></div>
 </section>
 {% endfor %}
 {% if !view.next_occurrences.is_empty() %}
-<section id="next" class="panel">
-  <h2 class="panel-title">Next occurrences (EVE time)</h2>
+<section id="next">
+  <h2>Next occurrences (EVE time)</h2>
   <ul class="next-occurrences">
     {% for at in view.next_occurrences %}<li>{{ at }}</li>{% endfor %}
   </ul>

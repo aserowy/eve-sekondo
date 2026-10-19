@@ -1,8 +1,11 @@
 {% extends "base.html" %}
 
-{% block title %}Orders · Sekondo{% endblock %}
+{% block title %}{% if view.side == Side::Sell %}Sell orders{% else %}Buy orders{% endif %} · Sekondo{% endblock %}
 
-{% block page_type %}page-window{% endblock %}
+{% block subnav %}
+{% let oob = false %}
+{% include "orders_sub_menu.html" %}
+{% endblock %}
 
 {% block filters %}
 <div class="filter-box" id="filter-box">
@@ -12,13 +15,11 @@
 
 {% block content %}
 <div hx-ext="sse" sse-connect="/events">
-<div id="orders-view">
-  <section id="freshness" class="panel" data-freshness hx-get="{{ view.freshness_url }}" hx-trigger="sse:orders-updated, sse:fees-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
+  <section id="content" data-live="{{ view.content_path }}" hx-get="{{ view.content_url }}" hx-trigger="sse:orders-updated, sse:market-updated, sse:fees-updated, htmx:sseOpen from:body" hx-swap="innerHTML" hx-sync="this:queue last">
+    {% include "orders_content.html" %}
+  </section>
+  <section id="freshness" data-live="/orders/freshness" hx-get="{{ view.freshness_url }}" hx-trigger="sse:orders-updated, sse:fees-updated, htmx:sseOpen from:body" hx-swap="innerHTML" hx-sync="this:queue last">
     {% include "orders_freshness.html" %}
   </section>
-  <div id="order-tables" hx-get="{{ view.tables_url }}" hx-trigger="sse:orders-updated, sse:market-updated, sse:fees-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
-    {% include "orders_tables.html" %}
-  </div>
-</div>
 </div>
 {% endblock %}

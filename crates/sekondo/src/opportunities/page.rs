@@ -3,7 +3,7 @@
 use askama::Template;
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{StatusCode, Uri},
     response::{IntoResponse, Redirect, Response},
 };
 use sqlx::PgPool;
@@ -27,6 +27,7 @@ use crate::{
     csrf, format,
     orders::{Dir, FilterEntry},
     pages::{self, Nav, Page},
+    pagination::{Link, PageView, Paging, paginate},
     selection::{CharacterSelection, ViewQuery},
     station_book::BOOK_INTERVAL,
 };
@@ -74,16 +75,6 @@ async fn own_snapshot_days(pool: &PgPool) -> Result<i64, sqlx::Error> {
     .await
 }
 
-impl FreshnessView {
-    /// What the collapsed freshness strip counts: a stale book, a failed last book refresh and a
-    /// failed last history run, one each.
-    pub fn warnings(&self) -> usize {
-        usize::from(self.book_stale)
-            + usize::from(self.book_error.is_some())
-            + usize::from(self.history_error.is_some())
-    }
-}
-
 pub async fn freshness(pool: &PgPool, now: OffsetDateTime) -> Result<FreshnessView, sqlx::Error> {
     let rows: Vec<SyncRow> = sqlx::query_as(
         "SELECT kind, last_success_at, last_error FROM station_sync
@@ -117,7 +108,10 @@ pub async fn freshness(pool: &PgPool, now: OffsetDateTime) -> Result<FreshnessVi
 
 pub struct HeaderView {
     pub label: &'static str,
+    /// The page that the sorting leads to, for the address bar.
     pub href: String,
+    /// The content fragment that htmx fetches for it.
+    pub content_href: String,
     /// `ascending`, `descending` or empty: for `aria-sort`.
     pub aria_sort: &'static str,
     pub arrow: &'static str,
@@ -156,25 +150,44 @@ pub struct FiltersView {
     pub chars: String,
     /// `(name, value)` of the hidden inputs: every table's sorting.
     pub sorts: Vec<(&'static str, String)>,
+    /// The table of the page that saves, and its page size: saving shows page 1 of it.
+    pub table: &'static str,
+    pub per_page: u32,
+}
+
+/// One link of the page sub-menu: a table's page.
+pub struct SubMenuLink {
+    pub label: &'static str,
+    pub href: String,
+    pub current: bool,
 }
 
 /// Everything the page and its fragments show for one request.
 pub struct OpportunitiesView {
+    pub table_id: &'static str,
     pub filters: FiltersView,
     pub characters: Vec<FilterEntry>,
     pub station_name: &'static str,
+    /// The path of the table's page, without a query: the character filter builds its own.
+    pub page_path: String,
     pub freshness_url: String,
-    pub tables_url: String,
+    /// The table's content fragment with the whole view state, for live refreshes.
+    pub content_url: String,
+    pub content_path: String,
+    pub sub_menu: Vec<SubMenuLink>,
     pub freshness: FreshnessView,
     /// Which fees the analyses use.
     pub fees_note: String,
-    pub tables: Vec<TableView>,
+    pub table: TableView,
+    pub pager: PageView,
 }
 
-/// The view state a URL carries: the selection and one sorting per table.
+/// The view state a URL carries: the selection, one sorting per table and the paging of the
+/// table shown.
 struct ViewState {
     chars: Option<String>,
     sorts: [Sort; 4],
+    paging: Paging,
 }
 
 impl ViewState {
@@ -194,6 +207,7 @@ impl ViewState {
         Self {
             chars: selection.param(),
             sorts,
+            paging: query.paging(),
         }
     }
 
@@ -208,12 +222,22 @@ impl ViewState {
         self.sorts[Self::index(table)]
     }
 
+    /// Another sorting of one table, from the first page.
     fn with_sort(&self, table: Table, sort: Sort) -> Self {
         let mut sorts = self.sorts;
         sorts[Self::index(table)] = sort;
         Self {
             chars: self.chars.clone(),
             sorts,
+            paging: self.paging.first(),
+        }
+    }
+
+    fn with_paging(&self, paging: Paging) -> Self {
+        Self {
+            chars: self.chars.clone(),
+            sorts: self.sorts,
+            paging,
         }
     }
 
@@ -232,8 +256,8 @@ impl ViewState {
         hidden
     }
 
-    /// `""` or `?chars=…&cs=…&cd=…`: only what differs from the defaults.
-    fn query(&self) -> String {
+    /// `""` or `?chars=…&cs=…&cd=…&page=…`: only what differs from the defaults.
+    fn query(&self, with_paging: bool) -> String {
         let mut pairs = url::form_urlencoded::Serializer::new(String::new());
         if let Some(chars) = &self.chars {
             // The commas stay readable in the URL, as in bookmarks people write by hand.
@@ -247,7 +271,16 @@ impl ViewState {
                 pairs.append_pair(dir_param, if sort.dir == Dir::Asc { "asc" } else { "desc" });
             }
         }
-        let query = pairs.finish().replace("%2C", ",");
+        let mut query = pairs.finish().replace("%2C", ",");
+        if with_paging {
+            let paging = self.paging.query();
+            if !paging.is_empty() {
+                if !query.is_empty() {
+                    query.push('&');
+                }
+                query.push_str(&paging);
+            }
+        }
         if query.is_empty() {
             query
         } else {
@@ -330,39 +363,51 @@ async fn environment(
 async fn build_view(
     state: &AppState,
     account_id: Uuid,
+    table: Table,
     query: &ViewQuery,
     rejected: Option<Rejected>,
 ) -> Result<Option<(OpportunitiesView, CharacterSelection)>, sqlx::Error> {
-    let Some(env) = environment(state, account_id, query).await? else {
+    let Some(mut env) = environment(state, account_id, query).await? else {
         return Ok(None);
     };
     let context = env.context();
-    let page_query = env.view_state.query();
-    let tables = Table::ALL
-        .into_iter()
-        .map(|table| {
-            let sort = env.view_state.sort(table);
-            TableView {
-                id: table.id(),
-                title: table.title(),
-                headers: headers(&env.view_state, table),
-                rows: tables::rows(table, &env.stats, &context, sort)
-                    .iter()
-                    .map(|row| row_view(table, row, &page_query))
-                    .collect(),
-            }
-        })
-        .collect();
+    let sort = env.view_state.sort(table);
+    // Every row that passes the rules and the filters, sorted; the page shows a slice of them.
+    let all_rows = tables::rows(table, &env.stats, &context, sort);
+    let link_to = |paging: Paging| {
+        let query = env.view_state.with_paging(paging).query(true);
+        Link {
+            href: format!("/opportunities/{}{query}", table.id()),
+            content: format!("/opportunities/{}/content{query}", table.id()),
+        }
+    };
+    let (page_rows, pager) = paginate(&all_rows, env.view_state.paging, link_to);
+    // What the URLs below carry is the page actually shown, after clamping.
+    env.view_state.paging = pager.paging;
+    let detail_query = env.view_state.query(false);
+    let page_query = env.view_state.query(true);
+    let table_view = TableView {
+        id: table.id(),
+        title: table.title(),
+        headers: headers(&env.view_state, table),
+        rows: page_rows
+            .iter()
+            .map(|row| row_view(table, row, &detail_query))
+            .collect(),
+    };
     let (form, error) = match rejected {
         Some(Rejected { form, message }) => (form, Some(message)),
         None => (Form::of(&env.settings), None),
     };
     let view = OpportunitiesView {
+        table_id: table.id(),
         filters: FiltersView {
             form,
             error,
             chars: env.selection.param().unwrap_or_default(),
             sorts: env.view_state.hidden_sorts(),
+            table: table.id(),
+            per_page: env.view_state.paging.per_page,
         },
         characters: env
             .characters
@@ -374,11 +419,21 @@ async fn build_view(
             })
             .collect(),
         station_name: STATION_NAME,
+        page_path: format!("/opportunities/{}", table.id()),
         freshness_url: format!("/opportunities/freshness{}", env.selection.query()),
-        tables_url: format!("/opportunities/tables{page_query}"),
+        content_url: format!("/opportunities/{}/content{page_query}", table.id()),
+        content_path: format!("/opportunities/{}/content", table.id()),
+        sub_menu: Table::ALL
+            .map(|link| SubMenuLink {
+                label: link.title(),
+                href: format!("/opportunities/{}{detail_query}", link.id()),
+                current: link == table,
+            })
+            .into(),
         freshness: freshness(&state.pool, env.now).await?,
         fees_note: fees_note(&env.fee_choice, |id| env.character_name(id)),
-        tables,
+        table: table_view,
+        pager,
     };
     Ok(Some((view, env.selection.clone())))
 }
@@ -424,9 +479,11 @@ fn headers(state: &ViewState, table: Table) -> Vec<HeaderView> {
                 (true, Dir::Asc) => ("ascending", " \u{25B2}"),
                 (true, Dir::Desc) => ("descending", " \u{25BC}"),
             };
+            let query = state.with_sort(table, next).query(true);
             HeaderView {
                 label: key.label(),
-                href: format!("/opportunities{}", state.with_sort(table, next).query()),
+                href: format!("/opportunities/{}{query}", table.id()),
+                content_href: format!("/opportunities/{}/content{query}", table.id()),
                 aria_sort,
                 arrow,
                 numeric: key.is_numeric(),
@@ -553,11 +610,11 @@ struct FreshnessFragment {
     view: OpportunitiesView,
 }
 
-/// The four tables, and out of band the sub-menu (with the row counts) and the filter box's
-/// context text. A saved filter also clears the box's error text.
+/// The table with its pagination, and out of band the filter box's context text. A saved filter
+/// also clears the box's error text.
 #[derive(Template)]
-#[template(path = "opportunities_tables_fragment.html")]
-struct TablesFragment {
+#[template(path = "opportunities_content_fragment.html")]
+struct ContentFragment {
     view: OpportunitiesView,
     clear_error: bool,
 }
@@ -566,19 +623,21 @@ async fn load(
     state: &AppState,
     account: CurrentAccount,
     session: &Session,
+    table: Table,
     query: &ViewQuery,
 ) -> Result<(OpportunitiesView, CharacterSelection), Box<Response>> {
-    load_with(state, account, session, query, None).await
+    load_with(state, account, session, table, query, None).await
 }
 
 async fn load_with(
     state: &AppState,
     account: CurrentAccount,
     session: &Session,
+    table: Table,
     query: &ViewQuery,
     rejected: Option<Rejected>,
 ) -> Result<(OpportunitiesView, CharacterSelection), Box<Response>> {
-    match build_view(state, account.id, query, rejected).await {
+    match build_view(state, account.id, table, query, rejected).await {
         Ok(Some(loaded)) => Ok(loaded),
         Ok(None) => {
             // An account without characters cannot exist; the session outlived its account.
@@ -589,13 +648,32 @@ async fn load_with(
     }
 }
 
-pub async fn page(
+/// `/opportunities` is the first table's page, with whatever the old link carried.
+pub async fn index(uri: Uri) -> Response {
+    let target = match uri.query() {
+        Some(query) => format!("/opportunities/{}?{query}", Table::Expansion.id()),
+        None => format!("/opportunities/{}", Table::Expansion.id()),
+    };
+    Redirect::to(&target).into_response()
+}
+
+fn table_of(id: &str) -> Result<Table, Box<Response>> {
+    Table::from_id(id).ok_or_else(|| Box::new(StatusCode::NOT_FOUND.into_response()))
+}
+
+/// The page of one table.
+pub async fn table_page(
     State(state): State<AppState>,
     account: CurrentAccount,
     session: Session,
+    Path(table_id): Path<String>,
     query: ViewQuery,
 ) -> Response {
-    let (view, selection) = match load(&state, account, &session, &query).await {
+    let table = match table_of(&table_id) {
+        Ok(table) => table,
+        Err(response) => return *response,
+    };
+    let (view, selection) = match load(&state, account, &session, table, &query).await {
         Ok(loaded) => loaded,
         Err(response) => return *response,
     };
@@ -605,9 +683,30 @@ pub async fn page(
     };
     pages::render(&OpportunitiesPage {
         csrf_token,
-        nav: Some(Nav::new(Page::Opportunities).with_chars_query(selection.query())),
+        nav: Some(Nav::new(Page::Opportunities(table)).with_chars_query(selection.query())),
         view,
     })
+}
+
+/// The table and its pagination only, for live refreshes and the page's own controls.
+pub async fn content(
+    State(state): State<AppState>,
+    account: CurrentAccount,
+    session: Session,
+    Path(table_id): Path<String>,
+    query: ViewQuery,
+) -> Response {
+    let table = match table_of(&table_id) {
+        Ok(table) => table,
+        Err(response) => return *response,
+    };
+    match load(&state, account, &session, table, &query).await {
+        Ok((view, _)) => pages::render(&ContentFragment {
+            view,
+            clear_error: false,
+        }),
+        Err(response) => *response,
+    }
 }
 
 /// The freshness section only, for live refreshes.
@@ -617,55 +716,60 @@ pub async fn freshness_fragment(
     session: Session,
     query: ViewQuery,
 ) -> Response {
-    match load(&state, account, &session, &query).await {
+    match load(&state, account, &session, Table::Expansion, &query).await {
         Ok((view, _)) => pages::render(&FreshnessFragment { view }),
         Err(response) => *response,
     }
 }
 
-/// The four tables only, for live refreshes.
-pub async fn tables(
-    State(state): State<AppState>,
-    account: CurrentAccount,
-    session: Session,
-    query: ViewQuery,
-) -> Response {
-    match load(&state, account, &session, &query).await {
-        Ok((view, _)) => pages::render(&TablesFragment {
-            view,
-            clear_error: false,
-        }),
-        Err(response) => *response,
-    }
-}
-
-/// Saves the filter box. The form carries the view state (selection and sorting) as hidden
-/// fields, so the answer is the tables of the view the user is looking at; a rejected form gets
-/// the reason for the filter box's error text and nothing is stored.
+/// Saves the filter box. The form carries the view state (table, selection and sorting) as hidden
+/// fields, so the answer is page 1 of the table the user is looking at; a rejected form gets the
+/// reason for the filter box's error text and nothing is stored.
 pub async fn save_settings(
     State(state): State<AppState>,
     account: CurrentAccount,
     session: Session,
     body: String,
 ) -> Response {
-    let form = Form::from_pairs(url::form_urlencoded::parse(body.as_bytes()).into_owned());
+    let pairs: Vec<(String, String)> = url::form_urlencoded::parse(body.as_bytes())
+        .into_owned()
+        .collect();
+    let form = Form::from_pairs(pairs.clone());
+    // Saving starts over on the first page.
     let query = ViewQuery::parse(Some(&body));
+    let query = ViewQuery {
+        page: None,
+        ..query
+    };
+    let table = pairs
+        .iter()
+        .find(|(name, _)| name == "table")
+        .and_then(|(_, id)| Table::from_id(id))
+        .unwrap_or(Table::Expansion);
     match form.validate() {
         Ok(settings) => {
             if let Err(e) = settings.save(&state.pool, account.id).await {
                 return pages::internal_error(e);
             }
-            match load(&state, account, &session, &query).await {
-                Ok((view, _)) => pages::render(&TablesFragment {
-                    view,
-                    clear_error: true,
-                }),
+            match load(&state, account, &session, table, &query).await {
+                Ok((view, _)) => {
+                    // The address bar goes back to the first page of what the user was reading.
+                    let url = view.content_url.replacen("/content", "", 1);
+                    let mut response = pages::render(&ContentFragment {
+                        view,
+                        clear_error: true,
+                    });
+                    if let Ok(value) = url.parse() {
+                        response.headers_mut().insert("HX-Replace-Url", value);
+                    }
+                    response
+                }
                 Err(response) => *response,
             }
         }
         Err(message) => {
             let rejected = Rejected { form, message };
-            match load_with(&state, account, &session, &query, Some(rejected)).await {
+            match load_with(&state, account, &session, table, &query, Some(rejected)).await {
                 Ok((view, _)) => pages::render_with(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     &FilterErrorFragment { view },
@@ -720,6 +824,8 @@ pub struct DetailView {
     pub figures: Vec<FigureView>,
     /// Where this page's content loads from, so a live refresh can fetch it again.
     pub refresh_url: String,
+    /// The same without a query: a live refresh asks with the address bar's query.
+    pub refresh_path: String,
 }
 
 fn figure(
@@ -1156,8 +1262,9 @@ async fn build_detail(
     };
     let context = env.context();
     let sort = env.view_state.sort(table);
-    let page_query = env.view_state.query();
-    let refresh_url = format!("/opportunities/detail/{}/{type_id}{page_query}", table.id());
+    let page_query = env.view_state.query(false);
+    let refresh_path = format!("/opportunities/detail/{}/{type_id}", table.id());
+    let refresh_url = format!("{refresh_path}{page_query}");
     let fees_note = fees_note(&env.fee_choice, |id| env.character_name(id));
     let (name, charts, next_occurrences, reason, figures) =
         match tables::detail(table, type_id, &env.stats, &context, sort) {
@@ -1222,7 +1329,7 @@ async fn build_detail(
             })
             .collect(),
         sorts: env.view_state.hidden_sorts(),
-        back_url: format!("/opportunities{page_query}"),
+        back_url: format!("/opportunities/{}{page_query}", table.id()),
         page_url: format!("/opportunities/{}/{type_id}", table.id()),
         sections,
         charts,
@@ -1231,6 +1338,7 @@ async fn build_detail(
         fees_note,
         figures,
         refresh_url,
+        refresh_path,
     };
     Ok((view, env.selection.clone()))
 }
@@ -1263,58 +1371,15 @@ pub async fn detail_page(
             Ok(loaded) => loaded,
             Err(response) => return *response,
         };
+    // `build_detail` has answered "not found" for an unknown table, so this one is known.
+    let table = Table::from_id(&table_id).unwrap_or(Table::Expansion);
     let csrf_token = match csrf::token(&session).await {
         Ok(token) => token,
         Err(e) => return pages::internal_error(e),
     };
     pages::render(&DetailPage {
         csrf_token,
-        nav: Some(Nav::new(Page::Opportunities).with_chars_query(selection.query())),
+        nav: Some(Nav::new(Page::Opportunities(table)).with_chars_query(selection.query())),
         view,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::FreshnessView;
-
-    fn healthy() -> FreshnessView {
-        FreshnessView {
-            book_last: Some("2026-10-18 10:00".to_owned()),
-            book_stale: false,
-            book_waiting: false,
-            book_error: None,
-            history_last: Some("2026-10-18 09:00".to_owned()),
-            history_error: None,
-            own_days: 7,
-            own_days_needed: 7,
-            own_days_text: "7 days of own snapshots".to_owned(),
-        }
-    }
-
-    #[test]
-    fn a_healthy_station_sync_has_no_warnings() {
-        assert_eq!(healthy().warnings(), 0);
-    }
-
-    #[test]
-    fn a_stale_book_with_a_failed_refresh_counts_twice() {
-        let view = FreshnessView {
-            book_stale: true,
-            book_error: Some("503".to_owned()),
-            ..healthy()
-        };
-        assert_eq!(view.warnings(), 2);
-    }
-
-    #[test]
-    fn a_failed_history_run_counts_once_more() {
-        let view = FreshnessView {
-            book_stale: true,
-            book_error: Some("503".to_owned()),
-            history_error: Some("timeout".to_owned()),
-            ..healthy()
-        };
-        assert_eq!(view.warnings(), 3);
-    }
 }

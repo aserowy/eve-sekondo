@@ -22,17 +22,16 @@ async fn certificate_is_verified_by_clients(pool: PgPool) {
 #[sqlx::test]
 async fn vendored_static_files_are_served(pool: PgPool) {
     let app = common::spawn(pool).await;
-    for path in ["/static/htmx.min.js", "/static/app.css", "/static/app.js"] {
+    for path in [
+        "/static/htmx.min.js",
+        "/static/pico.min.css",
+        "/static/app.css",
+        "/static/app.js",
+        "/static/pico-icons/checkbox.svg",
+    ] {
         let res = app.client.get(app.url(path)).send().await.unwrap();
         assert_eq!(res.status(), 200, "{path}");
     }
-    let res = app
-        .client
-        .get(app.url("/static/pico.min.css"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.status(), 404, "pico.min.css is gone");
     let js = app
         .client
         .get(app.url("/static/app.js"))

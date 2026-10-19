@@ -14,7 +14,7 @@
 {% block filters %}
 {% let oob = false %}
 <div class="filter-box" id="filter-box">
-<form id="character-filter" data-character-filter data-opportunity-sorts hx-get="{{ view.page_url }}" hx-trigger="change" hx-target="#opportunity-detail-content" hx-select="#opportunity-detail-content" hx-select-oob="#main-nav, #filter-box, #section-nav" hx-swap="outerHTML" hx-push-url="true">
+<form id="character-filter" data-character-filter data-opportunity-sorts hx-get="{{ view.page_url }}" hx-trigger="change" hx-target="#opportunity-detail-content" hx-sync="#opportunity-detail-content:replace" hx-select="#opportunity-detail-content > *" hx-select-oob="#main-nav, #filter-box, #section-nav" hx-swap="innerHTML" hx-push-url="true">
   {% let characters = view.characters %}
   {% include "character_filter.html" %}
   {% for (name, value) in view.sorts %}
@@ -27,7 +27,7 @@
 
 {% block content %}
 <div hx-ext="sse" sse-connect="/events">
-<div id="opportunity-detail-content" hx-get="{{ view.refresh_url }}" hx-trigger="sse:opportunities-updated, sse:orders-updated, sse:fees-updated, htmx:sseOpen from:body" hx-swap="innerHTML">
+<div id="opportunity-detail-content" data-live="{{ view.refresh_path }}" hx-get="{{ view.refresh_url }}" hx-trigger="sse:opportunities-updated, sse:orders-updated, sse:fees-updated, htmx:sseOpen from:body" hx-swap="innerHTML" hx-sync="this:queue last">
   {% include "opportunities_detail.html" %}
 </div>
 </div>

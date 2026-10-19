@@ -461,6 +461,7 @@ async fn injected_failures_conform_on_every_esi_route() {
     let transactions = format!("/characters/{ALICE}/wallet/transactions");
     let skills = format!("/characters/{ALICE}/skills");
     let standings = format!("/characters/{ALICE}/standings");
+    let location = format!("/characters/{ALICE}/location");
 
     let failures: [(u16, &str, Value); 3] = [
         (
@@ -488,6 +489,7 @@ async fn injected_failures_conform_on_every_esi_route() {
             ("prices", "prices"),
             ("skills", "skills"),
             ("standings", "standings"),
+            ("location", "character-location"),
             ("stations", "stations"),
         ] {
             control(
@@ -507,6 +509,7 @@ async fn injected_failures_conform_on_every_esi_route() {
                 "prices" => get(&f, "/markets/prices", None).await,
                 "skills" => get(&f, &skills, Some(&token)).await,
                 "standings" => get(&f, &standings, Some(&token)).await,
+                "location" => get(&f, &location, Some(&token)).await,
                 "stations" => get(&f, &format!("/universe/stations/{STATION}"), None).await,
                 _ => get(&f, &structure, Some(&token)).await,
             };
@@ -705,6 +708,42 @@ async fn a_skills_fixture_without_the_active_level_fails_the_conformance_check()
         "{}",
         violations[0]
     );
+}
+
+#[tokio::test]
+async fn the_location_answers_conform_for_a_station_a_structure_open_space_and_a_missing_scope() {
+    let f = common::start_unverified().await;
+    let token = f.stub.issue_access_token(ALICE).unwrap();
+    let path = format!("/characters/{ALICE}/location");
+    conforms(
+        "character-location",
+        "station",
+        &get(&f, &path, Some(&token)).await,
+    );
+
+    for (variant, location) in [
+        (
+            "structure",
+            json!({"solar_system_id": 30000144, "structure_id": 1000000000001u64}),
+        ),
+        ("in-space", json!({"solar_system_id": 30000144})),
+    ] {
+        control(
+            &f,
+            "location",
+            json!({"character_id": ALICE, "location": location}),
+        )
+        .await;
+        conforms(
+            "character-location",
+            variant,
+            &get(&f, &path, Some(&token)).await,
+        );
+    }
+
+    let forbidden = get(&f, &path, Some(&narrow_token(&f, ALICE))).await;
+    assert_eq!(forbidden.status, 403);
+    conforms("character-location", "forbidden", &forbidden);
 }
 
 #[tokio::test]

@@ -1,6 +1,6 @@
 mod common;
 
-use common::{AppBuilder, Browser, TestApp};
+use common::{AppBuilder, Browser, TestApp, kpi};
 use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 
@@ -99,7 +99,7 @@ async fn unauthenticated_requests_are_redirected_to_the_landing_page(pool: PgPoo
 }
 
 #[sqlx::test]
-async fn the_page_has_the_character_filter_the_range_in_the_table_title_and_no_heading(
+async fn the_page_has_the_character_filter_and_the_range_in_the_filter_section_and_no_heading(
     pool: PgPool,
 ) {
     let app = app(pool).await;
@@ -108,19 +108,36 @@ async fn the_page_has_the_character_filter_the_range_in_the_table_title_and_no_h
     let html = get(&app, &browser, "/trades").await;
 
     assert!(!html.contains("<h1"), "the navigation names the page");
+    assert!(!html.contains("panel"), "no self-made panels");
     assert!(html.contains(r#"data-character-filter"#));
     assert!(html.contains(r#"hx-get="/trades""#));
-    assert!(html.contains("Alice Alpha"));
-    let table = html.split(r#"id="trades-table""#).nth(1).unwrap();
-    let title = &table[..table.find("</div>").unwrap()];
-    assert!(title.contains("range-control"), "{title}");
+    let filter = html.split(r#"id="filter-box""#).nth(1).unwrap();
+    let filter = &filter[..filter.find(r#"id="content""#).unwrap()];
+    assert!(filter.contains("Alice Alpha"), "{filter}");
+    assert!(filter.contains(r#"id="trades-range-control""#), "{filter}");
     assert!(html.contains("No trades in this range"), "empty state");
+    assert!(
+        !html.contains(r#"class="pagination""#),
+        "nothing to page through"
+    );
+    assert!(
+        !html.contains("<nav class=\"sub-menu\""),
+        "no sub-menu on the trades page"
+    );
     let current: Vec<_> = html
         .split("<a ")
         .skip(1)
         .filter_map(|tag| tag.split_once('>'))
         .filter(|(attrs, _)| attrs.contains(r#"aria-current="page""#))
-        .map(|(_, rest)| rest.split('<').next().unwrap().trim().to_owned())
+        .map(|(attrs, _)| {
+            attrs
+                .split(r#"aria-label=""#)
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap()
+        })
         .collect();
     assert_eq!(current, ["Trades"]);
 }
@@ -130,8 +147,22 @@ async fn the_default_and_an_unknown_range_are_seven_days(pool: PgPool) {
     let app = app(pool.clone()).await;
     let browser = signed_in(&app).await;
     let now = OffsetDateTime::now_utc();
-    trade(&pool, "sales", (1, ALICE), (10, "150"), now - Duration::days(3)).await;
-    trade(&pool, "sales", (2, ALICE), (10, "150"), now - Duration::days(10)).await;
+    trade(
+        &pool,
+        "sales",
+        (1, ALICE),
+        (10, "150"),
+        now - Duration::days(3),
+    )
+    .await;
+    trade(
+        &pool,
+        "sales",
+        (2, ALICE),
+        (10, "150"),
+        now - Duration::days(10),
+    )
+    .await;
 
     for path in ["/trades/table", "/trades/table?range=1y"] {
         let html = get(&app, &browser, path).await;
@@ -172,8 +203,22 @@ async fn foreign_characters_in_chars_are_ignored(pool: PgPool) {
     let stranger = app.browser();
     stranger.sso_round_trip(&app, "/auth/login", 90000003).await;
     let now = OffsetDateTime::now_utc();
-    trade(&pool, "sales", (1, ALICE), (10, "150"), now - Duration::hours(2)).await;
-    trade(&pool, "sales", (2, 90000003), (10, "150"), now - Duration::hours(2)).await;
+    trade(
+        &pool,
+        "sales",
+        (1, ALICE),
+        (10, "150"),
+        now - Duration::hours(2),
+    )
+    .await;
+    trade(
+        &pool,
+        "sales",
+        (2, 90000003),
+        (10, "150"),
+        now - Duration::hours(2),
+    )
+    .await;
 
     let html = get(&app, &browser, "/trades/table?chars=90000003").await;
 
@@ -187,7 +232,12 @@ async fn a_sale_row_reads_with_its_value_and_margin(pool: PgPool) {
     let browser = signed_in(&app).await;
     alice_with_fees(&pool).await;
     name(&pool, 34, "Tritanium").await;
-    name(&pool, JITA, "Jita IV - Moon 4 - Caldari Navy Assembly Plant").await;
+    name(
+        &pool,
+        JITA,
+        "Jita IV - Moon 4 - Caldari Navy Assembly Plant",
+    )
+    .await;
     let sold_at = OffsetDateTime::now_utc() - Duration::hours(3);
     trade(&pool, "sales", (1, ALICE), (10, "150.00"), sold_at).await;
     cost(&pool, 1, 10, "1000.00").await;
@@ -230,7 +280,10 @@ async fn a_purchase_row_has_an_empty_margin(pool: PgPool) {
         assert!(row.contains(text), "{text}: {row}");
     }
     let margin = row.split(r#"data-column="margin""#).nth(1).unwrap();
-    assert!(margin.starts_with("></td>") || margin.starts_with(" class"), "{margin}");
+    assert!(
+        margin.starts_with("></td>") || margin.starts_with(" class"),
+        "{margin}"
+    );
     assert!(!margin.contains('\u{2014}'), "{margin}");
 }
 
@@ -245,7 +298,10 @@ async fn a_sale_with_a_partly_known_cost_reads_a_dash_and_says_how_much_is_known
 
     let html = get(&app, &browser, "/trades/table").await;
 
-    assert!(html.contains(r#"title="cost known for 4 of 10 units""#), "{html}");
+    assert!(
+        html.contains(r#"title="cost known for 4 of 10 units""#),
+        "{html}"
+    );
     assert!(html.contains('\u{2014}'));
 }
 
@@ -267,40 +323,210 @@ async fn a_negative_margin_is_in_the_error_style(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn the_totals_row_sums_what_the_rows_show_and_counts_the_sales_left_out(pool: PgPool) {
+async fn the_kpi_cards_sum_the_range_and_count_the_sales_left_out(pool: PgPool) {
     let app = app(pool.clone()).await;
     let browser = signed_in(&app).await;
     alice_with_fees(&pool).await;
     let now = OffsetDateTime::now_utc();
-    trade(&pool, "purchases", (1, ALICE), (10, "100.00"), now - Duration::hours(9)).await;
-    trade(&pool, "sales", (2, ALICE), (10, "150.00"), now - Duration::hours(8)).await;
+    trade(
+        &pool,
+        "purchases",
+        (1, ALICE),
+        (10, "100.00"),
+        now - Duration::hours(9),
+    )
+    .await;
+    trade(
+        &pool,
+        "sales",
+        (2, ALICE),
+        (10, "150.00"),
+        now - Duration::hours(8),
+    )
+    .await;
     cost(&pool, 2, 10, "1000.00").await;
-    trade(&pool, "sales", (3, ALICE), (4, "150.00"), now - Duration::hours(7)).await;
+    trade(
+        &pool,
+        "sales",
+        (3, ALICE),
+        (4, "150.00"),
+        now - Duration::hours(7),
+    )
+    .await;
     cost(&pool, 3, 0, "0.00").await;
 
     let html = get(&app, &browser, "/trades/table").await;
 
-    let totals = html.split("<tfoot").nth(1).unwrap();
-    let totals = &totals[..totals.find("</tfoot>").unwrap()];
     // Bought 1,000.00; sold 1,500.00 + 600.00; margin 428.23 and one sale without.
-    for text in [">1k<", ">2.1k<", ">428.23<", "1 sale left out"] {
-        assert!(totals.contains(text), "{text}: {totals}");
-    }
-    assert!(totals.contains("428.23 ISK"), "{totals}");
+    let bought = kpi(&html, "kpi-bought");
+    assert_eq!(
+        (bought.value.as_str(), bought.title.as_str()),
+        ("1k", "1,000.00 ISK")
+    );
+    let sold = kpi(&html, "kpi-sold");
+    assert_eq!(
+        (sold.value.as_str(), sold.title.as_str()),
+        ("2.1k", "2,100.00 ISK")
+    );
+    let margin = kpi(&html, "kpi-margin");
+    assert_eq!(margin.value, "428.23");
+    assert_eq!(margin.title, "428.23 ISK; 1 sale left out");
+    assert!(!margin.class.starts_with("kpi error"));
+    assert!(!html.contains("<tfoot"), "the table has no totals row");
 }
 
 #[sqlx::test]
-async fn the_totals_have_no_note_when_every_sale_has_a_margin(pool: PgPool) {
+async fn the_margin_card_has_no_note_when_every_sale_has_a_margin_and_is_red_when_negative(
+    pool: PgPool,
+) {
     let app = app(pool.clone()).await;
     let browser = signed_in(&app).await;
     alice_with_fees(&pool).await;
     let now = OffsetDateTime::now_utc();
-    trade(&pool, "sales", (2, ALICE), (10, "150.00"), now - Duration::hours(8)).await;
+    trade(
+        &pool,
+        "sales",
+        (2, ALICE),
+        (10, "150.00"),
+        now - Duration::hours(8),
+    )
+    .await;
     cost(&pool, 2, 10, "1000.00").await;
 
     let html = get(&app, &browser, "/trades/table").await;
+    assert!(!kpi(&html, "kpi-margin").title.contains("left out"));
 
-    assert!(!html.contains("left out"), "{html}");
+    trade(
+        &pool,
+        "sales",
+        (3, ALICE),
+        (10, "90.00"),
+        now - Duration::hours(7),
+    )
+    .await;
+    cost(&pool, 3, 10, "1000.00").await;
+    let html = get(&app, &browser, "/trades/table").await;
+    // 428.23 - 143.07
+    let margin = kpi(&html, "kpi-margin");
+    assert_eq!(margin.value, "285.16");
+
+    sqlx::query("DELETE FROM sale_costs WHERE transaction_id = 2")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM sales WHERE transaction_id = 2")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let html = get(&app, &browser, "/trades/table").await;
+    let margin = kpi(&html, "kpi-margin");
+    assert_eq!(margin.value, "-143.07");
+    assert!(margin.class.starts_with("kpi error"), "{}", margin.class);
+}
+
+#[sqlx::test]
+async fn with_only_a_purchase_the_margin_card_reads_zero(pool: PgPool) {
+    let app = app(pool.clone()).await;
+    let browser = signed_in(&app).await;
+    let at = OffsetDateTime::now_utc() - Duration::hours(3);
+    trade(&pool, "purchases", (1, ALICE), (10, "100.00"), at).await;
+
+    let html = get(&app, &browser, "/trades/table").await;
+
+    assert_eq!(kpi(&html, "kpi-margin").value, "0.00");
+}
+
+// ---- pagination ----
+
+/// Alice sold `count` times, one per minute, the newest has transaction ID `count`.
+async fn many_sales(pool: &PgPool, count: i64) {
+    let now = OffsetDateTime::now_utc();
+    for id in 1..=count {
+        trade(
+            pool,
+            "sales",
+            (id, ALICE),
+            (1, "100.00"),
+            now - Duration::minutes(count - id + 1),
+        )
+        .await;
+    }
+}
+
+fn transaction_ids(html: &str) -> Vec<i64> {
+    html.split(r#"data-transaction=""#)
+        .skip(1)
+        .map(|rest| rest.split('"').next().unwrap().parse().unwrap())
+        .collect()
+}
+
+#[sqlx::test]
+async fn the_totals_span_every_page_while_the_table_shows_fifty(pool: PgPool) {
+    let app = app(pool.clone()).await;
+    let browser = signed_in(&app).await;
+    many_sales(&pool, 80).await;
+
+    let html = get(&app, &browser, "/trades/table").await;
+
+    assert_eq!(transaction_ids(&html).len(), 50);
+    let sold = kpi(&html, "kpi-sold");
+    assert_eq!(sold.title, "8,000.00 ISK", "80 sales of 100.00 ISK");
+    assert!(html.contains("Page 1 of 2"));
+}
+
+#[sqlx::test]
+async fn page_three_of_120_shows_the_101st_to_the_120th_newest_trade(pool: PgPool) {
+    let app = app(pool.clone()).await;
+    let browser = signed_in(&app).await;
+    many_sales(&pool, 120).await;
+
+    let html = get(&app, &browser, "/trades/table?page=3&range=30d").await;
+
+    // Newest first: transaction 120 is the newest, so the third page holds 20 down to 1.
+    assert_eq!(transaction_ids(&html), (1..=20).rev().collect::<Vec<_>>());
+    assert!(html.contains("Page 3 of 3"));
+    let first = get(&app, &browser, "/trades/table").await;
+    assert_eq!(transaction_ids(&first)[0], 120);
+}
+
+#[sqlx::test]
+async fn a_page_past_the_end_is_the_last_page_and_the_range_links_start_on_page_one(pool: PgPool) {
+    let app = app(pool.clone()).await;
+    let browser = signed_in(&app).await;
+    many_sales(&pool, 60).await;
+
+    let html = get(&app, &browser, "/trades/table?page=9&per_page=25").await;
+
+    assert!(html.contains("Page 3 of 3"));
+    assert_eq!(transaction_ids(&html).len(), 10);
+    let unescaped = html.replace("&#38;", "&");
+    let range_link = unescaped
+        .split("<a ")
+        .find(|a| a.contains("range=30d"))
+        .unwrap();
+    assert!(range_link.contains("per_page=25"), "{range_link}");
+    assert!(
+        !range_link.contains("&page=") && !range_link.contains("?page="),
+        "a new range starts on page 1: {range_link}"
+    );
+}
+
+#[sqlx::test]
+async fn the_live_refresh_url_of_the_page_carries_the_page_and_the_range(pool: PgPool) {
+    let app = app(pool.clone()).await;
+    let browser = signed_in(&app).await;
+    many_sales(&pool, 120).await;
+
+    let html = get(&app, &browser, "/trades?range=30d&page=2")
+        .await
+        .replace("&#38;", "&");
+
+    assert!(
+        html.contains(r#"hx-get="/trades/table?range=30d&page=2""#),
+        "{html}"
+    );
+    assert!(html.contains(r#"data-live="/trades/table""#));
+    assert!(html.contains(r#"hx-get="/trades/freshness""#), "{html}");
 }
 
 // ---- freshness ----
@@ -329,7 +555,6 @@ async fn the_freshness_shows_the_transactions_times_and_stale_after_two_hours(po
     assert!(html.contains("Alice Alpha"));
     assert!(html.contains(&sekondo::format::eve_time(fresh)));
     assert!(!html.contains("Stale"), "{html}");
-    assert!(!html.contains("badge stale warnings"), "no number when fresh");
 
     sqlx::query("UPDATE wealth_sync SET last_success_at = $1")
         .bind(now - Duration::hours(3))
@@ -338,13 +563,11 @@ async fn the_freshness_shows_the_transactions_times_and_stale_after_two_hours(po
         .unwrap();
     let html = get(&app, &browser, "/trades/freshness").await;
     assert!(html.contains("Stale"));
-    assert!(html.contains(r#"<mark class="badge stale warnings">1</mark>"#), "{html}");
+    assert!(!html.contains("warnings"), "no warning count: {html}");
 }
 
 #[sqlx::test]
-async fn a_character_needing_relogin_is_stale_and_links_to_login_and_a_new_one_waits(
-    pool: PgPool,
-) {
+async fn a_character_needing_relogin_is_stale_and_links_to_login_and_a_new_one_waits(pool: PgPool) {
     let app = app(pool.clone()).await;
     let browser = signed_in(&app).await;
     let html = get(&app, &browser, "/trades/freshness").await;

@@ -1,0 +1,5 @@
+{% include "wealth_content.html" %}
+{# The filter keeps the range the graph was switched to, and its control marks it. #}
+<input type="hidden" id="wealth-range" name="range" value="{{ view.range.name() }}" hx-swap-oob="true">
+{% let oob = true %}
+{% include "wealth_range_control.html" %}

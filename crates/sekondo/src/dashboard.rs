@@ -16,6 +16,7 @@ use crate::{
     app::AppState,
     csrf, format,
     freshness::{FreshnessRecord, FreshnessView, freshness_view},
+    kpi::{Kpi, KpiLink},
     orders::{FilterEntry, Side},
     pages::{self, Nav, Page},
     range::{BUCKET_CTES, Range},
@@ -263,6 +264,8 @@ pub struct SummaryView {
     pub wealth: WealthTile,
     pub sell_count: i64,
     pub buy_count: i64,
+    /// The tiles as KPI cards: sell value, buy escrow, wealth, sell orders, buy orders.
+    pub tiles: Vec<Kpi>,
     pub rows: Vec<BreakdownRow>,
     /// The per-character split graph's data, as JSON for the canvas's `data-series`.
     pub split_series: String,
@@ -441,7 +444,44 @@ fn summary_view(
     (now, interval): (OffsetDateTime, Duration),
 ) -> SummaryView {
     let totals = Totals::of(figures);
+    let wealth_href = format!("/wealth{}", selection.query());
+    let amount_card = |name: &str, id: &str, total: i64, corp: i64| {
+        let card = Kpi::new(name, format::isk_short(total), format::isk_exact(total)).with_id(id);
+        if corp != 0 {
+            card.with_detail(format!("of which {} corp", format::isk_short(corp)))
+                .with_detail_title(format::isk_exact(corp))
+        } else {
+            card
+        }
+    };
+    let count_card = |name: &str, id: &str, count: i64| {
+        Kpi::new(name, count.to_string(), format::thousands(count)).with_id(id)
+    };
+    let tiles = vec![
+        amount_card(
+            "Sell value",
+            "tile-sell-value",
+            totals.sell_cents,
+            totals.sell_corp_cents,
+        ),
+        amount_card(
+            "Buy escrow",
+            "tile-escrow",
+            totals.escrow_cents,
+            totals.escrow_corp_cents,
+        ),
+        Kpi::new(
+            "Wealth",
+            format::isk_short(wealth.total_cents()),
+            format::isk_exact(wealth.total_cents()),
+        )
+        .with_id("tile-wealth")
+        .with_link(KpiLink::new(wealth_href, "Wealth")),
+        count_card("Sell orders", "tile-sell-count", totals.sell_count),
+        count_card("Buy orders", "tile-buy-count", totals.buy_count),
+    ];
     SummaryView {
+        tiles,
         summary_url: format!("/dashboard/summary{}", view_query(selection, range)),
         ranges: Range::ALL
             .into_iter()

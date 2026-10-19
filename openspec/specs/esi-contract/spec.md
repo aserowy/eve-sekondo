@@ -21,7 +21,8 @@ for all items (with the `X-Pages` header and each order's type, location and rem
 market history of a region for one item, the character wallet balance, the
 character wallet transactions (the newest ones, and older ones from a given transaction ID), the
 character assets (with the `X-Pages` header), the market prices, the character skills, the character
-standings and the station lookup. A variant that cannot be provoked against the
+standings, the station lookup and the character location (docked at a station, docked in a
+structure, and in space). A variant that cannot be provoked against the
 real services without harm (420, 429, 5xx) SHALL be marked as not verifiable against EVE, with a
 reason.
 
@@ -55,6 +56,11 @@ reason.
 
 - **WHEN** the stub serves the region-wide market orders or the market history route
 - **THEN** the contract coverage test finds a contract for each
+
+#### Scenario: The location call is contracted
+
+- **WHEN** the stub serves the character location route
+- **THEN** the contract coverage test finds a contract for it
 
 ### Requirement: The stub conforms to the contracts
 
@@ -287,3 +293,21 @@ fail. Every answer SHALL satisfy its contract variant. Neither call SHALL need a
 #### Scenario: History fixture drifts from the contract
 - **WHEN** a history fixture of the stub omits a field the contract marks as always present
 - **THEN** the stub conformance test fails and names the fixture and the field
+
+### Requirement: The stub serves the location call
+
+The stub SHALL serve the character location, with a control to set per character whether it is
+docked at a station, docked in a structure or in space, and every answer SHALL satisfy its contract
+variant. The call SHALL require a token with the location scope and SHALL answer 403 otherwise. The
+stub's characters SHALL hold the location scope by default, and its per-character scopes control
+SHALL be able to withhold it.
+
+#### Scenario: Location fixture drifts from the contract
+
+- **WHEN** a location fixture of the stub omits the solar system the contract marks as always present
+- **THEN** the stub conformance test fails and names the fixture and the field
+
+#### Scenario: Token without the location scope
+
+- **WHEN** the stub receives a location request with a token that lacks the location scope
+- **THEN** it answers 403

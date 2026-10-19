@@ -17,30 +17,36 @@ async function dashboardWithOrders(page: Page) {
 }
 
 const barsBottom = async (page: Page) => {
-  const bars = (await page.locator('header.bars').boundingBox())!;
+  const bars = (await page.locator('nav.sub-menu').boundingBox())!;
   return bars.y + bars.height;
 };
 
 /** The panel's title is fully visible, right below the bars. */
 async function expectTitleBelowBars(page: Page, panel: string) {
   await expect(async () => {
-    const title = (await page.locator(`${panel} .panel-title`).boundingBox())!;
+    const title = (await page.locator(`${panel} h2`).boundingBox())!;
     const bottom = await barsBottom(page);
     expect(title.y).toBeGreaterThanOrEqual(bottom - 1);
     expect(title.y).toBeLessThanOrEqual(bottom + 12);
   }).toPass();
 }
 
-test('the dashboard sub-menu lists its six rows in order below the top bar', async ({ page }) => {
+test('the dashboard sub-menu lists its six rows in order at the top of the page and stays there while scrolling', async ({ page }) => {
   await dashboardWithOrders(page);
   await page.goto('/dashboard');
+  await expect(page.locator('canvas[data-chart]')).toHaveCount(6);
 
-  const menu = page.locator('header.bars #section-nav');
+  const menu = page.locator('main > nav.sub-menu#section-nav');
   await expect(menu.getByRole('link')).toHaveText(['Totals', 'Characters', 'Split & top items', 'Value', 'Orders', 'Wealth']);
-  const bar = (await page.locator('#main-nav').boundingBox())!;
-  const box = (await menu.boundingBox())!;
-  expect(box.height).toBeLessThanOrEqual(24);
-  expect(Math.abs(box.y - (bar.y + bar.height))).toBeLessThanOrEqual(1);
+  await expect(menu.locator('svg, .count')).toHaveCount(0);
+  const top = (await menu.boundingBox())!;
+  expect(top.height).toBeLessThanOrEqual(40);
+
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(300);
+  expect((await menu.boundingBox())!.y).toBe(0);
+  const height = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--sub-menu-height'));
+  expect(parseFloat(height)).toBeCloseTo((await menu.boundingBox())!.height, 0);
 });
 
 test('activating a sub-menu link scrolls the row below the bars and sets the fragment', async ({ page }) => {
@@ -57,7 +63,7 @@ test('activating a sub-menu link scrolls the row below the bars and sets the fra
   await page.locator('#section-nav').getByRole('link', { name: 'Wealth' }).click();
   await expect(page).toHaveURL(/\/dashboard#wealth$/);
   await expect(async () => {
-    const title = (await page.locator('#wealth .panel-title').boundingBox())!;
+    const title = (await page.locator('#wealth h2').boundingBox())!;
     expect(title.y).toBeGreaterThanOrEqual((await barsBottom(page)) - 1);
     expect(title.y + title.height).toBeLessThanOrEqual(800);
   }).toPass();
@@ -77,7 +83,8 @@ const current = (page: Page) => page.locator('#section-nav [aria-current="locati
 /** Scrolls by hand until the row's top is at the bottom edge of the bars. */
 async function scrollRowToBars(page: Page, row: string) {
   await page.evaluate((selector) => {
-    const bottom = document.getElementById('bars')!.getBoundingClientRect().bottom;
+    // The sub-menu sticks to the window top, so its bottom edge is its height once the page scrolls.
+    const bottom = document.querySelector('nav.sub-menu')!.getBoundingClientRect().height;
     window.scrollBy(0, document.querySelector(selector)!.getBoundingClientRect().top - bottom);
   }, row);
 }

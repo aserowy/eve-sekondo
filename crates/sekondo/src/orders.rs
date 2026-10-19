@@ -4,6 +4,7 @@
 use askama::Template;
 use axum::{
     extract::State,
+    http::Uri,
     response::{IntoResponse, Redirect, Response},
 };
 use sqlx::PgPool;
@@ -18,7 +19,9 @@ use crate::{
     fees::{self, FEE_RATES_SQL},
     format,
     freshness::{FreshnessView, freshness_view, list_freshness},
+    kpi::{Kpi, KpiLink},
     pages::{self, Nav, Page},
+    pagination::{Link, PageView, Paging, paginate},
     selection::{CharacterSelection, ViewQuery},
 };
 
@@ -210,6 +213,9 @@ pub struct OrderRow {
     pub margin_cents: Option<i64>,
     /// The average purchase cost per unit, in cents, when it covers the whole volume.
     pub cost_per_unit_cents: Option<i64>,
+    /// The known purchase cost of the remaining volume, in cents, when it covers the whole
+    /// volume: what the margin was worked out against.
+    pub cost_cents: Option<i64>,
 }
 
 impl OrderRow {
@@ -273,6 +279,12 @@ const MARGIN_CENTS: &str = "CASE WHEN NOT o.is_buy_order AND NOT o.is_corporatio
                  - o.volume_remain * sc.cost / o.volume_total, 2) * 100)::bigint
 END";
 
+/// The purchase cost of the remaining volume in cents, for an order whose cost covers its whole
+/// volume.
+const COST_CENTS: &str = "CASE WHEN sc.covered_units = o.volume_total AND o.volume_total > 0
+     THEN (round(o.volume_remain * sc.cost / o.volume_total, 2) * 100)::bigint
+END";
+
 /// The average cost per unit in cents, for an order whose cost covers its whole volume.
 const COST_PER_UNIT_CENTS: &str =
     "CASE WHEN sc.covered_units = o.volume_total AND o.volume_total > 0
@@ -310,7 +322,9 @@ pub async fn list_orders(
                 CASE WHEN NOT o.is_buy_order AND NOT o.is_corporation THEN sc.covered_units END
                     AS covered_units,
                 {MARGIN_CENTS} AS margin_cents,
-                {COST_PER_UNIT_CENTS} AS cost_per_unit_cents
+                {COST_PER_UNIT_CENTS} AS cost_per_unit_cents,
+                CASE WHEN NOT o.is_buy_order AND NOT o.is_corporation THEN {COST_CENTS} END
+                    AS cost_cents
          FROM current_orders o
          JOIN characters c ON c.character_id = o.character_id
          LEFT JOIN names tn ON tn.id = o.type_id
@@ -332,6 +346,154 @@ pub async fn list_orders(
         .await
 }
 
+// ---- KPIs ----
+
+/// What the count and value cards of one side add up: every order of the side, not only the ones
+/// on the shown page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SideTotals {
+    pub count: i64,
+    /// The value of the sell orders, the escrow of the buy orders.
+    pub total_cents: i64,
+    /// The part of the total that belongs to corporation orders.
+    pub corp_cents: i64,
+}
+
+impl SideTotals {
+    pub fn of(rows: &[OrderRow], side: Side) -> Self {
+        let amount = |row: &OrderRow| match side {
+            Side::Sell => row.value_cents,
+            Side::Buy => row.escrow_cents.unwrap_or(0),
+        };
+        Self {
+            count: rows.len() as i64,
+            total_cents: rows.iter().map(amount).sum(),
+            corp_cents: rows
+                .iter()
+                .filter(|row| row.is_corporation)
+                .map(amount)
+                .sum(),
+        }
+    }
+}
+
+/// The margins of the sell orders that have one, against the known cost they were worked out on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetMargin {
+    pub margin_cents: i64,
+    pub cost_cents: i64,
+    /// How many orders the sum covers, and how many it leaves out for lack of a margin.
+    pub counted: usize,
+    pub left_out: usize,
+}
+
+impl NetMargin {
+    pub fn of(rows: &[OrderRow]) -> Self {
+        let with_margin = rows.iter().filter(|row| row.margin_cents.is_some());
+        Self {
+            margin_cents: with_margin.clone().filter_map(|row| row.margin_cents).sum(),
+            cost_cents: with_margin.clone().filter_map(|row| row.cost_cents).sum(),
+            counted: with_margin.count(),
+            left_out: rows.iter().filter(|row| row.margin_cents.is_none()).count(),
+        }
+    }
+
+    /// The sum as a percentage of the known cost, rounded half up to two decimals; `None` when no
+    /// order has a margin.
+    pub fn percent(&self) -> Option<String> {
+        (self.counted > 0)
+            .then(|| format::percent_of_hundredths(self.margin_cents, self.cost_cents))
+    }
+}
+
+fn order_kpis(side: Side, rows: &[OrderRow]) -> Vec<Kpi> {
+    let totals = SideTotals::of(rows, side);
+    let (count_name, total_name, prefix) = match side {
+        Side::Sell => ("Sell orders", "Sell value", "kpi-sell"),
+        Side::Buy => ("Buy orders", "Buy escrow", "kpi-buy"),
+    };
+    let mut total = Kpi::new(
+        total_name,
+        format::isk_short(totals.total_cents),
+        format::isk_exact(totals.total_cents),
+    )
+    .with_id(format!("{prefix}-total"));
+    if totals.corp_cents != 0 {
+        total = total
+            .with_detail(format!(
+                "of which {} corp",
+                format::isk_short(totals.corp_cents)
+            ))
+            .with_detail_title(format::isk_exact(totals.corp_cents));
+    }
+    let mut kpis = vec![
+        Kpi::new(
+            count_name,
+            totals.count.to_string(),
+            format::thousands(totals.count),
+        )
+        .with_id(format!("{prefix}-count")),
+        total,
+    ];
+    if side == Side::Sell {
+        let net = NetMargin::of(rows);
+        let kpi = match net.percent() {
+            None => Kpi::new("Net margin", NO_DATA, ""),
+            Some(percent) => {
+                let mut exact = format::isk_exact(net.margin_cents);
+                if net.left_out > 0 {
+                    exact.push_str(&format!(
+                        "; {} left out",
+                        match net.left_out {
+                            1 => "1 order".to_owned(),
+                            n => format!("{n} orders"),
+                        }
+                    ));
+                }
+                let kpi = Kpi::new("Net margin", format::isk_short(net.margin_cents), exact)
+                    .with_detail(format!("{percent}%"));
+                if net.margin_cents < 0 {
+                    kpi.as_error()
+                } else {
+                    kpi
+                }
+            }
+        };
+        kpis.push(kpi.with_id("kpi-net-margin"));
+    }
+    kpis
+}
+
+/// Three cards per selected character: its sales tax, broker fee and minimum margin at its fee
+/// location.
+fn fee_kpis(cards: &[fees::FeeCard]) -> Vec<Kpi> {
+    cards
+        .iter()
+        .flat_map(|card| {
+            let detail = format!("{} \u{b7} {}", card.character, card.location.name);
+            [
+                ("Sales tax", "sales-tax", &card.location.sales_tax),
+                ("Broker fee", "broker-fee", &card.location.broker_fee),
+                ("Min. margin", "min-margin", &card.location.min_margin),
+            ]
+            .map(|(name, key, figure)| {
+                let kpi = Kpi::new(
+                    name,
+                    figure.text.clone(),
+                    figure.title.clone().unwrap_or_default(),
+                )
+                .with_id(format!("fee-{}-{key}", card.character_id))
+                .with_detail(detail.clone());
+                if card.needs_location_scope {
+                    kpi.with_link(KpiLink::log_in_again())
+                } else {
+                    kpi
+                }
+            })
+        })
+        .collect()
+}
+
 // ---- view model ----
 
 /// Shown where an order has no standing, gap and undercut volume.
@@ -339,7 +501,10 @@ const NO_DATA: &str = "\u{2014}";
 
 pub struct HeaderView {
     pub label: &'static str,
+    /// The page that the sorting leads to, for the address bar.
     pub href: String,
+    /// The content fragment that htmx fetches for it.
+    pub content_href: String,
     /// `ascending`, `descending` or empty: for `aria-sort`.
     pub aria_sort: &'static str,
     pub arrow: &'static str,
@@ -390,30 +555,52 @@ pub struct FilterEntry {
     pub checked: bool,
 }
 
-/// Everything the orders page and its fragments show for one request.
-pub struct OrdersView {
-    pub characters: Vec<FilterEntry>,
-    /// The URL of the page itself, carrying the whole view state.
-    pub tables_url: String,
-    pub freshness_url: String,
-    pub sell_sort: Sort,
-    pub buy_sort: Sort,
-    pub sell: TableView,
-    pub buy: TableView,
-    pub freshness: Vec<FreshnessView>,
-    /// How many of the selected characters are stale or need re-login.
-    pub warnings: usize,
+/// A link of the sub-menu: the other side's page.
+pub struct SideLink {
+    pub label: &'static str,
+    pub href: String,
+    pub current: bool,
 }
 
-/// The view state a URL carries: the selection and one sorting per table.
+/// Everything the orders pages and their fragments show for one request.
+pub struct OrdersView {
+    pub side: Side,
+    /// The path of the page, without a query: the filter form builds its own.
+    pub path: String,
+    pub characters: Vec<FilterEntry>,
+    /// The page itself, carrying the whole view state, as the address bar shows it.
+    pub page_url: String,
+    /// The content fragment of the page, for live refreshes.
+    pub content_url: String,
+    /// The same without a query: live refreshes ask with the address bar's query.
+    pub content_path: String,
+    pub freshness_url: String,
+    pub sub_menu: Vec<SideLink>,
+    pub sell_sort: Sort,
+    pub buy_sort: Sort,
+    /// The id of the table's section: `sell-orders` or `buy-orders`.
+    pub table_id: &'static str,
+    /// "No sell orders." or "No buy orders.", for an empty table.
+    pub empty: &'static str,
+    pub kpis: Vec<Kpi>,
+    pub table: TableView,
+    pub pager: PageView,
+    pub freshness: Vec<FreshnessView>,
+}
+
+/// The view state a URL carries: the selection, one sorting per table and the paging of the table
+/// shown.
 struct ViewState {
     chars: Option<String>,
     sell: Sort,
     buy: Sort,
+    paging: Paging,
 }
 
 impl ViewState {
-    fn query(&self) -> String {
+    /// The query string, `""` or `?…`, with the selection and the sortings, and the paging unless
+    /// `without_paging`.
+    fn query_with(&self, with_paging: bool) -> String {
         let mut pairs = url::form_urlencoded::Serializer::new(String::new());
         if let Some(chars) = &self.chars {
             // The commas stay readable in the URL, as in bookmarks people write by hand.
@@ -428,7 +615,16 @@ impl ViewState {
             pairs.append_pair("bsort", self.buy.key.name());
             pairs.append_pair("bdir", self.buy.dir.name());
         }
-        let query = pairs.finish().replace("%2C", ",");
+        let mut query = pairs.finish().replace("%2C", ",");
+        if with_paging {
+            let paging = self.paging.query();
+            if !paging.is_empty() {
+                if !query.is_empty() {
+                    query.push('&');
+                }
+                query.push_str(&paging);
+            }
+        }
         if query.is_empty() {
             query
         } else {
@@ -436,13 +632,45 @@ impl ViewState {
         }
     }
 
+    fn query(&self) -> String {
+        self.query_with(true)
+    }
+
+    /// The same view sorted another way, from the first page.
     fn with_sort(&self, side: Side, sort: Sort) -> Self {
         Self {
             chars: self.chars.clone(),
             sell: if side == Side::Sell { sort } else { self.sell },
             buy: if side == Side::Buy { sort } else { self.buy },
+            paging: self.paging.first(),
         }
     }
+
+    fn with_paging(&self, paging: Paging) -> Self {
+        Self {
+            chars: self.chars.clone(),
+            sell: self.sell,
+            buy: self.buy,
+            paging,
+        }
+    }
+}
+
+impl Side {
+    fn slug(self) -> &'static str {
+        match self {
+            Side::Sell => "sell",
+            Side::Buy => "buy",
+        }
+    }
+}
+
+fn page_path(side: Side) -> String {
+    format!("/orders/{}", side.slug())
+}
+
+fn content_path(side: Side) -> String {
+    format!("/orders/{}/content", side.slug())
 }
 
 fn headers(state: &ViewState, side: Side) -> Vec<HeaderView> {
@@ -486,9 +714,11 @@ fn headers(state: &ViewState, side: Side) -> Vec<HeaderView> {
                 (true, Dir::Asc) => ("ascending", " \u{25B2}"),
                 (true, Dir::Desc) => ("descending", " \u{25BC}"),
             };
+            let query = state.with_sort(side, next).query();
             HeaderView {
                 label,
-                href: format!("/orders{}", state.with_sort(side, next).query()),
+                href: format!("{}{query}", page_path(side)),
+                content_href: format!("{}{query}", content_path(side)),
                 aria_sort,
                 arrow,
             }
@@ -588,6 +818,7 @@ fn row_view(row: &OrderRow, side: Side, now: OffsetDateTime) -> RowView {
 async fn build_view(
     state: &AppState,
     account_id: Uuid,
+    side: Side,
     query: &ViewQuery,
 ) -> Result<Option<(OrdersView, CharacterSelection)>, sqlx::Error> {
     let characters = state
@@ -603,44 +834,52 @@ async fn build_view(
     }
     let ids: Vec<i64> = characters.iter().map(|c| c.character_id).collect();
     let selection = query.selection(&ids);
-    let view_state = ViewState {
+    let mut view_state = ViewState {
         chars: selection.param(),
         sell: Sort::parse(query.sort.as_deref(), query.dir.as_deref()),
         buy: Sort::parse(query.bsort.as_deref(), query.bdir.as_deref()),
+        paging: query.paging(),
     };
     let now = state.clock.now();
     let interval = state.config.order_poll_interval;
 
-    let sell_rows = list_orders(
-        &state.pool,
-        account_id,
-        &selection,
-        Side::Sell,
-        view_state.sell,
-    )
-    .await?;
-    let buy_rows = list_orders(
-        &state.pool,
-        account_id,
-        &selection,
-        Side::Buy,
-        view_state.buy,
-    )
-    .await?;
+    let sort = if side == Side::Sell {
+        view_state.sell
+    } else {
+        view_state.buy
+    };
+    let rows = list_orders(&state.pool, account_id, &selection, side, sort).await?;
     let freshness = list_freshness(&state.pool, account_id, &selection).await?;
-    let mut fee_locations =
-        fees::locations_by_character(&state.pool, account_id, selection.ids()).await?;
+    let cards = fees::fee_cards(&state.pool, account_id, selection.ids()).await?;
 
-    let page_query = view_state.query();
+    // The KPIs cover every order of the side; the table shows the requested page of them.
+    let mut kpis = order_kpis(side, &rows);
+    kpis.extend(fee_kpis(&cards));
+    let link_to = |paging: Paging| {
+        let query = view_state.with_paging(paging).query();
+        Link {
+            href: format!("{}{query}", page_path(side)),
+            content: format!("{}{query}", content_path(side)),
+        }
+    };
+    let (page_rows, pager) = paginate(&rows, view_state.paging, link_to);
+    // What the URLs below carry is the page actually shown, after clamping.
+    view_state.paging = pager.paging;
+
     let freshness: Vec<FreshnessView> = freshness
         .iter()
-        .map(|r| FreshnessView {
-            locations: fee_locations.remove(&r.character_id).unwrap_or_default(),
-            ..freshness_view(r, now, interval)
-        })
+        .map(|r| freshness_view(r, now, interval))
         .collect();
-    let warnings = freshness.iter().filter(|f| f.stale).count();
+    let table = TableView {
+        has_margin: side == Side::Sell,
+        headers: headers(&view_state, side),
+        rows: page_rows.iter().map(|r| row_view(r, side, now)).collect(),
+    };
+    let menu_query = view_state.query_with(false);
+    let page_query = view_state.query();
     let view = OrdersView {
+        side,
+        path: page_path(side),
         characters: characters
             .iter()
             .map(|c| FilterEntry {
@@ -649,28 +888,33 @@ async fn build_view(
                 checked: selection.contains(c.character_id),
             })
             .collect(),
-        tables_url: format!("/orders/tables{page_query}"),
+        page_url: format!("{}{page_query}", page_path(side)),
+        content_url: format!("{}{page_query}", content_path(side)),
+        content_path: content_path(side),
         freshness_url: format!("/orders/freshness{page_query}"),
+        sub_menu: [("Sell", Side::Sell), ("Buy", Side::Buy)]
+            .map(|(label, link_side)| SideLink {
+                label,
+                href: format!("{}{menu_query}", page_path(link_side)),
+                current: link_side == side,
+            })
+            .into(),
         sell_sort: view_state.sell,
         buy_sort: view_state.buy,
-        sell: TableView {
-            has_margin: true,
-            headers: headers(&view_state, Side::Sell),
-            rows: sell_rows
-                .iter()
-                .map(|r| row_view(r, Side::Sell, now))
-                .collect(),
+        table_id: if side == Side::Sell {
+            "sell-orders"
+        } else {
+            "buy-orders"
         },
-        buy: TableView {
-            has_margin: false,
-            headers: headers(&view_state, Side::Buy),
-            rows: buy_rows
-                .iter()
-                .map(|r| row_view(r, Side::Buy, now))
-                .collect(),
+        empty: if side == Side::Sell {
+            "No sell orders."
+        } else {
+            "No buy orders."
         },
+        kpis,
+        table,
+        pager,
         freshness,
-        warnings,
     };
     Ok(Some((view, selection)))
 }
@@ -686,8 +930,8 @@ struct OrdersPage {
 }
 
 #[derive(Template)]
-#[template(path = "orders_tables.html")]
-struct TablesFragment {
+#[template(path = "orders_content_fragment.html")]
+struct ContentFragment {
     view: OrdersView,
 }
 
@@ -701,9 +945,10 @@ async fn load(
     state: &AppState,
     account: CurrentAccount,
     session: &Session,
+    side: Side,
     query: &ViewQuery,
 ) -> Result<(OrdersView, CharacterSelection), Box<Response>> {
-    match build_view(state, account.id, query).await {
+    match build_view(state, account.id, side, query).await {
         Ok(Some(loaded)) => Ok(loaded),
         Ok(None) => {
             // An account without characters cannot exist; the session outlived its account.
@@ -714,13 +959,23 @@ async fn load(
     }
 }
 
-pub async fn page(
-    State(state): State<AppState>,
+/// `/orders` is the sell orders page, with whatever the old link carried.
+pub async fn index(uri: Uri) -> Response {
+    let target = match uri.query() {
+        Some(query) => format!("/orders/sell?{query}"),
+        None => "/orders/sell".to_owned(),
+    };
+    Redirect::to(&target).into_response()
+}
+
+async fn page(
+    state: AppState,
     account: CurrentAccount,
     session: Session,
+    side: Side,
     query: ViewQuery,
 ) -> Response {
-    let (view, selection) = match load(&state, account, &session, &query).await {
+    let (view, selection) = match load(&state, account, &session, side, &query).await {
         Ok(loaded) => loaded,
         Err(response) => return *response,
     };
@@ -728,34 +983,77 @@ pub async fn page(
         Ok(token) => token,
         Err(e) => return pages::internal_error(e),
     };
+    let current = match side {
+        Side::Sell => Page::OrdersSell,
+        Side::Buy => Page::OrdersBuy,
+    };
     pages::render(&OrdersPage {
         csrf_token,
-        nav: Some(Nav::new(Page::Orders).with_chars_query(selection.query())),
+        nav: Some(Nav::new(current).with_chars_query(selection.query())),
         view,
     })
 }
 
-/// The sell and buy tables only, for live refreshes.
-pub async fn tables(
+pub async fn sell_page(
     State(state): State<AppState>,
     account: CurrentAccount,
     session: Session,
     query: ViewQuery,
 ) -> Response {
-    match load(&state, account, &session, &query).await {
-        Ok((view, _)) => pages::render(&TablesFragment { view }),
+    page(state, account, session, Side::Sell, query).await
+}
+
+pub async fn buy_page(
+    State(state): State<AppState>,
+    account: CurrentAccount,
+    session: Session,
+    query: ViewQuery,
+) -> Response {
+    page(state, account, session, Side::Buy, query).await
+}
+
+async fn content(
+    state: AppState,
+    account: CurrentAccount,
+    session: Session,
+    side: Side,
+    query: ViewQuery,
+) -> Response {
+    match load(&state, account, &session, side, &query).await {
+        Ok((view, _)) => pages::render(&ContentFragment { view }),
         Err(response) => *response,
     }
 }
 
-/// The freshness strip only, for live refreshes.
+/// The KPIs, the table and its pagination of the sell orders, for live refreshes and for the
+/// page's own controls.
+pub async fn sell_content(
+    State(state): State<AppState>,
+    account: CurrentAccount,
+    session: Session,
+    query: ViewQuery,
+) -> Response {
+    content(state, account, session, Side::Sell, query).await
+}
+
+/// The same for the buy orders.
+pub async fn buy_content(
+    State(state): State<AppState>,
+    account: CurrentAccount,
+    session: Session,
+    query: ViewQuery,
+) -> Response {
+    content(state, account, session, Side::Buy, query).await
+}
+
+/// The freshness section only, for live refreshes. The same for both sides.
 pub async fn freshness(
     State(state): State<AppState>,
     account: CurrentAccount,
     session: Session,
     query: ViewQuery,
 ) -> Response {
-    match load(&state, account, &session, &query).await {
+    match load(&state, account, &session, Side::Sell, &query).await {
         Ok((view, _)) => pages::render(&FreshnessFragment { view }),
         Err(response) => *response,
     }
@@ -764,6 +1062,96 @@ pub async fn freshness(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn order(margin: Option<i64>, cost: Option<i64>, value: i64, corp: bool) -> OrderRow {
+        OrderRow {
+            order_id: 1,
+            character_id: 1,
+            character_name: "Alice".to_owned(),
+            type_id: 34,
+            type_name: None,
+            region_id: 10000002,
+            region_name: None,
+            location_id: 60003760,
+            location_name: None,
+            location_known: false,
+            is_corporation: corp,
+            price_cents: 100,
+            volume_remain: 1,
+            volume_total: 1,
+            value_cents: value,
+            escrow_cents: Some(value),
+            issued: OffsetDateTime::UNIX_EPOCH,
+            duration: 90,
+            undercut: None,
+            best_price_cents: None,
+            gap_cents: None,
+            undercut_volume: None,
+            covered_units: None,
+            margin_cents: margin,
+            cost_per_unit_cents: None,
+            cost_cents: cost,
+        }
+    }
+
+    #[test]
+    fn the_net_margin_sums_margins_and_costs_and_counts_the_orders_left_out() {
+        // 1,500,000 and 500,000 ISK of margin on 8,000,000 ISK of known cost, and one without.
+        let rows = [
+            order(Some(150_000_000), Some(500_000_000), 0, false),
+            order(Some(50_000_000), Some(300_000_000), 0, false),
+            order(None, None, 0, false),
+        ];
+
+        let net = NetMargin::of(&rows);
+
+        assert_eq!(net.margin_cents, 200_000_000);
+        assert_eq!(net.cost_cents, 800_000_000);
+        assert_eq!((net.counted, net.left_out), (2, 1));
+        assert_eq!(net.percent().as_deref(), Some("25.00"));
+    }
+
+    #[test]
+    fn a_negative_net_margin_has_a_negative_percentage() {
+        let rows = [order(Some(-150_000), Some(10_000_000), 0, false)];
+
+        let net = NetMargin::of(&rows);
+
+        assert_eq!(net.margin_cents, -150_000);
+        assert_eq!(net.percent().as_deref(), Some("-1.50"));
+    }
+
+    #[test]
+    fn without_any_margin_there_is_no_net_margin() {
+        let rows = [order(None, None, 0, false), order(None, None, 0, true)];
+
+        let net = NetMargin::of(&rows);
+
+        assert_eq!((net.counted, net.left_out), (0, 2));
+        assert_eq!(net.percent(), None);
+        assert_eq!(NetMargin::of(&[]).percent(), None);
+    }
+
+    #[test]
+    fn the_side_totals_count_every_order_and_split_off_the_corporation_share() {
+        let rows = [
+            order(None, None, 1_000, false),
+            order(None, None, 2_500, true),
+            order(None, None, 500, false),
+        ];
+
+        let sell = SideTotals::of(&rows, Side::Sell);
+        assert_eq!(
+            (sell.count, sell.total_cents, sell.corp_cents),
+            (3, 4_000, 2_500)
+        );
+
+        // A buy order counts its escrow (a missing one as nothing).
+        let mut no_escrow = order(None, None, 900, false);
+        no_escrow.escrow_cents = None;
+        let buy = SideTotals::of(&[order(None, None, 700, true), no_escrow], Side::Buy);
+        assert_eq!((buy.count, buy.total_cents, buy.corp_cents), (2, 700, 700));
+    }
 
     #[test]
     fn sorting_defaults_to_item_name_ascending() {

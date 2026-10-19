@@ -1,40 +1,36 @@
 import { expect, loginWith, openCharacters, test } from '../support/fixtures';
 
-test('navigate between the signed-in pages, and sign out from the navigation', async ({ page }) => {
+test('the sidebar lists the pages in order, navigates between them, and signs out at the bottom', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
-  const nav = page.locator('#main-nav');
+  const nav = page.locator('aside.sidebar #main-nav');
 
-  // The dashboard is the landing page and shows the totals; the other pages are one navigation link away.
   await expect(page.getByRole('heading', { level: 1 })).toHaveCount(0);
-  await expect(page.locator('#tile-sell-value')).toBeVisible();
-  await expect(page.locator('#tile-escrow')).toBeVisible();
+  await expect(nav.locator('a, button')).toHaveText([
+    'Dashboard', 'Characters', 'Wealth', 'Trades', 'Orders', 'Opportunities', 'Sign out',
+  ]);
   await expect(nav.getByRole('link', { name: 'Dashboard' })).toHaveAttribute('aria-current', 'page');
 
-  await nav.getByRole('link', { name: 'Orders' }).click();
-  await expect(page).toHaveURL(/\/orders$/);
-  await expect(nav.getByRole('link', { name: 'Orders' })).toHaveAttribute('aria-current', 'page');
-  await expect(nav.getByRole('link', { name: 'Dashboard' })).not.toHaveAttribute('aria-current', 'page');
+  const steps: [string, RegExp][] = [
+    ['Characters', /\/characters$/],
+    ['Wealth', /\/wealth$/],
+    ['Trades', /\/trades$/],
+    ['Orders', /\/orders\/sell$/],
+    ['Opportunities', /\/opportunities\/expansion$/],
+    ['Dashboard', /\/dashboard$/],
+  ];
+  for (const [name, url] of steps) {
+    await nav.getByRole('link', { name }).click();
+    await expect(page).toHaveURL(url);
+    await expect(nav.getByRole('link', { name })).toHaveAttribute('aria-current', 'page');
+    await expect(nav.locator('[aria-current="page"]')).toHaveCount(1);
+  }
 
-  await nav.getByRole('link', { name: 'Wealth' }).click();
-  await expect(page).toHaveURL(/\/wealth$/);
-  await expect(nav.getByRole('link', { name: 'Wealth' })).toHaveAttribute('aria-current', 'page');
-
-  await nav.getByRole('link', { name: 'Trades' }).click();
-  await expect(page).toHaveURL(/\/trades$/);
-  await expect(nav.getByRole('link', { name: 'Trades' })).toHaveAttribute('aria-current', 'page');
-  await expect(nav.getByRole('link', { name: 'Wealth' })).not.toHaveAttribute('aria-current', 'page');
-
-  await nav.getByRole('link', { name: 'Opportunities' }).click();
-  await expect(page).toHaveURL(/\/opportunities$/);
-  await expect(nav.getByRole('link', { name: 'Opportunities' })).toHaveAttribute('aria-current', 'page');
-  await expect(nav.getByRole('link', { name: 'Wealth' })).not.toHaveAttribute('aria-current', 'page');
-
-  await nav.getByRole('link', { name: 'Characters' }).click();
-  await expect(page).toHaveURL(/\/characters$/);
-  await expect(nav.getByRole('link', { name: 'Characters' })).toHaveAttribute('aria-current', 'page');
-
-  await nav.getByRole('link', { name: 'Dashboard' }).click();
-  await expect(page).toHaveURL(/\/dashboard$/);
+  // Sign out sits at the bottom of the sidebar, below every other entry.
+  const bottom = (await nav.getByRole('button', { name: 'Sign out' }).boundingBox())!;
+  const last = (await nav.getByRole('link', { name: 'Opportunities' }).boundingBox())!;
+  expect(bottom.y).toBeGreaterThan(last.y + last.height);
+  const side = (await page.locator('aside.sidebar').boundingBox())!;
+  expect(side.y + side.height - (bottom.y + bottom.height)).toBeLessThanOrEqual(24);
 
   await nav.getByRole('button', { name: 'Sign out' }).click();
   await expect(page).toHaveURL(/localhost:\d+\/$/);
@@ -42,31 +38,18 @@ test('navigate between the signed-in pages, and sign out from the navigation', a
   await expect(page.locator('#main-nav')).toHaveCount(0);
 });
 
-test('characters and sign out are icon-only controls in a single thin top bar', async ({ page }) => {
+test('every sidebar entry has an icon, a label, and its name as hover title', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
-  await page.setViewportSize({ width: 1920, height: 1080 });
   const nav = page.locator('#main-nav');
-
-  for (const name of ['Characters', 'Sign out']) {
-    const control = nav.getByRole(name === 'Characters' ? 'link' : 'button', { name });
+  for (const name of ['Dashboard', 'Characters', 'Wealth', 'Trades', 'Orders', 'Opportunities', 'Sign out']) {
+    const control = nav.getByRole(name === 'Sign out' ? 'button' : 'link', { name });
     await expect(control).toHaveAttribute('title', name);
     await expect(control.locator('svg')).toHaveCount(1);
-    await expect(control).toHaveText('');
+    await expect(control.locator('.label')).toHaveText(name);
   }
-
-  const bar = (await nav.boundingBox())!;
-  expect(bar.height).toBeLessThanOrEqual(36);
-  const centres = await nav.locator('a, button').evaluateAll((els) =>
-    els.map((e) => {
-      const r = e.getBoundingClientRect();
-      return r.top + r.height / 2;
-    }),
-  );
-  expect(Math.max(...centres) - Math.min(...centres), 'all controls on one row').toBeLessThanOrEqual(3);
-  await expect(page.getByRole('heading', { level: 1 })).toHaveCount(0);
 });
 
-test('the trades link carries the selection and never a range', async ({ page }) => {
+test('the links carry the selection and never a range', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
   await openCharacters(page);
   await page.getByRole('button', { name: 'Add character' }).click();
@@ -74,9 +57,9 @@ test('the trades link carries the selection and never a range', async ({ page })
   await expect(page).toHaveURL(/\/characters$/);
   const nav = page.locator('#main-nav');
 
-  await page.goto('/orders');
+  await page.goto('/wealth');
   await page.getByRole('checkbox', { name: 'Bob Bravo' }).uncheck();
-  await expect(page).toHaveURL(/\/orders\?chars=90000001$/);
+  await expect(page).toHaveURL(/\/wealth\?chars=90000001/);
   await nav.getByRole('link', { name: 'Trades' }).click();
 
   await expect(page).toHaveURL(/\/trades\?chars=90000001$/);

@@ -34,14 +34,14 @@ test('tiles and breakdown show both characters, the corporation share and the ex
   await openDashboard(page);
 
   const sellTile = page.locator('#tile-sell-value');
-  await expect(sellTile.locator('.amount')).toHaveText('30m');
-  await expect(sellTile.locator('.amount')).toHaveAttribute('title', '30,000,000.00 ISK');
-  await expect(sellTile.locator('.corp-share')).toContainText('of which 2m corp');
-  await expect(sellTile.locator('.corp-share span')).toHaveAttribute('title', '2,000,000.00 ISK');
-  await expect(page.locator('#tile-escrow .amount')).toHaveText('2m');
-  await expect(page.locator('#tile-escrow .corp-share')).toHaveCount(0);
-  await expect(page.locator('#tile-sell-count .amount')).toHaveText('3');
-  await expect(page.locator('#tile-buy-count .amount')).toHaveText('1');
+  await expect(sellTile.locator('.value')).toHaveText('30m');
+  await expect(sellTile.locator('.value')).toHaveAttribute('title', '30,000,000.00 ISK');
+  await expect(sellTile.locator('.detail')).toContainText('of which 2m corp');
+  await expect(sellTile.locator('.detail')).toHaveAttribute('title', '2,000,000.00 ISK');
+  await expect(page.locator('#tile-escrow .value')).toHaveText('2m');
+  await expect(page.locator('#tile-escrow .detail')).toHaveCount(0);
+  await expect(page.locator('#tile-sell-count .value')).toHaveText('3');
+  await expect(page.locator('#tile-buy-count .value')).toHaveText('1');
 
   const alice = page.locator('#character-90000001');
   await expect(alice).toContainText('Alice Alpha');
@@ -59,8 +59,8 @@ test('a character that was never polled waits for its first update', async ({ pa
   await loginWith(page, 'Alice Alpha');
 
   await expect(page.locator('#character-90000001')).toContainText('Waiting for first update');
-  await expect(page.locator('#tile-sell-value .amount')).toHaveText('0.00');
-  await expect(page.locator('#tile-sell-value .corp-share')).toHaveCount(0);
+  await expect(page.locator('#tile-sell-value .value')).toHaveText('0.00');
+  await expect(page.locator('#tile-sell-value .detail')).toHaveCount(0);
 });
 
 test('the split graph has a sell and an escrow bar per character, with exact values on hover', async ({ page }) => {
@@ -179,14 +179,14 @@ test('narrowing the selection keeps the range, and the selection travels to the 
   await pollCharacter(page, 90000001);
   await pollCharacter(page, 90000002);
   await page.goto('/dashboard?range=30d');
-  await expect(page.locator('#tile-sell-value .amount')).toHaveText('30m');
+  await expect(page.locator('#tile-sell-value .value')).toHaveText('30m');
   await expect(page.getByRole('checkbox')).toHaveCount(2);
 
   await page.evaluate(() => ((window as unknown as { marker: string }).marker = 'same page'));
   await page.getByRole('checkbox', { name: 'Bob Bravo' }).uncheck();
 
   await expect(page).toHaveURL(/\/dashboard\?chars=90000001&range=30d$/);
-  await expect(page.locator('#tile-sell-value .amount')).toHaveText('10m');
+  await expect(page.locator('#tile-sell-value .value')).toHaveText('10m');
   await expect(page.locator('#breakdown tbody tr')).toHaveCount(1);
   await expect(page.locator('#range-control').getByRole('link', { name: '30 days' })).toHaveAttribute('aria-current', 'true');
   expect(await chartData(page, 'split')).toEqual([[1_000_000_000], [0]]);
@@ -200,7 +200,7 @@ test('narrowing the selection keeps the range, and the selection travels to the 
   await page.getByRole('checkbox', { name: 'Alice Alpha' }).uncheck();
   await expect(page).toHaveURL(/chars=90000002&range=30d$/);
   await page.locator('#main-nav').getByRole('link', { name: 'Orders' }).click();
-  await expect(page).toHaveURL(/\/orders\?chars=90000002$/);
+  await expect(page).toHaveURL(/\/orders\/sell\?chars=90000002$/);
   await expect(page.locator('#sell-orders tbody.order')).toHaveCount(1);
   await expect(page.locator('#order-2')).toBeVisible();
 });
@@ -229,14 +229,14 @@ test('totals, row, split bar and the last line point refresh after a poll withou
   await stubControl('orders', { character_id: 90000001, orders: [stubOrder(1, { price: 1_000_000, remain: 10 })] });
   await pollCharacter(page, 90000001);
   await page.goto('/dashboard');
-  await expect(page.locator('#tile-sell-value .amount')).toHaveText('10m');
+  await expect(page.locator('#tile-sell-value .value')).toHaveText('10m');
   await expect(page.locator('canvas[data-chart]')).toHaveCount(5);
   await page.evaluate(() => ((window as unknown as { marker: string }).marker = 'same page'));
 
   await stubControl('orders', { character_id: 90000001, orders: [stubOrder(1, { price: 1_500_000, remain: 10 })] });
   await pollCharacter(page, 90000001);
 
-  await expect(page.locator('#tile-sell-value .amount')).toHaveText('15m');
+  await expect(page.locator('#tile-sell-value .value')).toHaveText('15m');
   await expect(page.locator('#character-90000001').getByText('15m', { exact: true })).toBeVisible();
   await expect.poll(async () => (await chartData(page, 'split'))[0]).toEqual([1_500_000_000]);
   await expectTooltip(page, 'split', 0, 0, ['Sell value: 15,000,000.00 ISK']);
@@ -260,7 +260,7 @@ test('a live refresh keeps the selection and the range, and leaks no chart', asy
     await pollCharacter(page, 90000001);
     // Bob's poll signals too, and must not widen the view.
     await pollCharacter(page, 90000002);
-    await expect(page.locator('#tile-sell-value .amount')).toHaveText(`${price * 10 / 1_000_000}m`);
+    await expect(page.locator('#tile-sell-value .value')).toHaveText(`${price * 10 / 1_000_000}m`);
     expect(round).toBeGreaterThanOrEqual(0);
   }
 
@@ -284,12 +284,12 @@ test('the wealth tile adds up both characters, shows the exact amount on hover a
   await openDashboard(page);
 
   const tile = page.locator('#tile-wealth');
-  await expect(tile.locator('.amount')).toHaveText('250m');
-  await expect(tile.locator('.amount')).toHaveAttribute('title', '250,000,000.00 ISK');
+  await expect(tile.locator('.value')).toHaveText('250m');
+  await expect(tile.locator('.value')).toHaveAttribute('title', '250,000,000.00 ISK');
   await expect(tile.getByRole('link', { name: 'Wealth' })).toHaveAttribute('href', '/wealth');
 
   await page.getByRole('checkbox', { name: 'Bob Bravo' }).uncheck();
-  await expect(tile.locator('.amount')).toHaveText('200m');
+  await expect(tile.locator('.value')).toHaveText('200m');
   await expect(tile.getByRole('link', { name: 'Wealth' })).toHaveAttribute('href', '/wealth?chars=90000001');
 
   await tile.getByRole('link', { name: 'Wealth' }).click();
@@ -328,7 +328,7 @@ test('the wealth line steps with the wallet and its last point is the tile', asy
   expect(line[line.length - 1]).toBe(1_500_000_000);
   expect(line.indexOf(1_000_000_000)).toBeLessThan(line.indexOf(1_500_000_000));
   expect(line[0]).toBeLessThanOrEqual(1_000_000_000);
-  await expect(page.locator('#tile-wealth .amount')).toHaveText('15m');
+  await expect(page.locator('#tile-wealth .value')).toHaveText('15m');
   await expectTooltip(page, 'wealth-history', 0, line.length - 1, ['Wealth: 15,000,000.00 ISK']);
 });
 
@@ -338,14 +338,14 @@ test('a wallet poll refreshes the wealth tile and line without a reload', async 
   await stubControl('wallet', { character_id: 90000001, balance: 10_000_000 });
   await wealthPoll(page, 90000001, 'wallet');
   await page.goto('/dashboard');
-  await expect(page.locator('#tile-wealth .amount')).toHaveText('10m');
+  await expect(page.locator('#tile-wealth .value')).toHaveText('10m');
   await page.evaluate(() => ((window as unknown as { marker: string }).marker = 'same page'));
   await page.waitForTimeout(1000);
 
   await stubControl('wallet', { character_id: 90000001, balance: 25_000_000 });
   await wealthPoll(page, 90000001, 'wallet');
 
-  await expect(page.locator('#tile-wealth .amount')).toHaveText('25m');
+  await expect(page.locator('#tile-wealth .value')).toHaveText('25m');
   await expect
     .poll(async () => {
       const line = (await chartData(page, 'wealth-history'))[0];
@@ -360,4 +360,89 @@ test('without a wealth figure the dashboard says there is no wealth history', as
 
   await expect(page.getByText('No wealth history yet.')).toBeVisible();
   await expect(page.locator('canvas[data-chart="wealth-history"]')).toHaveCount(0);
+});
+
+test('the tiles are square cards of one size, in a row above the breakdown', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await loginWith(page, 'Alice Alpha');
+  await stubControl('orders', { character_id: 90000001, orders: [stubOrder(1)] });
+  await pollCharacter(page, 90000001);
+  // The stream's first refresh replaces the tiles; measure after it.
+  const opened = page.waitForResponse((r) => r.url().includes('/dashboard/summary'));
+  await page.goto('/dashboard');
+  await opened;
+  await page.waitForTimeout(300);
+
+  const ids = ['#tile-sell-value', '#tile-escrow', '#tile-wealth', '#tile-sell-count', '#tile-buy-count'];
+  const boxes = await Promise.all(ids.map(async (id) => (await page.locator(id).boundingBox())!));
+  for (const box of boxes) {
+    expect(Math.abs(box.width - box.height), 'square').toBeLessThanOrEqual(1);
+    expect(Math.abs(box.width - boxes[0].width), 'one size').toBeLessThanOrEqual(1);
+    expect(Math.abs(box.y - boxes[0].y), 'one row').toBeLessThanOrEqual(1);
+  }
+  // Left to right in the order of the cards, and above the breakdown.
+  expect(boxes.map((b) => b.x)).toEqual([...boxes.map((b) => b.x)].sort((a, b) => a - b));
+  expect(boxes[0].y + boxes[0].height).toBeLessThanOrEqual((await page.locator('#breakdown').boundingBox())!.y);
+  await expect(page.locator('#tile-wealth').getByRole('link', { name: 'Wealth' })).toHaveAttribute('href', '/wealth');
+});
+
+test('the rows follow each other: tiles, breakdown, three graphs side by side, then value, orders and wealth alone', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await twoCharacters(page);
+  await stubControl('orders', { character_id: 90000001, orders: [stubOrder(1, { price: 1_000_000 }), stubOrder(2, { buy: true, escrow: 2_000_000 })] });
+  await pollCharacter(page, 90000001);
+  await wealthPoll(page, 90000001, 'wallet');
+  // The stream's first refresh replaces the rows; measure after it.
+  const opened = page.waitForResponse((r) => r.url().includes('/dashboard/summary'));
+  await page.goto('/dashboard');
+  await opened;
+  await expect(page.locator('canvas[data-chart]')).toHaveCount(6);
+  await page.waitForTimeout(300);
+
+  const box = async (selector: string) => {
+    const found = await page.locator(selector).first().boundingBox();
+    if (!found) throw new Error(`no box for ${selector}`);
+    return found;
+  };
+  const tiles = await box('#totals');
+  const breakdown = await box('#characters');
+  const split = await box('canvas[data-chart="split"]');
+  const topSell = await box('canvas[data-chart="top-sell"]');
+  const topBuy = await box('canvas[data-chart="top-buy"]');
+  const value = await box('#value');
+  const orders = await box('#orders');
+  const wealth = await box('#wealth');
+
+  expect(tiles.y + tiles.height).toBeLessThanOrEqual(breakdown.y + 1);
+  // The breakdown is as wide as the content area, and so are the three rows alone.
+  const content = await box('#content, #dashboard-view');
+  for (const wide of [breakdown, value, orders, wealth]) expect(Math.abs(wide.width - content.width)).toBeLessThanOrEqual(2);
+  // The split and both top-item graphs share one row, below the breakdown.
+  expect(Math.abs(split.y - topSell.y)).toBeLessThanOrEqual(2);
+  expect(Math.abs(split.y - topBuy.y)).toBeLessThanOrEqual(2);
+  expect(split.x).toBeLessThan(topSell.x);
+  expect(topSell.x).toBeLessThan(topBuy.x);
+  expect(split.y).toBeGreaterThanOrEqual(breakdown.y + breakdown.height);
+  expect(value.y).toBeGreaterThanOrEqual(split.y + split.height);
+  expect(orders.y).toBeGreaterThanOrEqual(value.y + value.height - 1);
+  expect(wealth.y).toBeGreaterThanOrEqual(orders.y + orders.height - 1);
+  await expect(page.locator('#breakdown').locator('xpath=ancestor::*[contains(@class,"table-wrap")]')).toHaveCount(1);
+});
+
+test('thirty characters are all listed in the breakdown without pagination or inner scrolling', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await loginWith(page, 'Alice Alpha');
+  await query(
+    `INSERT INTO characters (character_id, account_id, name, owner_hash)
+     SELECT 91000000 + n, (SELECT account_id FROM characters WHERE character_id = 90000001), 'Extra Character ' || n, 'hash-' || n
+     FROM generate_series(1, 29) AS n`,
+  );
+
+  await page.goto('/dashboard');
+
+  await expect(page.locator('#breakdown tbody tr')).toHaveCount(30);
+  await expect(page.locator('#characters .pagination')).toHaveCount(0);
+  const wrap = page.locator('#characters .table-wrap');
+  const sizes = await wrap.evaluate((el) => ({ scroll: el.scrollHeight, client: el.clientHeight }));
+  expect(sizes.scroll).toBeLessThanOrEqual(sizes.client + 1);
 });

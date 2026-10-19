@@ -305,6 +305,8 @@ async fn a_passing_verification_records_the_fingerprint_and_the_variants() {
         "skills/forbidden",
         "standings/list",
         "standings/forbidden",
+        "character-location/station",
+        "character-location/forbidden",
         "stations/station",
     ] {
         assert!(record.variants.iter().any(|v| v == variant), "{variant}");

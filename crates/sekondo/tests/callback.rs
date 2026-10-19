@@ -140,7 +140,13 @@ async fn brand_new_character_creates_an_account_and_signs_in(pool: PgPool) {
     assert_eq!(characters[0].character_id, ALICE);
     assert_eq!(characters[0].name, "Alice Alpha");
     assert_eq!(characters[0].owner_hash, "owner-hash-90000001");
-    assert_eq!(characters[0].scopes.len(), 6);
+    assert_eq!(characters[0].scopes.len(), 7);
+    assert!(
+        characters[0]
+            .scopes
+            .iter()
+            .any(|s| s == sekondo::oauth::LOCATION_SCOPE)
+    );
     assert_eq!(e.count("accounts").await, 1);
 
     let tokens = e.repo.load_tokens(ALICE).await.unwrap().unwrap();

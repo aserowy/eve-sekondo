@@ -1,5 +1,5 @@
-//! The fee poller: keeps every linked character's trade skills and NPC standings in step with
-//! ESI, and learns who owns the NPC stations where characters have orders. It mirrors the wealth
+//! The fee poller: keeps every linked character's trade skills, NPC standings and location in step
+//! with ESI, and learns who owns the NPC stations where characters have orders. It mirrors the wealth
 //! poller but has its own schedule and failure state, so a fee problem never touches the order or
 //! wealth polls, and the other way round.
 
@@ -15,10 +15,13 @@ use uuid::Uuid;
 
 use crate::{
     clock::Clock,
-    esi::{EsiClient, EsiError, EsiResponse, EsiSkills, EsiStanding},
+    esi::{
+        EsiCharacterLocation, EsiClient, EsiError, EsiLocation, EsiResponse, EsiSkills, EsiStanding,
+    },
     events::{Event, EventBus},
     fees::{self, ACCOUNTING, BROKER_RELATIONS},
-    names::STRUCTURE_ID_MIN,
+    names::{self, STRUCTURE_ID_MIN},
+    oauth::LOCATION_SCOPE,
     opportunities::STATION_ID,
     poller::{
         BACKOFF_START, CLAIM_LEASE, PollOutcome, SCHEDULER_TICK, is_foreign_key_violation, jitter,
@@ -29,7 +32,7 @@ use crate::{
 
 /// How many polls run at the same time.
 const DEFAULT_CONCURRENCY: usize = 4;
-/// Skills and standings are polled at most this often: ESI caches both for about as long.
+/// Skills, standings and the location are polled at most this often: ESI caches them for about as long.
 pub const FEE_INTERVAL: Duration = Duration::hours(1);
 /// How many unknown stations are looked up per tick.
 const STATIONS_PER_TICK: i64 = 10;
@@ -41,16 +44,27 @@ const STATION_RETRY_MAX: Duration = Duration::hours(1);
 pub enum Kind {
     Skills,
     Standings,
+    /// Needs the optional location scope: characters without it are not polled for it.
+    Location,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 2] = [Kind::Skills, Kind::Standings];
+    pub const ALL: [Kind; 3] = [Kind::Skills, Kind::Standings, Kind::Location];
 
     /// The value in `fee_sync.kind`.
     pub fn as_str(self) -> &'static str {
         match self {
             Kind::Skills => "skills",
             Kind::Standings => "standings",
+            Kind::Location => "location",
+        }
+    }
+
+    /// The scope a character must have been granted to be polled for this kind, if any.
+    fn optional_scope(self) -> Option<&'static str> {
+        match self {
+            Kind::Location => Some(LOCATION_SCOPE),
+            Kind::Skills | Kind::Standings => None,
         }
     }
 
@@ -93,6 +107,25 @@ impl FeePoller {
     /// every way a poll can end is a [`PollOutcome`], and the database records the details.
     pub async fn poll(&self, character_id: i64, kind: Kind) -> PollOutcome {
         let now = self.clock.now();
+        if let Some(scope) = kind.optional_scope() {
+            match sqlx::query_scalar::<_, bool>(
+                "SELECT $2 = ANY(scopes) FROM characters WHERE character_id = $1",
+            )
+            .bind(character_id)
+            .bind(scope)
+            .fetch_optional(&self.pool)
+            .await
+            {
+                Ok(Some(true)) => {}
+                Ok(Some(false)) => return PollOutcome::Skipped,
+                Ok(None) => return PollOutcome::Dropped,
+                Err(e) => {
+                    return self
+                        .record_failure(character_id, kind, now, &format!("database error: {e}"))
+                        .await;
+                }
+            }
+        }
         let token = match self.tokens.access_token(character_id).await {
             Ok(token) => token,
             Err(TokenError::NeedsRelogin) => {
@@ -120,6 +153,19 @@ impl FeePoller {
             },
             Kind::Standings => match self.esi.standings(character_id, &token).await {
                 Ok(response) => self.store_standings(character_id, now, &response).await,
+                Err(e) => return self.esi_failed(character_id, kind, now, e).await,
+            },
+            Kind::Location => match self.esi.character_location(character_id, &token).await {
+                Ok(response) => {
+                    // Named like order locations, so the fee cards can say where they are.
+                    if let Some(docked) = response.body.docked() {
+                        let id = match docked {
+                            EsiLocation::Station(id) | EsiLocation::Structure(id) => id,
+                        };
+                        names::resolve(&self.pool, &self.esi, &token, [id], now).await;
+                    }
+                    self.store_location(character_id, now, &response).await
+                }
                 Err(e) => return self.esi_failed(character_id, kind, now, e).await,
             },
         };
@@ -277,6 +323,49 @@ impl FeePoller {
         Ok(before != after)
     }
 
+    /// Remembers the station or structure the character is docked in. In open space the last
+    /// one stays. Answers whether what the page shows changed.
+    async fn store_location(
+        &self,
+        character_id: i64,
+        polled_at: OffsetDateTime,
+        response: &EsiResponse<EsiCharacterLocation>,
+    ) -> Result<bool, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        let before = fees::FeeSnapshot::of(&mut tx, &[character_id]).await?;
+        if let Some(docked) = response.body.docked() {
+            let (location_id, kind) = match docked {
+                EsiLocation::Station(id) => (id, "station"),
+                EsiLocation::Structure(id) => (id, "structure"),
+            };
+            sqlx::query(
+                "INSERT INTO character_locations (character_id, location_id, kind, updated_at)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (character_id) DO UPDATE SET
+                     location_id = excluded.location_id,
+                     kind = excluded.kind,
+                     updated_at = excluded.updated_at",
+            )
+            .bind(character_id)
+            .bind(location_id)
+            .bind(kind)
+            .bind(polled_at)
+            .execute(&mut *tx)
+            .await?;
+        }
+        self.record_success(
+            &mut tx,
+            character_id,
+            Kind::Location,
+            polled_at,
+            response.expires_at,
+        )
+        .await?;
+        let after = fees::FeeSnapshot::of(&mut tx, &[character_id]).await?;
+        tx.commit().await?;
+        Ok(before != after)
+    }
+
     async fn record_success(
         &self,
         tx: &mut sqlx::PgConnection,
@@ -387,7 +476,7 @@ impl FeePoller {
 
 impl FeePoller {
     /// Looks up the owner of up to [`STATIONS_PER_TICK`] NPC stations where a current order is
-    /// placed or a sale was made and whose owner is not known yet, one ESI call per station
+    /// placed, a sale was made or a character is docked, and whose owner is not known yet, one ESI call per station
     /// whoever's they are. An account whose fees change because of an owner gets `fees-updated`. A lookup that
     /// fails is retried on a later tick, later each time. Answers how many owners were learned.
     pub async fn resolve_stations(&self) -> usize {
@@ -397,6 +486,8 @@ impl FeePoller {
                  SELECT location_id FROM current_orders
                  UNION
                  SELECT location_id FROM sales
+                 UNION
+                 SELECT location_id FROM character_locations WHERE kind = 'station'
              ) l
              WHERE l.location_id < $1
                AND NOT EXISTS (SELECT 1 FROM station_owners s WHERE s.station_id = l.location_id)
@@ -507,6 +598,8 @@ impl FeePoller {
                  SELECT character_id FROM current_orders WHERE location_id = $1
                  UNION
                  SELECT character_id FROM sales WHERE location_id = $1
+                 UNION
+                 SELECT character_id FROM character_locations WHERE location_id = $1
              ) t
              JOIN characters c ON c.character_id = t.character_id",
         )
@@ -606,10 +699,12 @@ impl FeePoller {
             let unscheduled: Vec<i64> = sqlx::query_scalar(
                 "SELECT c.character_id FROM characters c
                  WHERE NOT c.needs_relogin
+                   AND ($2::text IS NULL OR $2 = ANY(c.scopes))
                    AND NOT EXISTS (SELECT 1 FROM fee_sync s
                                    WHERE s.character_id = c.character_id AND s.kind = $1)",
             )
             .bind(kind.as_str())
+            .bind(kind.optional_scope())
             .fetch_all(&self.pool)
             .await?;
             if unscheduled.is_empty() {
@@ -646,6 +741,7 @@ impl FeePoller {
                  SELECT s.character_id, s.kind FROM fee_sync s
                  JOIN characters c USING (character_id)
                  WHERE NOT c.needs_relogin AND s.next_poll_at <= $1
+                   AND (s.kind <> 'location' OR $4 = ANY(c.scopes))
                  ORDER BY s.next_poll_at
                  LIMIT $3
                  FOR UPDATE OF s SKIP LOCKED)
@@ -654,6 +750,7 @@ impl FeePoller {
         .bind(now)
         .bind(CLAIM_LEASE.as_seconds_f64())
         .bind((self.concurrency * 8) as i64)
+        .bind(LOCATION_SCOPE)
         .fetch_all(&self.pool)
         .await?;
         Ok(claimed

@@ -41,6 +41,7 @@ pub const ROUTE_ASSETS: &str = "assets";
 pub const ROUTE_PRICES: &str = "prices";
 pub const ROUTE_SKILLS: &str = "skills";
 pub const ROUTE_STANDINGS: &str = "standings";
+pub const ROUTE_LOCATION: &str = "location";
 pub const ROUTE_STATIONS: &str = "stations";
 
 #[derive(Debug, thiserror::Error)]
@@ -166,6 +167,31 @@ pub struct EsiSkills {
 pub struct EsiSkill {
     pub skill_id: i64,
     pub active_skill_level: i16,
+}
+
+/// Where a character is. Docked in a station, docked in a structure (either id is present), or in
+/// open space (neither).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct EsiCharacterLocation {
+    pub solar_system_id: i64,
+    pub station_id: Option<i64>,
+    pub structure_id: Option<i64>,
+}
+
+/// A place a character can be docked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EsiLocation {
+    Station(i64),
+    Structure(i64),
+}
+
+impl EsiCharacterLocation {
+    /// The station or structure the character is docked in; `None` in open space.
+    pub fn docked(&self) -> Option<EsiLocation> {
+        self.station_id
+            .map(EsiLocation::Station)
+            .or(self.structure_id.map(EsiLocation::Structure))
+    }
 }
 
 /// A standing of a character towards an agent, an NPC corporation or a faction.
@@ -362,6 +388,19 @@ impl EsiClient {
             .get(self.url(&format!("characters/{character_id}/standings")))
             .bearer_auth(token.expose_secret());
         self.fetch(ROUTE_STANDINGS, request).await
+    }
+
+    /// Where the character is. Needs the location scope: without it ESI answers 403.
+    pub async fn character_location(
+        &self,
+        character_id: i64,
+        token: &SecretString,
+    ) -> Result<EsiResponse<EsiCharacterLocation>, EsiError> {
+        let request = self
+            .http
+            .get(self.url(&format!("characters/{character_id}/location")))
+            .bearer_auth(token.expose_secret());
+        self.fetch(ROUTE_LOCATION, request).await
     }
 
     /// An NPC station. Public.

@@ -655,6 +655,54 @@ async fn verify_transactions(
     Ok(())
 }
 
+/// Where the character is: the variant is whatever it turns out to be (a station, a structure or
+/// open space). The location itself is never printed. A 403 for the character's own location means
+/// the verification character did not grant the optional location scope.
+async fn verify_location(
+    settings: &Settings,
+    run: &mut Run<'_>,
+    http: &reqwest::Client,
+    token: &SecretString,
+    me: i64,
+) -> Result<()> {
+    let location = |id: i64| {
+        settings
+            .esi_base_url
+            .join(&format!("characters/{id}/location"))
+            .map_err(|e| VerifyError(e.to_string()))
+    };
+
+    let answer = esi_request(
+        settings,
+        http.get(location(me)?).bearer_auth(token.expose_secret()),
+        "location",
+    )
+    .await?;
+    if answer.status == 403 {
+        run.problem(
+            "character-location: the verification character did not grant the location scope, so the answer cannot be checked".to_owned(),
+        );
+    } else {
+        let variant = match &answer.json {
+            Some(body) if body.get("station_id").is_some() => "station",
+            Some(body) if body.get("structure_id").is_some() => "structure",
+            _ => "in-space",
+        };
+        run.check("character-location", variant, &answer);
+    }
+
+    // Another character's location is refused whatever the scopes are.
+    let answer = esi_request(
+        settings,
+        http.get(location(me + 1)?)
+            .bearer_auth(token.expose_secret()),
+        "location",
+    )
+    .await?;
+    run.check("character-location", "forbidden", &answer);
+    Ok(())
+}
+
 /// A station well known to be NPC-owned, for characters whose orders are all in structures.
 const FALLBACK_STATION_ID: i64 = 60_003_760;
 
@@ -715,6 +763,8 @@ async fn verify_fees(
         .await?;
         run.check(call, "forbidden", &answer);
     }
+
+    verify_location(settings, run, http, token, me).await?;
 
     let station_id = orders
         .iter()

@@ -1,0 +1,5 @@
+<div id="trades-range-control" class="range-control" role="group" aria-label="Time range"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {% for r in view.ranges %}
+  <a href="{{ r.href }}" hx-get="{{ r.table_url }}" hx-target="#content" hx-swap="innerHTML show:#content:top" hx-sync="#content:replace" hx-push-url="{{ r.href }}"{% if r.current %} aria-current="true"{% endif %}>{{ r.label }}</a>
+  {% endfor %}
+</div>
