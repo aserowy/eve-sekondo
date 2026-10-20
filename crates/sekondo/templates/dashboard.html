@@ -13,10 +13,13 @@
   {% include "character_filter.html" %}
   <input type="hidden" name="range" value="{{ range_name }}">
 </form>
-<div id="range-control" class="range-control" role="group" aria-label="Time range">
+<div id="range-control" class="range-control">
+  <span id="range-control-label">Range</span>
+  <div role="group" aria-labelledby="range-control-label">
   {% for r in view.ranges %}
-  <a href="{{ r.href }}" hx-get="{{ r.href }}" hx-target="#dashboard-view" hx-select="#dashboard-view" hx-select-oob="#main-nav, #filter-box" hx-swap="outerHTML" hx-push-url="true"{% if r.current %} aria-current="true"{% endif %}>{{ r.label }}</a>
+  <a href="{{ r.href }}" hx-get="{{ r.href }}" hx-target="#dashboard-view" hx-select="#dashboard-view" hx-select-oob="#main-nav, #filter-box" hx-swap="outerHTML" hx-push-url="true" role="button"{% if r.current %} aria-current="true"{% else %} class="secondary outline"{% endif %}>{{ r.label }}</a>
   {% endfor %}
+  </div>
 </div>
 </div>
 {% endblock %}

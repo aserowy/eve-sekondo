@@ -14,7 +14,7 @@ use super::{
     REGION_ID, STATION_ID, STATION_NAME,
     analysis::{self, FeeSource, Fees},
     charts,
-    settings::{Form, Settings},
+    settings::{FieldError, Form, Settings},
     tables::{
         self, Context, Extra, Row, Sort, SortKey, Table, choose_station_fees, load_own_orders,
     },
@@ -118,13 +118,23 @@ pub struct TableView {
 /// that saving keeps the selection and the sorting.
 pub struct FiltersView {
     pub form: Form,
-    pub error: Option<String>,
+    pub error: Option<FieldError>,
     pub chars: String,
     /// `(name, value)` of the hidden inputs: every table's sorting.
     pub sorts: Vec<(&'static str, String)>,
     /// The table of the page that saves, and its page size: saving shows page 1 of it.
     pub table: &'static str,
     pub per_page: u32,
+}
+
+impl FiltersView {
+    /// The message for the input called `name`, when that is the field the form was rejected for.
+    pub fn error_for(&self, name: &str) -> Option<&str> {
+        self.error
+            .as_ref()
+            .filter(|error| error.field.name() == name)
+            .map(|error| error.message.as_str())
+    }
 }
 
 /// One link of the page sub-menu: a table's page.
@@ -264,7 +274,7 @@ impl ViewState {
 /// A rejected filter form, shown again with the reason.
 struct Rejected {
     form: Form,
-    message: String,
+    error: FieldError,
 }
 
 /// What every request of the page works from: the account's characters and selection, the view
@@ -372,7 +382,7 @@ async fn build_view(
             .collect(),
     };
     let (form, error) = match rejected {
-        Some(Rejected { form, message }) => (form, Some(message)),
+        Some(Rejected { form, error }) => (form, Some(error)),
         None => (Form::of(&env.settings), None),
     };
     let view = OpportunitiesView {
@@ -573,7 +583,7 @@ struct OpportunitiesPage {
     view: OpportunitiesView,
 }
 
-/// The filter box's error text alone: the answer to a rejected filter form.
+/// The filter form alone, with the rejected field marked: the answer to a rejected filter form.
 #[derive(Template)]
 #[template(path = "opportunities_filter_error_fragment.html")]
 struct FilterErrorFragment {
@@ -586,13 +596,11 @@ struct FreshnessFragment {
     view: OpportunitiesView,
 }
 
-/// The table with its pagination, and out of band the filter box's context text. A saved filter
-/// also clears the box's error text.
+/// The table with its pagination, and out of band the filter box's context text.
 #[derive(Template)]
 #[template(path = "opportunities_content_fragment.html")]
 struct ContentFragment {
     view: OpportunitiesView,
-    clear_error: bool,
 }
 
 async fn load(
@@ -677,10 +685,7 @@ pub async fn content(
         Err(response) => return *response,
     };
     match load(&state, account, &session, table, &query).await {
-        Ok((view, _)) => pages::render(&ContentFragment {
-            view,
-            clear_error: false,
-        }),
+        Ok((view, _)) => pages::render(&ContentFragment { view }),
         Err(response) => *response,
     }
 }
@@ -734,10 +739,7 @@ pub async fn save_settings(
                 Ok((view, _)) => {
                     // The address bar goes back to the first page of what the user was reading.
                     let url = view.content_url.replacen("/content", "", 1);
-                    let mut response = pages::render(&ContentFragment {
-                        view,
-                        clear_error: true,
-                    });
+                    let mut response = pages::render(&ContentFragment { view });
                     if let Ok(value) = url.parse() {
                         response.headers_mut().insert("HX-Replace-Url", value);
                     }
@@ -746,8 +748,8 @@ pub async fn save_settings(
                 Err(response) => *response,
             }
         }
-        Err(message) => {
-            let rejected = Rejected { form, message };
+        Err(error) => {
+            let rejected = Rejected { form, error };
             match load_with(&state, account, &session, table, &query, Some(rejected)).await {
                 Ok((view, _)) => pages::render_with(
                     StatusCode::UNPROCESSABLE_ENTITY,

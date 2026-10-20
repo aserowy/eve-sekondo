@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import { expect, feePoll, loginWith, stubControl, stubTransaction, test, wealthPoll } from '../support/fixtures';
+import { expect, feePoll, loginWith, pollCharacter, stubControl, stubTransaction, test, wealthPoll } from '../support/fixtures';
 import { horizontalOverflow } from '../support/layout';
 
 const ALICE = 90000001;
@@ -27,6 +27,7 @@ async function aliceTraded(page: Page) {
 test('tables are compact: small text, short rows, no wrapping, aligned figures, zebra and hover', async ({ page }) => {
   await aliceTraded(page);
   const table = page.locator('#trades');
+  const root = await page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).fontSize));
 
   const style = await table.evaluate((el) => {
     const root = parseFloat(getComputedStyle(document.documentElement).fontSize);
@@ -45,7 +46,7 @@ test('tables are compact: small text, short rows, no wrapping, aligned figures, 
   expect(style.numFigures).toContain('tabular-nums');
 
   for (const row of await table.locator('tbody tr').all()) {
-    expect((await row.boundingBox())!.height).toBeLessThanOrEqual(28);
+    expect((await row.boundingBox())!.height).toBeLessThanOrEqual(1.75 * root);
   }
 
   const background = (n: number) => table.locator(`tbody tr:nth-child(${n})`).evaluate((tr) => getComputedStyle(tr.children[0]).backgroundColor);
@@ -54,6 +55,32 @@ test('tables are compact: small text, short rows, no wrapping, aligned figures, 
   const before = await background(1);
   await table.locator('tbody tr:nth-child(1)').hover();
   expect(await background(1)).not.toBe(before);
+});
+
+test('table cells are padded 0.3rem above and below and 0.75rem left and right', async ({ page }) => {
+  await aliceTraded(page);
+  const padding = await page.locator('#trades tbody td').evaluateAll((cells) => {
+    const root = parseFloat(getComputedStyle(document.documentElement).fontSize);
+    return cells.map((c) => {
+      const s = getComputedStyle(c);
+      return [s.paddingTop, s.paddingBottom, s.paddingLeft, s.paddingRight].map((v) => parseFloat(v) / root);
+    });
+  });
+  expect(padding.length).toBeGreaterThan(0);
+  for (const p of padding) expect(p).toEqual([0.3, 0.3, 0.75, 0.75]);
+});
+
+test('a single-line sell order row is at most 1.75rem high', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  expect(await pollCharacter(page, ALICE)).toBe('200 updated');
+  await page.goto('/orders/sell');
+  await expect(page.locator('#sell-orders tbody.order')).toHaveCount(2);
+  const { root, heights } = await page.evaluate(() => ({
+    root: parseFloat(getComputedStyle(document.documentElement).fontSize),
+    heights: [...document.querySelectorAll('#sell-orders tbody.order tr:first-child')].map((r) => r.getBoundingClientRect().height),
+  }));
+  expect(heights.length).toBe(2);
+  for (const h of heights) expect(h).toBeLessThanOrEqual(1.75 * root);
 });
 
 test('a wide table scrolls sideways inside its container and never makes the page scroll sideways', async ({ page }) => {

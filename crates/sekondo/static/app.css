@@ -39,7 +39,9 @@
 /* The page column: header, main and footer. main takes the spare height, so a footer sits at the
    bottom edge of the window on a short page and follows the content on a long one. */
 .shell > .page { display: flex; flex-direction: column; min-width: 0; min-height: 100dvh; padding-block: var(--pico-spacing) 0; }
-.page > main { flex: 1 0 auto; padding-bottom: var(--pico-spacing); }
+.page > main { flex: 1 0 auto; display: flex; flex-direction: column; padding-bottom: var(--pico-spacing); }
+/* #content takes main's spare height, so the pagination (margin-top: auto) sits just above the footer on a short page. */
+.page > main > #content { flex: 1 0 auto; display: flex; flex-direction: column; }
 /* Headings: a modest page title, and section titles a step below it. */
 .page-header h1 { --pico-font-size: 1.5rem; margin-bottom: calc(var(--pico-spacing) * 0.75); }
 .page main h2 { --pico-font-size: 1.125rem; margin-bottom: calc(var(--pico-spacing) * 0.5); }
@@ -54,16 +56,18 @@
   background: var(--pico-card-sectioning-background-color);
 }
 .sidebar nav { display: flex; flex: 1 1 auto; flex-direction: column; }
-.sidebar nav ul { display: flex; flex: 1 1 auto; flex-direction: column; gap: 0.25rem; margin: 0; padding: 0; }
+.sidebar nav ul { display: flex; flex: 1 1 auto; flex-direction: column; align-items: stretch; gap: 0.25rem; margin: 0; padding: 0; }
 .sidebar nav li { display: block; margin: 0; padding: 0; list-style: none; }
 .sidebar nav li.bottom { margin-top: auto; }
 .sidebar nav a, .sidebar nav button, .sidebar .menu-toggle {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 0.6rem;
   width: 100%;
   margin: 0;
   padding: 0.4rem 0.6rem;
+  text-align: left;
   border: 0;
   border-radius: var(--pico-border-radius);
   background: none;
@@ -75,7 +79,9 @@
 .sidebar nav a:hover, .sidebar nav button:hover, .sidebar .menu-toggle:hover { background: var(--pico-secondary-focus); }
 .sidebar nav a[aria-current="page"] { background: var(--pico-primary-focus); font-weight: 600; }
 .sidebar .icon { flex: none; width: 1.1rem; height: 1.1rem; }
-.sidebar .menu-toggle { margin-bottom: var(--pico-spacing); color: var(--pico-muted-color); }
+/* Expanded, the toggle's icon sits at the sidebar's right edge; collapsed, it joins the icon column. */
+.sidebar .menu-toggle { width: auto; margin-bottom: var(--pico-spacing); margin-left: auto; color: var(--pico-muted-color); }
+html[data-menu="collapsed"] .sidebar .menu-toggle { margin-left: 0; }
 .menu-toggle .when-collapsed, html[data-menu="collapsed"] .menu-toggle .when-expanded { display: none; }
 html[data-menu="collapsed"] .menu-toggle .when-collapsed { display: inline-flex; }
 html[data-menu="collapsed"] .sidebar .label { display: none; }
@@ -84,7 +90,7 @@ html[data-menu="collapsed"] .sidebar .label { display: none; }
 .table-wrap { max-width: 100%; margin-bottom: var(--pico-spacing); overflow-x: auto; }
 .table-wrap table { width: max-content; min-width: 100%; margin-bottom: 0; }
 table { font-size: 0.875rem; }
-th, td { padding: 0.1rem 0.5rem; line-height: 1.2; white-space: nowrap; }
+th, td { padding: 0.3rem 0.75rem; line-height: 1.15; white-space: nowrap; }
 th a { color: inherit; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 td[title] { cursor: help; }
@@ -105,6 +111,7 @@ table.records tbody.order:hover > tr > * { background-color: var(--pico-secondar
   z-index: 5;
   display: flex;
   align-items: flex-end;
+  justify-content: flex-start;
   gap: 1.5rem;
   margin-bottom: var(--pico-spacing);
   border-bottom: 1px solid var(--pico-muted-border-color);
@@ -142,7 +149,7 @@ table.records tbody.order:hover > tr > * { background-color: var(--pico-secondar
 .kpi.error .value { color: var(--pico-del-color); }
 
 /* Pagination bar under a table. */
-.pagination { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; margin-bottom: var(--pico-spacing); }
+.pagination { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; margin: auto 0 0; }
 .pagination [aria-disabled="true"] { color: var(--pico-muted-color); }
 .pagination label { display: inline-flex; align-items: center; gap: 0.5rem; margin: 0 0 0 auto; }
 .pagination select { width: auto; margin: 0; padding-block: 0.15rem; }
@@ -154,22 +161,27 @@ mark.badge.undercut, mark.badge.loss, mark.badge.error, mark.badge.stale { backg
 /* The details line of an order is dimmed. */
 table.records tr.details td { color: var(--pico-muted-color); font-size: 0.8125rem; }
 
-/* Filter section: the page's filters in a wrapping row, with the page's context text at its right end. */
-.filter-box { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 1.5rem; margin-bottom: var(--pico-spacing); }
-.filter-box form, .filter-box fieldset { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 1rem; margin: 0; }
-.filter-box label { display: inline-flex; align-items: center; gap: 0.4rem; margin: 0; white-space: nowrap; }
-.filter-box input { margin: 0; width: auto; }
-.filter-box input[type="text"], .filter-box input[type="search"] { width: 9rem; }
+/* Filter section: the page's filters in a wrapping row, with the page's context text at its right end.
+   Fields keep Pico's form structure and size; only the layout is set here. */
+.filter-box { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.25rem 1.5rem; margin-bottom: var(--pico-spacing); }
+.filter-box form, .filter-box fieldset { margin: 0; }
+.filter-box fieldset { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; }
+.filter-box fieldset label { margin: 0; white-space: nowrap; }
+/* The opportunity filters: label-above-input fields of equal width that wrap onto further rows. */
+.filter-box #opportunity-filters { display: grid; flex: 1 1 50rem; max-width: 60rem; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0 1rem; }
+.filter-box #opportunity-filters input { margin-bottom: 0; }
+.filter-box #opportunity-filters small { margin: calc(var(--pico-spacing) * 0.25) 0 0; }
 .filter-box #filter-context { margin-left: auto; color: var(--pico-muted-color); }
-.filter-box .filter-error { color: var(--pico-del-color); }
-.filter-box .filter-error:empty { display: none; }
-.range-control { display: flex; gap: 0.75rem; }
-.range-control a[aria-current="true"] { color: var(--pico-color); font-weight: 600; text-decoration: none; }
+/* The time range: a label above a group of joined buttons, sharing the bottom edge of the fields beside it. */
+.range-control > span { display: block; margin-bottom: calc(var(--pico-spacing) * 0.375); }
+.range-control [role="group"] { margin-bottom: 0; }
 .note { color: var(--pico-muted-color); }
 
 /* Dashboard: the split graph and the two top-items graphs share a row. */
 .graph-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr)); gap: var(--pico-grid-column-gap); }
-.graph-row > section { min-width: 0; }
+.graph-row > article { min-width: 0; }
+/* A graph card: Pico's article holds the title, the chart and the empty-state text; nothing trails below the last one. */
+article.graph > :last-child { margin-bottom: 0; }
 
 /* Page footer: the page's freshness as quiet, small, dimmed lines below a divider. */
 .page-footer {

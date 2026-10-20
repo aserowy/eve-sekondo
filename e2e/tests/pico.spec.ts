@@ -1,4 +1,5 @@
 import { expect, loginWith, test } from '../support/fixtures';
+import { aliceTrained } from '../support/opportunities';
 
 test('every page loads Pico and the app stylesheet from the app origin', async ({ page }) => {
   const sheets: string[] = [];
@@ -30,4 +31,29 @@ test('the base font stays at 16px however wide the window is', async ({ page }) 
     }));
     expect(sizes, `at ${width}px`).toEqual({ root: '16px', body: '16px' });
   }
+});
+
+test("form fields keep Pico's size", async ({ page }) => {
+  await aliceTrained(page);
+  await page.goto('/opportunities/trend');
+  const input = page.getByLabel('Minimum margin (%)');
+  await expect(input).toBeVisible();
+
+  // An unstyled Pico text input, outside every app rule, as the yardstick.
+  const sizes = await page.evaluate(() => {
+    const read = (el: Element) => {
+      const s = getComputedStyle(el);
+      return { height: el.getBoundingClientRect().height, padding: [s.paddingTop, s.paddingBottom, s.paddingLeft, s.paddingRight] };
+    };
+    const reference = document.createElement('input');
+    reference.type = 'text';
+    reference.style.cssText = 'position:absolute;visibility:hidden;width:12rem';
+    document.querySelector('main')!.append(reference);
+    const own = document.querySelector('input[name="min_margin"]')!;
+    const result = { own: read(own), reference: read(reference) };
+    reference.remove();
+    return result;
+  });
+  expect(sizes.own.height).toBeCloseTo(sizes.reference.height, 1);
+  expect(sizes.own.padding).toEqual(sizes.reference.padding);
 });

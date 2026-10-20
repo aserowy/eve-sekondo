@@ -38,47 +38,47 @@
   </div>
 </section>
 <div id="split" class="graph-row">
-<section>
+<article class="graph">
   <h2>Per character</h2>
   <div class="chart"><canvas data-chart="split" data-series="{{ view.split_series }}" role="img" aria-label="{{ view.split_label }}"></canvas></div>
-</section>
-<section class="top-sell">
+</article>
+<article class="graph top-sell">
   <h2>Top items by sell value</h2>
   {% if let Some(chart) = view.top_sell %}
   <div class="chart"><canvas data-chart="top-sell" data-series="{{ chart.series }}" role="img" aria-label="{{ chart.label }}"></canvas></div>
   {% else %}
   <p>No sell orders.</p>
   {% endif %}
-</section>
-<section class="top-buy">
+</article>
+<article class="graph top-buy">
   <h2>Top items by buy escrow</h2>
   {% if let Some(chart) = view.top_buy %}
   <div class="chart"><canvas data-chart="top-buy" data-series="{{ chart.series }}" role="img" aria-label="{{ chart.label }}"></canvas></div>
   {% else %}
   <p>No buy orders.</p>
   {% endif %}
-</section>
+</article>
 </div>
 {% if let Some(history) = view.history %}
-<section id="value">
+<article id="value" class="graph">
   <h2>Over time: value</h2>
   <div class="chart"><canvas data-chart="value-history" data-series="{{ history.value.series }}" role="img" aria-label="{{ history.value.label }}"></canvas></div>
-</section>
-<section id="orders">
+</article>
+<article id="orders" class="graph">
   <h2>Over time: orders</h2>
   <div class="chart"><canvas data-chart="count-history" data-series="{{ history.count.series }}" role="img" aria-label="{{ history.count.label }}"></canvas></div>
-</section>
+</article>
 {% else %}
-<section id="value">
+<article id="value" class="graph">
   <h2 id="orders">Over time</h2>
   <p>No history yet.</p>
-</section>
+</article>
 {% endif %}
-<section id="wealth">
+<article id="wealth" class="graph">
   <h2>Over time: wealth</h2>
   {% if let Some(wealth) = view.wealth_history %}
   <div class="chart"><canvas data-chart="wealth-history" data-series="{{ wealth.series }}" role="img" aria-label="{{ wealth.label }}"></canvas></div>
   {% else %}
   <p>No wealth history yet.</p>
   {% endif %}
-</section>
+</article>

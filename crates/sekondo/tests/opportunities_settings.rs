@@ -188,10 +188,10 @@ async fn saving_stores_the_settings_per_account_and_answers_the_tables() {
     let html = res.text().await.unwrap();
     assert!(html.contains(r#"id="classic""#), "the table is answered");
     assert!(!html.contains("<html"), "a fragment");
-    // Out of band: the context text, and the cleared error text.
+    // Out of band: the context text. An accepted form marks no field invalid and says nothing.
     assert!(html.contains(r#"id="filter-context""#), "{html}");
     assert!(
-        html.contains(r#"<span id="filter-error" class="filter-error" role="alert" hx-swap-oob="true"></span>"#),
+        !html.contains("aria-invalid") && !html.contains("<small"),
         "{html}"
     );
     assert_eq!(
@@ -274,14 +274,25 @@ async fn a_capital_of_zero_is_rejected_with_a_message_and_the_stored_settings_st
         html.contains("capital") && html.contains("positive"),
         "{html}"
     );
-    // The answer is the error text of the filter box alone (the form keeps what was typed), and
-    // nothing was stored.
-    assert!(html.contains(r#"id="filter-error""#), "{html}");
-    assert!(html.contains(r#"role="alert""#));
+    // The answer is the filter form alone, with what was typed, the rejected field marked and its
+    // message right below it; the other fields stay clean. Nothing was stored.
+    assert!(html.contains(r#"<form id="opportunity-filters""#), "{html}");
     assert!(
-        !html.contains("<form") && !html.contains(r#"id="classic""#),
+        html.contains(r##"data-invalid-target="#opportunity-filters""##),
         "{html}"
     );
+    assert!(
+        html.contains(r#"id="capital" type="text" inputmode="decimal" name="capital" value="0" aria-invalid="true" aria-describedby="capital-error""#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<small id="capital-error">"#),
+        "{html}"
+    );
+    assert_eq!(html.matches("aria-invalid").count(), 1, "{html}");
+    assert_eq!(html.matches("<small").count(), 1, "{html}");
+    assert!(html.contains(r#"name="min_margin" value="9""#), "{html}");
+    assert!(!html.contains(r#"id="classic""#), "{html}");
     assert_eq!(stored(&app).await, before);
 }
 
@@ -454,7 +465,7 @@ async fn the_answer_keeps_the_selection_and_the_sorting_of_the_view() {
 }
 
 #[tokio::test]
-async fn the_live_content_answer_brings_the_context_and_the_sub_menu_but_leaves_the_error_text() {
+async fn the_live_content_answer_brings_the_context_and_the_sub_menu_but_leaves_the_filter_form() {
     let app = AppBuilder::new().with_stub().spawn().await;
     let browser = signed_in(&app, ALICE).await;
     item(&app, 34, "Tritanium", 10_000_000.0).await;
@@ -467,7 +478,10 @@ async fn the_live_content_answer_brings_the_context_and_the_sub_menu_but_leaves_
         .unwrap();
 
     assert!(html.contains(r#"id="filter-context""#), "{html}");
-    assert!(!html.contains(r#"id="filter-error""#), "{html}");
+    assert!(
+        !html.contains(r#"id="opportunity-filters""#) && !html.contains("aria-invalid"),
+        "{html}"
+    );
     // The sub-menu's links carry every sorting, so the answer brings them out of band, without counts.
     assert!(
         html.contains(r#"<nav class="sub-menu" id="sub-menu""#)

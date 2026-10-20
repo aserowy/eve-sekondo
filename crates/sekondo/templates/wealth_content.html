@@ -1,14 +1,14 @@
 <div class="kpis">
   {% for kpi in view.kpis %}{% include "kpi_card.html" %}{% endfor %}
 </div>
-<section id="wealth-graph" class="history">
+<article id="wealth-graph" class="graph history">
   <h2>Over time</h2>
   {% if let Some(chart) = view.graph.chart %}
   <div class="chart"><canvas data-chart="wealth-stack" data-series="{{ chart.series }}" role="img" aria-label="{{ chart.label }}"></canvas></div>
   {% else %}
   <p>No history yet.</p>
   {% endif %}
-</section>
+</article>
 <section id="wealth-items">
   <h2>Inventory</h2>
   {% if view.items.rows.is_empty() %}

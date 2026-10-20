@@ -16,10 +16,10 @@
   {% endif %}
 </section>
 {% for c in view.charts %}
-<section id="{{ c.kind }}" class="chart-row">
+<article id="{{ c.kind }}" class="graph chart-row">
   <h2>{{ c.title }}</h2>
   <div class="chart"><canvas data-chart="{{ c.kind }}" data-series="{{ c.json }}" role="img" aria-label="{{ c.title }}"></canvas></div>
-</section>
+</article>
 {% endfor %}
 {% if !view.next_occurrences.is_empty() %}
 <section id="next">

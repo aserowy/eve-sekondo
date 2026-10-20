@@ -218,15 +218,24 @@ sync can be switched off with `STATION_SYNC=off`.
 
 Every signed-in page follows the layout guidelines in `openspec/specs/ui-layout/spec.md`, styled with
 Pico CSS (vendored in `crates/sekondo/static/`) and a small stylesheet of our own. A collapsible sidebar
-holds the main menu (icons and text, icons only when collapsed; the state is kept per browser). The text
-stays at Pico's unscaled 16px on every screen. Every page starts with its title, then its tab-style
-sub-menu (if it has siblings or sections; it sticks to the top of the window) and the filter section. A
-table page continues with the KPI cards, **one** table with its pagination (page size 25, 50, 100 or 200,
-in the URL as `page` and `per_page`) and ends with the freshness as a quiet footer: at the bottom of the
-window on a short page, after the content on a long one. Sorting, filters, ranges and pages are server-rendered and swapped in place; a live refresh
-keeps the page, the sorting and the scroll position. The orders are split into `/orders/sell` and
-`/orders/buy` (`/orders` goes to the sell page), the fee cards show each selected character's fees at the
-station it is docked in (Jita 4-4 until its location is known). Read the spec before adding a page.
+holds the main menu (icons and text, icons only when collapsed; the state is kept per browser). Every
+icon starts at one left edge, and so does every text; the collapse toggle sits at the right edge of the
+expanded sidebar and joins the icon column when collapsed. The text stays at Pico's unscaled 16px on
+every screen. Every page starts with its title, then its tab-style sub-menu (if it has siblings or
+sections; it sticks to the top of the window; its entries are packed at the left with a fixed gap) and
+the filter section. The filter section follows Pico's form structure: the character filter is a group
+with a "Characters" legend over side-by-side checkboxes, text and number fields have their label above
+the input in columns of equal width, the time range is a labelled group of joined buttons, and a
+rejected value marks its own input invalid with its message right below it. A table page continues with
+the KPI cards, **one** table (cells padded 0.3rem by 0.75rem, text 0.875rem) and its pagination (page
+size 25, 50, 100 or 200, in the URL as `page` and `per_page`), and ends with the freshness as a quiet
+footer. The pagination is the last block of the main content: on a short page it sits at the bottom of
+the window directly above the footer, on a long page it follows the table. Every graph is a card of its
+own (an `<article class="graph">`) holding its title, the chart and its empty-state text. Sorting,
+filters, ranges and pages are server-rendered and swapped in place; a live refresh keeps the page, the
+sorting and the scroll position. The orders are split into `/orders/sell` and `/orders/buy` (`/orders`
+goes to the sell page), the fee cards show each selected character's fees at the station it is docked
+in (Jita 4-4 until its location is known). Read the spec before adding a page.
 
 ## 4. Run with Compose
 

@@ -187,7 +187,7 @@ test('switching the range updates the URL and the graph but not the cards or the
   };
   expect(Math.round(await span())).toBe(7);
 
-  await page.locator('#wealth-range-control').getByRole('link', { name: '30 days' }).click();
+  await page.locator('#wealth-range-control').getByRole('button', { name: '30 days' }).click();
 
   await expect(page).toHaveURL(/\/wealth\?range=30d$/);
   await expect(page.locator('#wealth-range-control [aria-current="true"]')).toHaveText('30 days');
@@ -231,7 +231,7 @@ test('the range chosen on the graph survives a change of the selection', async (
   await page.getByRole('link', { name: 'Bob Bravo' }).click();
   await page.locator('#main-nav').getByRole('link', { name: 'Wealth' }).click();
 
-  await page.locator('#wealth-range-control').getByRole('link', { name: '90 days' }).click();
+  await page.locator('#wealth-range-control').getByRole('button', { name: '90 days' }).click();
   await expect(page).toHaveURL(/range=90d$/);
   await page.getByRole('checkbox', { name: 'Bob Bravo' }).uncheck();
 
@@ -268,6 +268,37 @@ test('the page reads, top to bottom: filter, cards, graph, items, pagination, fr
   expect(new Set(order).size).toBe(order.length);
   await expect(page.getByRole('button', { name: 'Freshness' })).toHaveCount(0);
   await expect(page.locator('#freshness')).toContainText('Last update');
+});
+
+test('the blocks of the wealth page are separated by one and the same spacing', async ({ page }) => {
+  await aliceWithEverything(page);
+  const opened = page.waitForResponse((r) => r.url().includes('/wealth/content'));
+  await page.goto('/wealth');
+  await opened;
+  await expect(page.locator('#inventory tbody tr')).toHaveCount(1);
+  await chartDrawn(page, STACK);
+  await page.waitForTimeout(300);
+
+  const box = async (selector: string) => (await page.locator(selector).first().boundingBox())!;
+  const cards = await box('.kpis');
+  const graph = await box('#wealth-graph');
+  const items = await box('#wealth-items');
+  const cardsToGraph = graph.y - (cards.y + cards.height);
+  const graphToItems = items.y - (graph.y + graph.height);
+  expect(cardsToGraph).toBeGreaterThan(0);
+  expect(Math.abs(cardsToGraph - graphToItems)).toBeLessThan(1);
+});
+
+test('the over-time graph is a card holding its title and the chart', async ({ page }) => {
+  await aliceWithEverything(page);
+  await page.goto('/wealth');
+  await chartDrawn(page, STACK);
+
+  const card = page.locator('article.graph#wealth-graph');
+  await expect(card).toHaveCount(1);
+  await expect(card.getByRole('heading', { level: 2 })).toHaveText('Over time');
+  await expect(card.locator('canvas[data-chart="wealth-stack"]')).toHaveCount(1);
+  await expect(card.locator('header')).toHaveCount(0);
 });
 
 test('the inventory is paginated after sorting and a page-size change starts on page 1', async ({ page }) => {

@@ -1,12 +1,28 @@
-<form id="opportunity-filters" class="filters" data-view-state data-invalid-target="#filter-error" hx-post="/opportunities/settings" hx-trigger="change" hx-target="#content" hx-sync="#content:replace" hx-swap="innerHTML show:#content:top">
+<form id="opportunity-filters" class="filters" data-view-state data-invalid-target="#opportunity-filters" hx-post="/opportunities/settings" hx-trigger="change" hx-target="#content" hx-sync="#content:replace" hx-swap="innerHTML show:#content:top"{% if oob %} hx-swap-oob="true"{% endif %}>
   <input type="hidden" name="chars" value="{{ view.filters.chars }}">
   <input type="hidden" name="table" value="{{ view.filters.table }}">
   <input type="hidden" name="per_page" value="{{ view.filters.per_page }}">
   {% for (name, value) in view.filters.sorts %}
   <input type="hidden" name="{{ name }}" value="{{ value }}">
   {% endfor %}
-  <label>Minimum margin (%) <input type="text" inputmode="decimal" name="min_margin" value="{{ view.filters.form.min_margin }}"></label>
-  <label>Minimum ISK/day <input type="text" inputmode="decimal" name="min_isk_per_day" value="{{ view.filters.form.min_isk_per_day }}"></label>
-  <label>Item name <input type="search" name="search" value="{{ view.filters.form.search }}" maxlength="100"></label>
-  <label>Capital per item (ISK) <input type="text" inputmode="decimal" name="capital" value="{{ view.filters.form.capital }}"></label>
+  <div>
+    <label for="min_margin">Minimum margin (%)</label>
+    <input id="min_margin" type="text" inputmode="decimal" name="min_margin" value="{{ view.filters.form.min_margin }}"{% if view.filters.error_for("min_margin").is_some() %} aria-invalid="true" aria-describedby="min_margin-error"{% endif %}>
+    {% if let Some(message) = view.filters.error_for("min_margin") %}<small id="min_margin-error">{{ message }}</small>{% endif %}
+  </div>
+  <div>
+    <label for="min_isk_per_day">Minimum ISK/day</label>
+    <input id="min_isk_per_day" type="text" inputmode="decimal" name="min_isk_per_day" value="{{ view.filters.form.min_isk_per_day }}"{% if view.filters.error_for("min_isk_per_day").is_some() %} aria-invalid="true" aria-describedby="min_isk_per_day-error"{% endif %}>
+    {% if let Some(message) = view.filters.error_for("min_isk_per_day") %}<small id="min_isk_per_day-error">{{ message }}</small>{% endif %}
+  </div>
+  <div>
+    <label for="search">Item name</label>
+    <input id="search" type="search" name="search" value="{{ view.filters.form.search }}" maxlength="100"{% if view.filters.error_for("search").is_some() %} aria-invalid="true" aria-describedby="search-error"{% endif %}>
+    {% if let Some(message) = view.filters.error_for("search") %}<small id="search-error">{{ message }}</small>{% endif %}
+  </div>
+  <div>
+    <label for="capital">Capital per item (ISK)</label>
+    <input id="capital" type="text" inputmode="decimal" name="capital" value="{{ view.filters.form.capital }}"{% if view.filters.error_for("capital").is_some() %} aria-invalid="true" aria-describedby="capital-error"{% endif %}>
+    {% if let Some(message) = view.filters.error_for("capital") %}<small id="capital-error">{{ message }}</small>{% endif %}
+  </div>
 </form>

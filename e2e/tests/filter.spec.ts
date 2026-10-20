@@ -96,3 +96,23 @@ test('the sorting is kept when the selection changes', async ({ page }) => {
   await expect(page.locator('#character-filter input[name="sort"]')).toHaveValue('price');
   await expect(page.locator('#character-filter input[name="dir"]')).toHaveValue('desc');
 });
+
+test('the character filter is a group with a visible "Characters" legend over side-by-side checkboxes', async ({ page }) => {
+  await threeCharacters(page);
+  await page.goto('/orders/sell');
+
+  const group = page.locator('#filter-box').getByRole('group', { name: 'Characters' });
+  await expect(group).toHaveCount(1);
+  await expect(group.locator('legend')).toBeVisible();
+  await expect(group.locator('legend')).toHaveText('Characters');
+  const boxes = group.getByRole('checkbox');
+  await expect(boxes).toHaveCount(3);
+  for (const name of ['Alice Alpha', 'Bob Bravo', 'Carol Charlie']) await expect(group.getByRole('checkbox', { name })).toHaveCount(1);
+
+  const rects = await boxes.evaluateAll((els) => els.map((e) => e.getBoundingClientRect().toJSON()));
+  for (const r of rects) expect(Math.abs(r.y - rects[0].y)).toBeLessThanOrEqual(2);
+  expect(rects[0].x).toBeLessThan(rects[1].x);
+  expect(rects[1].x).toBeLessThan(rects[2].x);
+  const legend = (await group.locator('legend').boundingBox())!;
+  expect(legend.y + legend.height).toBeLessThanOrEqual(rects[0].y + 2);
+});

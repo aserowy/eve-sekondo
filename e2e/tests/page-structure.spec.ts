@@ -39,22 +39,6 @@ test('section titles are smaller than the page title', async ({ page }) => {
   expect(section).toBeLessThan(title);
 });
 
-test('the blocks of a page are separated by one and the same spacing', async ({ page }) => {
-  await loginWith(page, 'Alice Alpha');
-  await stubControl('orders', { character_id: 90000001, orders: Array.from({ length: 60 }, (_, i) => stubOrder(i + 1)) });
-  await pollCharacter(page, 90000001);
-  await page.goto('/orders/sell');
-  await expect(page.locator('nav.pagination')).toBeVisible();
-
-  const cards = (await page.locator('.kpis').boundingBox())!;
-  const table = (await page.locator('#sell-orders').boundingBox())!;
-  const pager = (await page.locator('nav.pagination').boundingBox())!;
-  const cardsToTable = table.y - (cards.y + cards.height);
-  const tableToPager = pager.y - (table.y + table.height);
-  expect(cardsToTable).toBeGreaterThan(0);
-  expect(Math.abs(cardsToTable - tableToPager)).toBeLessThan(1);
-});
-
 test('KPI cards fit their content: one width, wider than high, no header band', async ({ page }) => {
   await page.setViewportSize({ width: 1920, height: 1080 });
   await loginWith(page, 'Alice Alpha');
@@ -71,4 +55,68 @@ test('KPI cards fit their content: one width, wider than high, no header band', 
     expect(box.width).toBeGreaterThan(box.height);
     expect(Math.abs(box.width - boxes[0].width)).toBeLessThanOrEqual(1);
   }
+});
+
+/** Opens the sell orders page and waits for the stream's first refresh, so nothing is swapped while measuring. */
+async function openSell(page: import('@playwright/test').Page, query = '') {
+  const refreshed = page.waitForResponse((r) => r.url().includes('/orders/sell/content'));
+  await page.goto(`/orders/sell${query}`);
+  await refreshed;
+  await page.waitForTimeout(300);
+}
+
+async function sellOrders(page: import('@playwright/test').Page, count: number) {
+  await stubControl('orders', { character_id: 90000001, orders: Array.from({ length: count }, (_, i) => stubOrder(i + 1)) });
+  expect(await pollCharacter(page, 90000001)).toBe('200 updated');
+}
+
+test('the pagination of a short page sits directly above the footer, inside main', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await loginWith(page, 'Alice Alpha');
+  await sellOrders(page, 2);
+  await openSell(page);
+  await expect(page.locator('nav.pagination')).toBeVisible();
+  await expect(page.locator('footer.page-footer')).toBeVisible();
+
+  const pager = (await page.locator('nav.pagination').boundingBox())!;
+  const table = (await page.locator('#sell-orders').boundingBox())!;
+  const footer = (await page.locator('footer.page-footer').boundingBox())!;
+  expect(footer.y + footer.height).toBeCloseTo(1080, 0);
+  expect(footer.y - (pager.y + pager.height)).toBeLessThan(40);
+  expect(pager.y - (table.y + table.height)).toBeGreaterThan(200);
+  await expect(page.locator('main nav.pagination')).toHaveCount(1);
+});
+
+test('the pagination of a long page follows the table and scrolls in', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await loginWith(page, 'Alice Alpha');
+  await sellOrders(page, 200);
+  await openSell(page, '?per_page=200');
+  await expect(page.locator('nav.pagination')).toHaveCount(1);
+  await expect(page.locator('nav.pagination')).not.toBeInViewport();
+  await expect(page.locator('footer.page-footer')).toHaveCount(1);
+
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await expect(page.locator('nav.pagination')).toBeInViewport();
+  const pager = (await page.locator('nav.pagination').boundingBox())!;
+  const table = (await page.locator('#sell-orders').boundingBox())!;
+  const footer = (await page.locator('footer.page-footer').boundingBox())!;
+  expect(pager.y - (table.y + table.height)).toBeLessThan(40);
+  expect(footer.y).toBeGreaterThanOrEqual(pager.y + pager.height);
+});
+
+test('the pagination keeps its place after a page change', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await loginWith(page, 'Alice Alpha');
+  await sellOrders(page, 60);
+  await openSell(page);
+  await page.getByRole('link', { name: 'Next' }).click();
+  await expect(page).toHaveURL(/page=2/);
+  await expect(page.locator('#sell-orders tbody.order')).toHaveCount(10);
+  await expect(page.locator('footer.page-footer')).toBeVisible();
+
+  const pager = (await page.locator('nav.pagination').boundingBox())!;
+  const footer = (await page.locator('footer.page-footer').boundingBox())!;
+  expect(footer.y - (pager.y + pager.height)).toBeLessThan(40);
+  expect(footer.y + footer.height).toBeCloseTo(1080, 0);
 });

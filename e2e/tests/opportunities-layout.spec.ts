@@ -45,7 +45,7 @@ test('the page is titled by its one table, and its filter section holds the filt
   for (const label of ['Minimum margin (%)', 'Minimum ISK/day', 'Item name', 'Capital per item (ISK)']) {
     await expect(box.getByLabel(label)).toBeVisible();
   }
-  await expect(box.locator('#filter-error')).toBeEmpty();
+  await expect(box.locator('[aria-invalid="true"]')).toHaveCount(0);
   await expect(box.locator('#filter-context')).toContainText('Jita IV - Moon 4 - Caldari Navy Assembly Plant');
   await expect(box.locator('#filter-context')).toContainText('Fees of Alice Alpha');
   await expect(page.getByRole('button', { name: 'Apply' })).toHaveCount(0);
@@ -107,14 +107,17 @@ test('a rejected filter value is reported inside the filter section and leaves t
 
   await setFilter(page, 'Capital per item (ISK)', '0');
 
-  const error = filterBox(page).locator('#filter-error');
+  const capital = page.locator('#opportunity-filters').getByLabel('Capital per item (ISK)');
+  await expect(capital).toHaveAttribute('aria-invalid', 'true');
+  const error = filterBox(page).locator('small');
   await expect(error).toContainText('capital');
   await expect(error).toContainText('positive');
-  await expect(page.locator('#opportunity-filters').getByLabel('Capital per item (ISK)')).toHaveValue('0');
+  await expect(capital).toHaveValue('0');
   await expect(page.locator('#classic tbody tr')).toHaveCount(1);
 
   await setFilter(page, 'Capital per item (ISK)', '50000000');
-  await expect(error).toBeEmpty();
+  await expect(filterBox(page).locator('small')).toHaveCount(0);
+  await expect(capital).not.toHaveAttribute('aria-invalid', 'true');
   await expect(page.locator('#classic tbody tr')).toHaveCount(1);
 });
 
@@ -176,4 +179,30 @@ test('the filter section wraps in a narrow window and the page does not scroll s
   expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
   const box = (await filterBox(page).boundingBox())!;
   expect(box.width).toBeLessThanOrEqual(1024);
+});
+
+test('each opportunity filter has its label above its input, and the four inputs are equally wide', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await openOpportunities(page, 'trend');
+
+  const labels = ['Minimum margin (%)', 'Minimum ISK/day', 'Item name', 'Capital per item (ISK)'];
+  const fields = [];
+  for (const label of labels) {
+    const input = page.locator('#opportunity-filters').getByLabel(label);
+    await expect(input, label).toBeVisible();
+    fields.push(
+      await input.evaluate((el) => {
+        const label = document.querySelector(`label[for="${el.id}"]`)!;
+        const range = document.createRange();
+        range.selectNodeContents(label);
+        return { text: range.getBoundingClientRect().toJSON(), input: el.getBoundingClientRect().toJSON() };
+      }),
+    );
+  }
+  for (const [i, f] of fields.entries()) {
+    expect(f.text.bottom, `${labels[i]} above its input`).toBeLessThanOrEqual(f.input.top + 1);
+    expect(Math.abs(f.input.width - fields[0].input.width), `${labels[i]} width`).toBeLessThanOrEqual(1);
+  }
+  // Side by side on one row at this width.
+  for (const f of fields) expect(Math.abs(f.input.top - fields[0].input.top)).toBeLessThanOrEqual(1);
 });

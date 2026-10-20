@@ -279,8 +279,9 @@ test('a capital of zero is rejected with a message and the tables stay as they w
   await filters(page).getByLabel('Capital per item (ISK)').fill('0');
   await filters(page).getByLabel('Item name').press('Tab');
 
-  await expect(page.getByRole('alert')).toContainText('capital');
-  await expect(page.getByRole('alert')).toContainText('positive');
+  await expect(filters(page).getByLabel('Capital per item (ISK)')).toHaveAttribute('aria-invalid', 'true');
+  await expect(filters(page).locator('small')).toContainText('capital');
+  await expect(filters(page).locator('small')).toContainText('positive');
   await expect(filters(page).getByLabel('Capital per item (ISK)')).toHaveValue('0');
   await expect(page.locator('#classic tbody tr')).toHaveCount(1);
   // Nothing was stored: a reload shows the default again.
@@ -540,4 +541,72 @@ test('the expansion page draws the spread by hour and weekday, the peaks with S 
   await expect(page.locator('#next li')).toHaveCount(3);
   await expect(page.locator('#next li').first()).toContainText('18:00');
   await expect(page.locator('#section-nav').getByRole('link', { name: 'Next occurrences' })).toHaveAttribute('href', '#next');
+});
+
+test('a rejected value marks its own input invalid with the message right below it, and a good value clears it', async ({ page }) => {
+  await aliceTrained(page);
+  await page.goto('/opportunities/trend');
+  const form = page.locator('#opportunity-filters');
+  const margin = form.getByLabel('Minimum margin (%)');
+
+  await margin.fill('-1');
+  await margin.press('Tab');
+
+  await expect(margin).toHaveAttribute('aria-invalid', 'true');
+  await expect(form).not.toHaveClass(/htmx-(added|settling)/); // htmx wires a swapped-in form when it settles
+  const message = form.locator('small');
+  await expect(message).toHaveCount(1);
+  await expect(message).toContainText('minimum margin');
+  await expect(margin).toHaveAttribute('aria-describedby', (await message.getAttribute('id'))!);
+  const input = (await margin.boundingBox())!;
+  const text = (await message.boundingBox())!;
+  expect(text.y).toBeGreaterThanOrEqual(input.y + input.height - 1);
+  expect(Math.abs(text.x - input.x)).toBeLessThanOrEqual(2);
+  for (const other of ['Minimum ISK/day', 'Item name', 'Capital per item (ISK)']) {
+    await expect(form.getByLabel(other), other).not.toHaveAttribute('aria-invalid', 'true');
+  }
+  await expect(margin).toHaveValue('-1');
+
+  await margin.fill('5');
+  await margin.press('Tab');
+
+  await expect(form.locator('[aria-invalid="true"]')).toHaveCount(0);
+  await expect(form.locator('small')).toHaveCount(0);
+  await expect(margin).toHaveValue('5');
+});
+
+test('text typed into another field while a save is in flight is kept', async ({ page }) => {
+  await aliceTrained(page);
+  // The stream's first refresh would abort a save in flight (hx-sync); let it come first.
+  const opened = page.waitForResponse((r) => r.url().includes('/opportunities/trend/content'));
+  await page.goto('/opportunities/trend');
+  await opened;
+  await page.waitForTimeout(600);
+  const form = page.locator('#opportunity-filters');
+  const margin = form.getByLabel('Minimum margin (%)');
+  const search = form.getByLabel('Item name');
+
+  // First a rejected value, so the clean state has something to clear.
+  await margin.fill('-1');
+  await margin.press('Tab');
+  await expect(margin).toHaveAttribute('aria-invalid', 'true');
+  await expect(form).not.toHaveClass(/htmx-(added|settling)/); // htmx wires a swapped-in form when it settles
+
+  // Hold the next save back while the user types into another field.
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  await page.route('**/opportunities/settings', async (route) => {
+    await held;
+    await route.continue();
+  });
+  const saved = page.waitForResponse((r) => r.url().includes('/opportunities/settings'));
+  await margin.fill('5');
+  await margin.press('Tab');
+  await search.fill('pyer');
+  release();
+  await saved;
+
+  await expect(form.locator('[aria-invalid="true"]')).toHaveCount(0);
+  await expect(form.locator('small')).toHaveCount(0);
+  await expect(search).toHaveValue('pyer');
 });

@@ -21,13 +21,14 @@ const barsBottom = async (page: Page) => {
   return bars.y + bars.height;
 };
 
-/** The panel's title is fully visible, right below the bars. */
+/** The panel's title is fully visible, right below the bars (a card's own top padding counts as part of the gap). */
 async function expectTitleBelowBars(page: Page, panel: string) {
   await expect(async () => {
+    const padding = await page.locator(panel).evaluate((el) => parseFloat(getComputedStyle(el).paddingTop));
     const title = (await page.locator(`${panel} h2`).boundingBox())!;
     const bottom = await barsBottom(page);
     expect(title.y).toBeGreaterThanOrEqual(bottom - 1);
-    expect(title.y).toBeLessThanOrEqual(bottom + 12);
+    expect(title.y).toBeLessThanOrEqual(bottom + 12 + padding);
   }).toPass();
 }
 
@@ -62,6 +63,7 @@ test('activating a sub-menu link scrolls the row below the bars and sets the fra
 
   await page.locator('#section-nav').getByRole('link', { name: 'Wealth' }).click();
   await expect(page).toHaveURL(/\/dashboard#wealth$/);
+  await expect(page.locator('article.graph#wealth')).toHaveCount(1);
   await expect(async () => {
     const title = (await page.locator('#wealth h2').boundingBox())!;
     expect(title.y).toBeGreaterThanOrEqual((await barsBottom(page)) - 1);
@@ -190,4 +192,30 @@ test('only the sub-menu stays at the top: the page title scrolls out of view', a
 
   expect(Math.abs((await page.locator('nav.sub-menu').boundingBox())!.y)).toBeLessThan(1);
   await expect(page.getByRole('heading', { level: 1 })).not.toBeInViewport();
+});
+
+test('the entries are packed at the left with one fixed gap, never spread over the bar', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await loginWith(page, 'Alice Alpha');
+
+  const entries = (selector: string) =>
+    page.locator(`${selector} a`).evaluateAll((links) => links.map((a) => a.getBoundingClientRect().toJSON()));
+  const gaps = (boxes: { x: number; right: number }[]) => boxes.slice(1).map((b, i) => b.x - boxes[i].right);
+
+  await page.goto('/dashboard');
+  const dashboard = await entries('#section-nav');
+  const dashboardGap = gaps(dashboard)[0];
+
+  await page.goto('/orders/sell');
+  const bar = (await page.locator('nav.sub-menu').boundingBox())!;
+  const orders = await entries('nav.sub-menu');
+  expect(orders).toHaveLength(2);
+  expect(orders[0].x).toBeCloseTo(bar.x, 0);
+  expect(gaps(orders)[0]).toBeCloseTo(dashboardGap, 0);
+  expect(orders[1].right).toBeLessThan(bar.x + bar.width / 2);
+
+  await page.goto('/opportunities/trend');
+  const tables = await entries('nav.sub-menu');
+  expect(tables).toHaveLength(4);
+  for (const g of gaps(tables)) expect(g).toBeCloseTo(dashboardGap, 0);
 });

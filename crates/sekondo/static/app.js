@@ -208,6 +208,18 @@ document.addEventListener('htmx:beforeSwap', (event) => {
   event.detail.swapOverride = 'outerHTML';
 });
 
+// A saved filter form is an accepted one: no field of it stays marked invalid and no message stays.
+// The inputs themselves are left alone, so text typed while the save was in flight survives.
+document.addEventListener('htmx:afterRequest', (event) => {
+  const { elt, successful } = event.detail;
+  if (!successful || !(elt instanceof HTMLElement) || !elt.dataset.invalidTarget) return;
+  for (const input of elt.querySelectorAll('[aria-invalid]')) {
+    input.removeAttribute('aria-invalid');
+    input.removeAttribute('aria-describedby');
+  }
+  for (const message of elt.querySelectorAll('small')) message.remove();
+});
+
 // ---- scroll positions ----
 // A live refresh (a stream signal or a reconnect) must not move what the user is reading: the
 // window's scroll position and the sideways scroll of every `.table-wrap` are recorded per request

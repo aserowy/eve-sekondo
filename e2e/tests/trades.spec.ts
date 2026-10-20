@@ -96,7 +96,7 @@ test('the default range lists seven days and the range control switches to 30 da
   await expect(page.locator('#trades-range-control a[aria-current="true"]')).toHaveText('7 days');
   await expect(page.locator('#trades tbody tr')).toHaveCount(1);
 
-  await page.locator('#trades-range-control').getByRole('link', { name: '30 days' }).click();
+  await page.locator('#trades-range-control').getByRole('button', { name: '30 days' }).click();
 
   await expect(page).toHaveURL(new RegExp(`/trades\\?chars=${ALICE}&range=30d$`));
   await expect(page.locator('#trades tbody tr')).toHaveCount(3);
@@ -178,7 +178,7 @@ test('the table is paginated newest first, the cards cover every page, and a ran
   expect(await transactionIds(page)).toEqual(Array.from({ length: 20 }, (_, i) => 20 - i));
   await expect(page.locator('#kpi-sold .value')).toHaveAttribute('title', '12,000.00 ISK');
 
-  await page.locator('#trades-range-control').getByRole('link', { name: '30 days' }).click();
+  await page.locator('#trades-range-control').getByRole('button', { name: '30 days' }).click();
   await expect(page).toHaveURL(/\/trades\?range=30d$/);
   await expect(page.locator('.pagination')).toContainText('Page 1 of 3');
   await expect(page.locator('#trades-range-control a[aria-current="true"]')).toHaveText('30 days');
@@ -197,4 +197,29 @@ test('a filter change goes back to page 1 and the freshness is at the end, unfol
   await page.getByRole('combobox', { name: 'Rows per page' }).selectOption('25');
   await expect(page).toHaveURL(/per_page=25$/);
   await expect(page.locator('.pagination')).toContainText('Page 1 of 5');
+});
+
+test('the time range is a group of joined buttons under a visible "Range" label', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  await page.goto('/trades?range=30d');
+
+  const control = page.locator('#filter-box #trades-range-control');
+  await expect(control.getByText('Range', { exact: true })).toBeVisible();
+  const group = control.getByRole('group', { name: 'Range' });
+  await expect(group).toHaveCount(1);
+  const buttons = group.getByRole('button');
+  await expect(buttons).toHaveText(['24 hours', '7 days', '30 days', '90 days']);
+  for (const button of await buttons.all()) await expect(button).toHaveJSProperty('tagName', 'A');
+
+  // Only the 30-day button is current, and it is the highlighted one: the others are the secondary outline style.
+  await expect(group.locator('[aria-current="true"]')).toHaveText('30 days');
+  const classes = await buttons.evaluateAll((els) => els.map((el) => [el.textContent, el.classList.contains('secondary') && el.classList.contains('outline')]));
+  expect(classes).toEqual([['24 hours', true], ['7 days', true], ['30 days', false], ['90 days', true]]);
+
+  // Joined: the buttons touch each other.
+  const rects = await buttons.evaluateAll((els) => els.map((el) => el.getBoundingClientRect().toJSON()));
+  for (let i = 1; i < rects.length; i++) expect(Math.abs(rects[i].x - (rects[i - 1].x + rects[i - 1].width))).toBeLessThanOrEqual(2);
+  // The label is above the group.
+  const label = (await control.getByText('Range', { exact: true }).boundingBox())!;
+  expect(label.y + label.height).toBeLessThanOrEqual(rects[0].y + 1);
 });

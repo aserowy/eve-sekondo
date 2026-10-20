@@ -1,5 +1,8 @@
-<div id="wealth-range-control" class="range-control" role="group" aria-label="Time range"{% if oob %} hx-swap-oob="true"{% endif %}>
+<div id="wealth-range-control" class="range-control"{% if oob %} hx-swap-oob="true"{% endif %}>
+  <span id="wealth-range-control-label">Range</span>
+  <div role="group" aria-labelledby="wealth-range-control-label">
   {% for r in view.ranges %}
-  <a href="{{ r.href }}" hx-get="{{ r.content_url }}" hx-target="#content" hx-swap="innerHTML show:#content:top" hx-sync="#content:replace" hx-push-url="{{ r.href }}"{% if r.current %} aria-current="true"{% endif %}>{{ r.label }}</a>
+  <a href="{{ r.href }}" hx-get="{{ r.content_url }}" hx-target="#content" hx-swap="innerHTML show:#content:top" hx-sync="#content:replace" hx-push-url="{{ r.href }}" role="button"{% if r.current %} aria-current="true"{% else %} class="secondary outline"{% endif %}>{{ r.label }}</a>
   {% endfor %}
+  </div>
 </div>

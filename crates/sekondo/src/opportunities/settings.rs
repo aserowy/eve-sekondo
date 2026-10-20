@@ -66,21 +66,38 @@ impl Form {
         form
     }
 
-    /// The settings the form asks for, or the message that says what is wrong with it.
-    pub fn validate(&self) -> Result<Settings, String> {
+    /// The settings the form asks for, or the first rejected field with the message that says what
+    /// is wrong with it.
+    pub fn validate(&self) -> Result<Settings, FieldError> {
         let margin = number(&self.min_margin)
             .filter(|m| *m >= 0.0)
-            .ok_or("The minimum margin must be a number of at least 0 percent")?;
+            .ok_or_else(|| {
+                FieldError::new(
+                    Field::MinMargin,
+                    "The minimum margin must be a number of at least 0 percent",
+                )
+            })?;
         let min_isk = number(&self.min_isk_per_day)
             .filter(|v| *v >= 0.0)
-            .ok_or("The minimum ISK/day must be a number of at least 0")?;
+            .ok_or_else(|| {
+                FieldError::new(
+                    Field::MinIskPerDay,
+                    "The minimum ISK/day must be a number of at least 0",
+                )
+            })?;
         let capital = number(&self.capital)
             .filter(|v| *v > 0.0)
-            .ok_or("The capital per item must be a positive number of ISK")?;
+            .ok_or_else(|| {
+                FieldError::new(
+                    Field::Capital,
+                    "The capital per item must be a positive number of ISK",
+                )
+            })?;
         let search = self.search.trim();
         if search.chars().count() > SEARCH_MAX {
-            return Err(format!(
-                "The item name search can have at most {SEARCH_MAX} characters"
+            return Err(FieldError::new(
+                Field::Search,
+                format!("The item name search can have at most {SEARCH_MAX} characters"),
             ));
         }
         Ok(Settings {
@@ -89,6 +106,43 @@ impl Form {
             search: search.to_owned(),
             capital,
         })
+    }
+}
+
+/// One of the four filter inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Field {
+    MinMargin,
+    MinIskPerDay,
+    Search,
+    Capital,
+}
+
+impl Field {
+    /// The name of the field's input in the form.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::MinMargin => "min_margin",
+            Self::MinIskPerDay => "min_isk_per_day",
+            Self::Search => "search",
+            Self::Capital => "capital",
+        }
+    }
+}
+
+/// A value the form is rejected for: the field that holds it and what is wrong with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldError {
+    pub field: Field,
+    pub message: String,
+}
+
+impl FieldError {
+    fn new(field: Field, message: impl Into<String>) -> Self {
+        Self {
+            field,
+            message: message.into(),
+        }
     }
 }
 
@@ -182,39 +236,55 @@ mod tests {
     fn zero_is_fine_for_the_margin_and_the_isk_per_day_but_not_for_the_capital() {
         assert!(form("0", "0", "", "1").validate().is_ok());
         let err = form("5", "5000000", "", "0").validate().unwrap_err();
-        assert!(err.contains("capital") && err.contains("positive"), "{err}");
+        assert_eq!(err.field, Field::Capital);
+        assert!(
+            err.message.contains("capital") && err.message.contains("positive"),
+            "{err:?}"
+        );
     }
 
     #[test]
-    fn negative_missing_and_non_numeric_values_are_rejected_with_a_message_naming_the_field() {
+    fn each_rejected_value_names_its_own_field_and_says_what_is_wrong() {
         let cases = [
-            (form("-1", "1", "", "1"), "margin"),
-            (form("abc", "1", "", "1"), "margin"),
-            (form("", "1", "", "1"), "margin"),
-            (form("5", "-1", "", "1"), "ISK/day"),
-            (form("5", "1e6", "", "1"), "ISK/day"),
-            (form("5", "1", "", "-5"), "capital"),
-            (form("5", "1", "", "NaN"), "capital"),
-            (form("5", "1", "", "inf"), "capital"),
-            (form("5", "1", "", "1.2.3"), "capital"),
-            (form("5", "1", "", "99999999999999999999"), "capital"),
-            (form("5", "1", "", ""), "capital"),
+            (form("-1", "1", "", "1"), Field::MinMargin, "margin"),
+            (form("abc", "1", "", "1"), Field::MinMargin, "margin"),
+            (form("", "1", "", "1"), Field::MinMargin, "margin"),
+            (form("5", "-1", "", "1"), Field::MinIskPerDay, "ISK/day"),
+            (form("5", "1e6", "", "1"), Field::MinIskPerDay, "ISK/day"),
+            (form("5", "1", "", "-5"), Field::Capital, "capital"),
+            (form("5", "1", "", "NaN"), Field::Capital, "capital"),
+            (form("5", "1", "", "inf"), Field::Capital, "capital"),
+            (form("5", "1", "", "1.2.3"), Field::Capital, "capital"),
+            (form("5", "1", "", "99999999999999999999"), Field::Capital, "capital"),
+            (form("5", "1", "", ""), Field::Capital, "capital"),
         ];
-        for (input, field) in cases {
+        for (input, field, word) in cases {
             let err = input.validate().unwrap_err();
-            assert!(err.contains(field), "{input:?}: {err}");
+            assert_eq!(err.field, field, "{input:?}: {err:?}");
+            assert!(err.message.contains(word), "{input:?}: {err:?}");
         }
+    }
+
+    #[test]
+    fn the_fields_are_named_as_their_inputs() {
+        assert_eq!(Field::MinMargin.name(), "min_margin");
+        assert_eq!(Field::MinIskPerDay.name(), "min_isk_per_day");
+        assert_eq!(Field::Search.name(), "search");
+        assert_eq!(Field::Capital.name(), "capital");
+    }
+
+    #[test]
+    fn the_first_rejected_field_is_the_one_reported() {
+        let err = form("-1", "-1", "", "-1").validate().unwrap_err();
+        assert_eq!(err.field, Field::MinMargin);
     }
 
     #[test]
     fn an_overlong_search_is_rejected() {
         let long = "x".repeat(SEARCH_MAX + 1);
-        assert!(
-            form("5", "1", &long, "1")
-                .validate()
-                .unwrap_err()
-                .contains("search")
-        );
+        let err = form("5", "1", &long, "1").validate().unwrap_err();
+        assert_eq!(err.field, Field::Search);
+        assert!(err.message.contains("search"), "{err:?}");
         let fits = "x".repeat(SEARCH_MAX);
         assert!(form("5", "1", &fits, "1").validate().is_ok());
     }

@@ -149,25 +149,25 @@ test('switching the range keeps the selection, updates the URL and the graphs, a
   await pollCharacter(page, 90000001);
   await page.goto('/dashboard?chars=90000001');
   const control = page.locator('#range-control');
-  await expect(control.getByRole('link', { name: '7 days' })).toHaveAttribute('aria-current', 'true');
+  await expect(control.getByRole('button', { name: '7 days' })).toHaveAttribute('aria-current', 'true');
   const weekPoints = (await chartData(page, 'value-history'))[0].length;
   expect(weekPoints).toBeGreaterThanOrEqual(84);
 
   await page.evaluate(() => ((window as unknown as { marker: string }).marker = 'same page'));
-  await control.getByRole('link', { name: '30 days' }).click();
+  await control.getByRole('button', { name: '30 days' }).click();
 
   await expect(page).toHaveURL(/\/dashboard\?chars=90000001&range=30d$/);
-  await expect(control.getByRole('link', { name: '30 days' })).toHaveAttribute('aria-current', 'true');
-  await expect(control.getByRole('link', { name: '7 days' })).not.toHaveAttribute('aria-current', 'true');
+  await expect(control.getByRole('button', { name: '30 days' })).toHaveAttribute('aria-current', 'true');
+  await expect(control.getByRole('button', { name: '7 days' })).not.toHaveAttribute('aria-current', 'true');
   await expect.poll(async () => (await chartData(page, 'value-history'))[0].length).toBeGreaterThanOrEqual(120);
   expect(await page.evaluate(() => (window as unknown as { marker: string }).marker)).toBe('same page');
   // The selection stayed: only Alice's row is there.
   await expect(page.locator('#breakdown tbody tr')).toHaveCount(1);
 
   // Back to the default range drops the parameter.
-  await control.getByRole('link', { name: '7 days' }).click();
+  await control.getByRole('button', { name: '7 days' }).click();
   await expect(page).toHaveURL(/\/dashboard\?chars=90000001$/);
-  await control.getByRole('link', { name: '24 hours' }).click();
+  await control.getByRole('button', { name: '24 hours' }).click();
   await expect(page).toHaveURL(/range=24h$/);
   await expect.poll(async () => (await chartData(page, 'value-history'))[0].length).toBeLessThanOrEqual(49);
 });
@@ -188,7 +188,7 @@ test('narrowing the selection keeps the range, and the selection travels to the 
   await expect(page).toHaveURL(/\/dashboard\?chars=90000001&range=30d$/);
   await expect(page.locator('#tile-sell-value .value')).toHaveText('10m');
   await expect(page.locator('#breakdown tbody tr')).toHaveCount(1);
-  await expect(page.locator('#range-control').getByRole('link', { name: '30 days' })).toHaveAttribute('aria-current', 'true');
+  await expect(page.locator('#range-control').getByRole('button', { name: '30 days' })).toHaveAttribute('aria-current', 'true');
   expect(await chartData(page, 'split')).toEqual([[1_000_000_000], [0]]);
   expect(await page.evaluate(() => (window as unknown as { marker: string }).marker)).toBe('same page');
 
@@ -212,7 +212,7 @@ test('opening the dashboard, switching the range and narrowing the selection rai
   await page.goto('/dashboard');
   await expect(page.locator('canvas[data-chart]')).toHaveCount(5);
 
-  await page.locator('#range-control').getByRole('link', { name: '90 days' }).click();
+  await page.locator('#range-control').getByRole('button', { name: '90 days' }).click();
   await expect(page).toHaveURL(/range=90d$/);
   await page.getByRole('checkbox', { name: 'Bob Bravo' }).uncheck();
   await expect(page).toHaveURL(/chars=90000001&range=90d$/);
@@ -267,7 +267,7 @@ test('a live refresh keeps the selection and the range, and leaks no chart', asy
   await expect(page).toHaveURL(/\/dashboard\?chars=90000001&range=24h$/);
   await expect(page.locator('#breakdown tbody tr')).toHaveCount(1);
   await expect(page.locator('#character-90000002')).toHaveCount(0);
-  await expect(page.locator('#range-control').getByRole('link', { name: '24 hours' })).toHaveAttribute('aria-current', 'true');
+  await expect(page.locator('#range-control').getByRole('button', { name: '24 hours' })).toHaveAttribute('aria-current', 'true');
   expect((await chartData(page, 'value-history'))[0].length).toBeLessThanOrEqual(49);
   // After three refreshes there are exactly the five charts of the page, not fifteen more.
   expect(await instanceCount(page)).toBe(5);
@@ -305,7 +305,7 @@ test('one range click updates the value, count and wealth graphs', async ({ page
   const points = async (kind: string) => (await chartData(page, kind))[0].length;
   expect(await points('wealth-history')).toBeGreaterThanOrEqual(84);
 
-  await page.locator('#range-control').getByRole('link', { name: '30 days' }).click();
+  await page.locator('#range-control').getByRole('button', { name: '30 days' }).click();
 
   await expect(page).toHaveURL(/range=30d$/);
   for (const kind of ['value-history', 'count-history', 'wealth-history']) {
@@ -446,4 +446,50 @@ test('thirty characters are all listed in the breakdown without pagination or in
   const wrap = page.locator('#characters .table-wrap');
   const sizes = await wrap.evaluate((el) => ({ scroll: el.scrollHeight, client: el.clientHeight }));
   expect(sizes.scroll).toBeLessThanOrEqual(sizes.client + 1);
+});
+
+test('every dashboard graph is inside a card of its own, together with its title', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await twoCharacters(page);
+  await stubControl('orders', { character_id: 90000001, orders: [stubOrder(1, { price: 1_000_000 }), stubOrder(2, { buy: true, escrow: 2_000_000 })] });
+  await pollCharacter(page, 90000001);
+  await wealthPoll(page, 90000001, 'wallet');
+  const opened = page.waitForResponse((r) => r.url().includes('/dashboard/summary'));
+  await page.goto('/dashboard');
+  await opened;
+  await expect(page.locator('canvas[data-chart]')).toHaveCount(6);
+
+  const titles: Record<string, string> = {
+    split: 'Per character',
+    'top-sell': 'Top items by sell value',
+    'top-buy': 'Top items by buy escrow',
+    'value-history': 'Over time: value',
+    'count-history': 'Over time: orders',
+    'wealth-history': 'Over time: wealth',
+  };
+  for (const [kind, title] of Object.entries(titles)) {
+    const card = page.locator('article.graph').filter({ has: page.locator(`canvas[data-chart="${kind}"]`) });
+    await expect(card, kind).toHaveCount(1);
+    await expect(card.getByRole('heading', { level: 2 }), kind).toHaveText(title);
+    await expect(card.locator('header'), kind).toHaveCount(0);
+  }
+  await expect(page.locator('article.graph')).toHaveCount(6);
+
+  // The split and both top-item cards share a row and are equally high.
+  const cards = await page.locator('#split > article.graph').evaluateAll((els) => els.map((el) => el.getBoundingClientRect().toJSON()));
+  expect(cards).toHaveLength(3);
+  for (const c of cards) {
+    expect(Math.abs(c.y - cards[0].y)).toBeLessThanOrEqual(1);
+    expect(Math.abs(c.height - cards[0].height)).toBeLessThanOrEqual(1);
+  }
+  expect(cards[0].x).toBeLessThan(cards[1].x);
+  expect(cards[1].x).toBeLessThan(cards[2].x);
+});
+
+test('a graph without data keeps its card with its title and empty-state text', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  await page.goto('/dashboard');
+  const card = page.locator('article.graph').filter({ has: page.getByRole('heading', { level: 2, name: 'Top items by sell value' }) });
+  await expect(card).toHaveCount(1);
+  await expect(card).toContainText('No sell orders.');
 });

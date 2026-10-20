@@ -66,7 +66,9 @@ export default async function globalSetup() {
   }
 
   // The test-hooks feature adds POST /_test/refresh/{id} and /_test/poll/{id}; only this e2e build has it.
-  execFileSync('cargo', ['build', '-p', 'sekondo', '-p', 'eve-stub', '--features', 'sekondo/test-hooks'], { cwd: root, stdio: 'inherit' });
+  // Two builds: with `-p sekondo -p eve-stub --features sekondo/test-hooks` cargo leaves the feature off the sekondo bin.
+  execFileSync('cargo', ['build', '-p', 'sekondo', '--features', 'test-hooks'], { cwd: root, stdio: 'inherit' });
+  execFileSync('cargo', ['build', '-p', 'eve-stub'], { cwd: root, stdio: 'inherit' });
   await recreateE2eDatabase(user, password);
 
   const logDir = path.join(__dirname, 'test-results');
