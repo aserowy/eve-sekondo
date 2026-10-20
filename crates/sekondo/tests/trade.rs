@@ -1,100 +1,113 @@
 mod common;
 
 use common::PollEnv;
+use sekondo::store::{RememberedSellOrder, StandingInput, TradeSeed};
 use serde_json::json;
-use sqlx::PgPool;
 
 const ALICE: i64 = 90000001;
 const BOB: i64 = 90000002;
 
-/// A purchase of 34, bought on day `day` of October 2026.
-async fn buy(env: &PollEnv, (id, character): (i64, i64), day: u32, quantity: i64, price: &str) {
-    sqlx::query(
-        "INSERT INTO purchases (transaction_id, character_id, type_id, location_id, quantity, \
-         unit_price, bought_at) \
-         VALUES ($1, $2, 34, 60003760, $3, $4::numeric, make_timestamptz(2026, 10, $5, 12, 0, 0, 'UTC'))",
+/// ISK as written in the figures, in cents.
+fn cents(isk: &str) -> i64 {
+    (isk.parse::<f64>().unwrap() * 100.0).round() as i64
+}
+
+/// Cents as the figures write ISK.
+fn isk(cents: i64) -> String {
+    format!("{}.{:02}", cents / 100, cents % 100)
+}
+
+/// Noon of day `day` of October 2026.
+fn day(day: u32) -> time::OffsetDateTime {
+    time::OffsetDateTime::new_utc(
+        time::Date::from_calendar_date(2026, time::Month::October, day as u8).unwrap(),
+        time::Time::from_hms(12, 0, 0).unwrap(),
     )
-    .bind(id)
-    .bind(character)
-    .bind(quantity)
-    .bind(price)
-    .bind(day as i32)
-    .execute(&env.pool)
-    .await
-    .unwrap();
+}
+
+async fn trade(
+    env: &PollEnv,
+    (id, character): (i64, i64),
+    (is_sale, on_day): (bool, u32),
+    quantity: i64,
+    price: &str,
+) {
+    env.stores
+        .trades
+        .seed_trade(
+            character,
+            &TradeSeed {
+                transaction_id: id,
+                is_sale,
+                type_id: 34,
+                location_id: 60003760,
+                quantity,
+                unit_price_cents: cents(price),
+                at: day(on_day),
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// A purchase of 34, bought on day `day` of October 2026.
+async fn buy(env: &PollEnv, who: (i64, i64), day: u32, quantity: i64, price: &str) {
+    trade(env, who, (false, day), quantity, price).await;
 }
 
 /// A remembered sell order of 34, first issued on day `day`.
-async fn remember(env: &PollEnv, (id, character): (i64, i64), day: u32, volume: i64) {
-    sqlx::query(
-        "INSERT INTO sell_order_history (order_id, character_id, type_id, first_issued, volume_total) \
-         VALUES ($1, $2, 34, make_timestamptz(2026, 10, $3, 12, 0, 0, 'UTC'), $4)",
-    )
-    .bind(id)
-    .bind(character)
-    .bind(day as i32)
-    .bind(volume)
-    .execute(&env.pool)
-    .await
-    .unwrap();
+async fn remember(env: &PollEnv, (id, character): (i64, i64), on_day: u32, volume: i64) {
+    env.stores
+        .trades
+        .seed_remembered_order(
+            character,
+            &RememberedSellOrder {
+                order_id: id,
+                type_id: 34,
+                first_issued: day(on_day),
+                volume_total: volume,
+            },
+        )
+        .await
+        .unwrap();
 }
 
 async fn recompute(env: &PollEnv, character: i64) {
-    let mut tx = env.pool.begin().await.unwrap();
-    sekondo::trade::recompute(&mut tx, character, &[34])
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
+    env.stores.trades.settle(character, &[34]).await.unwrap();
 }
 
 /// `(order, covered units, cost)` of every stored cost.
 async fn costs(env: &PollEnv) -> Vec<(i64, i64, String)> {
-    sqlx::query_as(
-        "SELECT order_id, covered_units, cost::text FROM sell_order_costs ORDER BY order_id",
-    )
-    .fetch_all(&env.pool)
-    .await
-    .unwrap()
+    let rows = env.stores.trades.order_costs().await.unwrap();
+    rows.into_iter()
+        .map(|(id, units, cost)| (id, units, isk(cost)))
+        .collect()
 }
 
 /// A sale of 34, sold on day `day` of October 2026.
-async fn sold(env: &PollEnv, (id, character): (i64, i64), day: u32, quantity: i64, price: &str) {
-    sqlx::query(
-        "INSERT INTO sales (transaction_id, character_id, type_id, location_id, quantity, \
-         unit_price, sold_at) \
-         VALUES ($1, $2, 34, 60003760, $3, $4::numeric, make_timestamptz(2026, 10, $5, 12, 0, 0, 'UTC'))",
-    )
-    .bind(id)
-    .bind(character)
-    .bind(quantity)
-    .bind(price)
-    .bind(day as i32)
-    .execute(&env.pool)
-    .await
-    .unwrap();
+async fn sold(env: &PollEnv, who: (i64, i64), day: u32, quantity: i64, price: &str) {
+    trade(env, who, (true, day), quantity, price).await;
 }
 
 /// `(sale, covered units, cost)` of every stored sale cost.
 async fn sale_costs(env: &PollEnv) -> Vec<(i64, i64, String)> {
-    sqlx::query_as(
-        "SELECT transaction_id, covered_units, cost::text FROM sale_costs ORDER BY transaction_id",
-    )
-    .fetch_all(&env.pool)
-    .await
-    .unwrap()
+    let rows = env.stores.trades.sale_costs().await.unwrap();
+    rows.into_iter()
+        .map(|(id, units, cost)| (id, units, isk(cost)))
+        .collect()
 }
 
-async fn two_characters(pool: PgPool) -> PollEnv {
-    let env = PollEnv::new(pool).await;
+async fn two_characters() -> PollEnv {
+    let env = PollEnv::new().await;
     let account = env.new_account().await;
     env.link(account, ALICE).await;
     env.link(account, BOB).await;
     env
 }
 
-#[sqlx::test]
-async fn the_stored_costs_follow_first_in_first_out(pool: PgPool) {
-    let env = two_characters(pool).await;
+#[tokio::test]
+async fn the_stored_costs_follow_first_in_first_out() {
+    let env = two_characters().await;
     buy(&env, (1, ALICE), 1, 10, "100.00").await;
     buy(&env, (2, ALICE), 2, 10, "120.00").await;
     remember(&env, (11, ALICE), 3, 15).await;
@@ -108,9 +121,9 @@ async fn the_stored_costs_follow_first_in_first_out(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn other_characters_purchases_do_not_count(pool: PgPool) {
-    let env = two_characters(pool).await;
+#[tokio::test]
+async fn other_characters_purchases_do_not_count() {
+    let env = two_characters().await;
     buy(&env, (1, BOB), 1, 100, "100.00").await;
     remember(&env, (11, ALICE), 3, 10).await;
 
@@ -119,9 +132,9 @@ async fn other_characters_purchases_do_not_count(pool: PgPool) {
     assert_eq!(costs(&env).await, [(11, 0, "0.00".to_owned())]);
 }
 
-#[sqlx::test]
-async fn a_purchase_stored_late_feeds_the_orders_issued_after_it(pool: PgPool) {
-    let env = two_characters(pool).await;
+#[tokio::test]
+async fn a_purchase_stored_late_feeds_the_orders_issued_after_it() {
+    let env = two_characters().await;
     remember(&env, (11, ALICE), 3, 10).await;
     recompute(&env, ALICE).await;
     assert_eq!(costs(&env).await, [(11, 0, "0.00".to_owned())]);
@@ -133,9 +146,9 @@ async fn a_purchase_stored_late_feeds_the_orders_issued_after_it(pool: PgPool) {
     assert_eq!(costs(&env).await, [(11, 10, "1000.00".to_owned())]);
 }
 
-#[sqlx::test]
-async fn the_stored_sale_costs_follow_first_in_first_out(pool: PgPool) {
-    let env = two_characters(pool).await;
+#[tokio::test]
+async fn the_stored_sale_costs_follow_first_in_first_out() {
+    let env = two_characters().await;
     buy(&env, (1, ALICE), 1, 10, "100.00").await;
     buy(&env, (2, ALICE), 2, 10, "120.00").await;
     sold(&env, (31, ALICE), 3, 15, "150.00").await;
@@ -149,9 +162,9 @@ async fn the_stored_sale_costs_follow_first_in_first_out(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn other_characters_purchases_are_not_taken_by_a_sale(pool: PgPool) {
-    let env = two_characters(pool).await;
+#[tokio::test]
+async fn other_characters_purchases_are_not_taken_by_a_sale() {
+    let env = two_characters().await;
     buy(&env, (1, BOB), 1, 100, "100.00").await;
     sold(&env, (31, ALICE), 3, 10, "150.00").await;
 
@@ -160,9 +173,9 @@ async fn other_characters_purchases_are_not_taken_by_a_sale(pool: PgPool) {
     assert_eq!(sale_costs(&env).await, [(31, 0, "0.00".to_owned())]);
 }
 
-#[sqlx::test]
-async fn a_sale_and_a_sell_order_both_take_the_same_lot(pool: PgPool) {
-    let env = two_characters(pool).await;
+#[tokio::test]
+async fn a_sale_and_a_sell_order_both_take_the_same_lot() {
+    let env = two_characters().await;
     buy(&env, (1, ALICE), 1, 10, "100.00").await;
     remember(&env, (11, ALICE), 3, 10).await;
     sold(&env, (31, ALICE), 3, 10, "150.00").await;
@@ -173,9 +186,9 @@ async fn a_sale_and_a_sell_order_both_take_the_same_lot(pool: PgPool) {
     assert_eq!(sale_costs(&env).await, [(31, 10, "1000.00".to_owned())]);
 }
 
-#[sqlx::test]
-async fn a_purchase_stored_late_feeds_a_sale_stored_before_it(pool: PgPool) {
-    let env = two_characters(pool).await;
+#[tokio::test]
+async fn a_purchase_stored_late_feeds_a_sale_stored_before_it() {
+    let env = two_characters().await;
     sold(&env, (31, ALICE), 3, 10, "150.00").await;
     recompute(&env, ALICE).await;
     assert_eq!(sale_costs(&env).await, [(31, 0, "0.00".to_owned())]);
@@ -186,18 +199,13 @@ async fn a_purchase_stored_late_feeds_a_sale_stored_before_it(pool: PgPool) {
     assert_eq!(sale_costs(&env).await, [(31, 10, "1000.00".to_owned())]);
 }
 
-#[sqlx::test]
-async fn a_recompute_touches_only_the_given_character_and_items(pool: PgPool) {
-    let env = two_characters(pool).await;
+#[tokio::test]
+async fn a_recompute_touches_only_the_given_character_and_items() {
+    let env = two_characters().await;
     buy(&env, (1, ALICE), 1, 10, "100.00").await;
     remember(&env, (11, ALICE), 3, 10).await;
     remember(&env, (21, BOB), 3, 10).await;
-    sqlx::query(
-        "INSERT INTO sell_order_costs (order_id, covered_units, cost) VALUES (21, 7, 7.00)",
-    )
-    .execute(&env.pool)
-    .await
-    .unwrap();
+    env.stores.trades.seed_order_cost(21, 7, 700).await.unwrap();
 
     recompute(&env, ALICE).await;
 
@@ -207,9 +215,9 @@ async fn a_recompute_touches_only_the_given_character_and_items(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn an_order_poll_stores_the_cost_of_a_newly_remembered_sell_order(pool: PgPool) {
-    let env = two_characters(pool).await;
+#[tokio::test]
+async fn an_order_poll_stores_the_cost_of_a_newly_remembered_sell_order() {
+    let env = two_characters().await;
     buy(&env, (1, ALICE), 1, 30, "100.00").await;
     let order = json!({
         "order_id": 11, "type_id": 34, "region_id": 10000002, "location_id": 60003760,
@@ -236,18 +244,33 @@ const STRUCTURE: i64 = 1000000000001;
 /// of 2.0 and a corporation standing of 1.5 towards the owner of Jita 4-4. That is a sales tax of
 /// 3.375% and a broker fee of 1.41% there.
 async fn alice_with_fees(env: &PollEnv) {
-    for statement in [
-        "INSERT INTO fee_sync (character_id, kind, next_poll_at, last_success_at) \
-         VALUES (90000001, 'skills', now(), now()), (90000001, 'standings', now(), now())",
-        "INSERT INTO character_skills (character_id, skill_id, active_level) \
-         VALUES (90000001, 16622, 5), (90000001, 3446, 5)",
-        "INSERT INTO character_standings (character_id, from_id, from_type, standing) \
-         VALUES (90000001, 500001, 'faction', 2.0), (90000001, 1000035, 'npc_corp', 1.5)",
-        "INSERT INTO station_owners (station_id, owner_id, resolved_at) \
-         VALUES (60003760, 1000035, now())",
+    let now = time::OffsetDateTime::now_utc();
+    let fees = &env.stores.fees;
+    for kind in [
+        sekondo::fee_poller::Kind::Skills,
+        sekondo::fee_poller::Kind::Standings,
     ] {
-        sqlx::query(statement).execute(&env.pool).await.unwrap();
+        fees.seed_fee_success(ALICE, kind, now).await.unwrap();
     }
+    for skill in [16622, 3446] {
+        fees.seed_skill(ALICE, skill, 5).await.unwrap();
+    }
+    for (from_id, from_type, standing) in [(500001, "faction", "2.0"), (1000035, "npc_corp", "1.5")]
+    {
+        fees.seed_standing(
+            ALICE,
+            &StandingInput {
+                from_id,
+                from_type: from_type.to_owned(),
+                standing: standing.to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    fees.insert_station_owner(60003760, 1000035, now)
+        .await
+        .unwrap();
 }
 
 /// Alice's two purchases, 10 at 100.00 and 10 at 120.00.
@@ -263,27 +286,33 @@ async fn sell(
     (location, corporation): (i64, bool),
     (price, remain, total): (&str, i64, i64),
 ) {
-    sqlx::query(
-        "INSERT INTO current_orders (order_id, character_id, type_id, region_id, location_id, \
-         is_buy_order, is_corporation, price, volume_remain, volume_total, min_volume, range, \
-         issued, duration) \
-         VALUES ($1, $2, 34, 10000002, $3, false, $4, $5::numeric, $6, $7, 1, 'station', \
-                 make_timestamptz(2026, 10, 3, 12, 0, 0, 'UTC'), 90)",
-    )
-    .bind(id)
-    .bind(ALICE)
-    .bind(location)
-    .bind(corporation)
-    .bind(price)
-    .bind(remain)
-    .bind(total)
-    .execute(&env.pool)
-    .await
-    .unwrap();
-    if !corporation {
-        remember(env, (id, ALICE), 3, total).await;
-        recompute(env, ALICE).await;
-    }
+    let issued = day(3);
+    env.stores
+        .orders
+        .replace_orders(
+            ALICE,
+            issued,
+            &[sekondo::esi::EsiOrder {
+                order_id: id,
+                type_id: 34,
+                region_id: 10000002,
+                location_id: location,
+                is_buy_order: false,
+                is_corporation: corporation,
+                price_cents: cents(price),
+                volume_remain: remain,
+                volume_total: total,
+                min_volume: 1,
+                range: "station".to_owned(),
+                escrow_cents: None,
+                issued,
+                duration: 90,
+            }],
+            issued + time::Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
 }
 
 struct Margin {
@@ -295,15 +324,15 @@ struct Margin {
 
 async fn margin_of(env: &PollEnv, order_id: i64) -> Margin {
     use sekondo::{
-        orders::{Side, Sort, list_orders},
+        orders::{Side, Sort},
         selection::CharacterSelection,
     };
-    let account: uuid::Uuid = sqlx::query_scalar("SELECT account_id FROM characters LIMIT 1")
-        .fetch_one(&env.pool)
-        .await
-        .unwrap();
+    let account = env.account_of(ALICE).await;
     let selection = CharacterSelection::resolve(&[ALICE, BOB], None);
-    let row = list_orders(&env.pool, account, &selection, Side::Sell, Sort::default())
+    let row = env
+        .stores
+        .orders
+        .list_orders(account, selection.ids(), Side::Sell, Sort::default())
         .await
         .unwrap()
         .into_iter()
@@ -317,9 +346,9 @@ async fn margin_of(env: &PollEnv, order_id: i64) -> Margin {
     }
 }
 
-#[sqlx::test]
-async fn a_fully_covered_order_earns_what_it_sells_for_after_fees_minus_its_cost(pool: PgPool) {
-    let env = two_characters(pool).await;
+#[tokio::test]
+async fn a_fully_covered_order_earns_what_it_sells_for_after_fees_minus_its_cost() {
+    let env = two_characters().await;
     alice_with_fees(&env).await;
     alice_with_two_lots(&env).await;
     sell(&env, 11, (JITA, false), ("150.00", 15, 15)).await;
@@ -333,9 +362,9 @@ async fn a_fully_covered_order_earns_what_it_sells_for_after_fees_minus_its_cost
     assert_eq!(margin.cost_per_unit_cents, Some(10_667));
 }
 
-#[sqlx::test]
-async fn a_partly_sold_order_counts_its_remaining_units_at_the_average_cost(pool: PgPool) {
-    let env = two_characters(pool).await;
+#[tokio::test]
+async fn a_partly_sold_order_counts_its_remaining_units_at_the_average_cost() {
+    let env = two_characters().await;
     alice_with_fees(&env).await;
     alice_with_two_lots(&env).await;
     sell(&env, 11, (JITA, false), ("150.00", 5, 15)).await;
@@ -344,9 +373,9 @@ async fn a_partly_sold_order_counts_its_remaining_units_at_the_average_cost(pool
     assert_eq!(margin_of(&env, 11).await.margin_cents, Some(18_078));
 }
 
-#[sqlx::test]
-async fn an_order_whose_cost_is_only_partly_known_has_no_margin_and_says_how_much_is(pool: PgPool) {
-    let env = two_characters(pool).await;
+#[tokio::test]
+async fn an_order_whose_cost_is_only_partly_known_has_no_margin_and_says_how_much_is() {
+    let env = two_characters().await;
     alice_with_fees(&env).await;
     buy(&env, (1, ALICE), 1, 5, "100.00").await;
     sell(&env, 11, (JITA, false), ("150.00", 10, 10)).await;
@@ -358,9 +387,9 @@ async fn an_order_whose_cost_is_only_partly_known_has_no_margin_and_says_how_muc
     assert_eq!((margin.covered_units, margin.volume_total), (Some(5), 10));
 }
 
-#[sqlx::test]
-async fn an_order_in_a_structure_has_no_margin(pool: PgPool) {
-    let env = two_characters(pool).await;
+#[tokio::test]
+async fn an_order_in_a_structure_has_no_margin() {
+    let env = two_characters().await;
     alice_with_fees(&env).await;
     alice_with_two_lots(&env).await;
     sell(&env, 11, (STRUCTURE, false), ("150.00", 15, 15)).await;
@@ -368,18 +397,18 @@ async fn an_order_in_a_structure_has_no_margin(pool: PgPool) {
     assert_eq!(margin_of(&env, 11).await.margin_cents, None);
 }
 
-#[sqlx::test]
-async fn an_order_of_a_character_whose_skills_were_not_polled_has_no_margin(pool: PgPool) {
-    let env = two_characters(pool).await;
+#[tokio::test]
+async fn an_order_of_a_character_whose_skills_were_not_polled_has_no_margin() {
+    let env = two_characters().await;
     alice_with_two_lots(&env).await;
     sell(&env, 11, (JITA, false), ("150.00", 15, 15)).await;
 
     assert_eq!(margin_of(&env, 11).await.margin_cents, None);
 }
 
-#[sqlx::test]
-async fn a_corporation_order_has_no_margin(pool: PgPool) {
-    let env = two_characters(pool).await;
+#[tokio::test]
+async fn a_corporation_order_has_no_margin() {
+    let env = two_characters().await;
     alice_with_fees(&env).await;
     alice_with_two_lots(&env).await;
     sell(&env, 11, (JITA, true), ("150.00", 15, 15)).await;
@@ -389,9 +418,9 @@ async fn a_corporation_order_has_no_margin(pool: PgPool) {
     assert_eq!((margin.margin_cents, margin.covered_units), (None, None));
 }
 
-#[sqlx::test]
-async fn a_margin_can_be_negative(pool: PgPool) {
-    let env = two_characters(pool).await;
+#[tokio::test]
+async fn a_margin_can_be_negative() {
+    let env = two_characters().await;
     alice_with_fees(&env).await;
     alice_with_two_lots(&env).await;
     sell(&env, 11, (JITA, false), ("100.00", 15, 15)).await;
@@ -419,10 +448,7 @@ async fn listed_between(
     (from, to): (OffsetDateTime, OffsetDateTime),
 ) -> Vec<Listed> {
     use sekondo::selection::CharacterSelection;
-    let account: uuid::Uuid = sqlx::query_scalar("SELECT account_id FROM characters LIMIT 1")
-        .fetch_one(&env.pool)
-        .await
-        .unwrap();
+    let account = env.account_of(ALICE).await;
     let all = [ALICE, BOB];
     let raw = characters
         .iter()
@@ -430,7 +456,9 @@ async fn listed_between(
         .collect::<Vec<_>>()
         .join(",");
     let selection = CharacterSelection::resolve(&all, Some(&raw));
-    sekondo::trades::list(&env.pool, account, &selection, from, to)
+    env.stores
+        .trades
+        .list_trades(account, selection.ids(), from, to)
         .await
         .unwrap()
         .into_iter()
@@ -464,9 +492,9 @@ async fn margin_of_sale(env: &PollEnv, id: i64) -> Listed {
         .unwrap()
 }
 
-#[sqlx::test]
-async fn a_sale_earns_its_price_after_fees_minus_its_cost(pool: PgPool) {
-    let env = two_characters(pool).await;
+#[tokio::test]
+async fn a_sale_earns_its_price_after_fees_minus_its_cost() {
+    let env = two_characters().await;
     alice_with_fees(&env).await;
     buy(&env, (1, ALICE), 1, 10, "100.00").await;
     sold(&env, (31, ALICE), 2, 10, "150.00").await;
@@ -480,9 +508,9 @@ async fn a_sale_earns_its_price_after_fees_minus_its_cost(pool: PgPool) {
     assert_eq!(sale.cost_per_unit_cents, Some(10_000));
 }
 
-#[sqlx::test]
-async fn a_sale_below_its_cost_is_a_loss(pool: PgPool) {
-    let env = two_characters(pool).await;
+#[tokio::test]
+async fn a_sale_below_its_cost_is_a_loss() {
+    let env = two_characters().await;
     alice_with_fees(&env).await;
     buy(&env, (1, ALICE), 1, 10, "100.00").await;
     sold(&env, (31, ALICE), 2, 10, "90.00").await;
@@ -492,9 +520,9 @@ async fn a_sale_below_its_cost_is_a_loss(pool: PgPool) {
     assert_eq!(margin_of_sale(&env, 31).await.margin_cents, Some(-14_307));
 }
 
-#[sqlx::test]
-async fn a_sale_with_a_partly_known_cost_has_no_margin_and_says_how_much_is_known(pool: PgPool) {
-    let env = two_characters(pool).await;
+#[tokio::test]
+async fn a_sale_with_a_partly_known_cost_has_no_margin_and_says_how_much_is_known() {
+    let env = two_characters().await;
     alice_with_fees(&env).await;
     buy(&env, (1, ALICE), 1, 4, "100.00").await;
     sold(&env, (31, ALICE), 2, 10, "150.00").await;
@@ -507,9 +535,9 @@ async fn a_sale_with_a_partly_known_cost_has_no_margin_and_says_how_much_is_know
     assert_eq!(sale.covered_units, Some(4));
 }
 
-#[sqlx::test]
-async fn a_sale_in_a_structure_or_without_polled_skills_has_no_margin(pool: PgPool) {
-    let env = two_characters(pool).await;
+#[tokio::test]
+async fn a_sale_in_a_structure_or_without_polled_skills_has_no_margin() {
+    let env = two_characters().await;
     buy(&env, (1, ALICE), 1, 20, "100.00").await;
     sold(&env, (31, ALICE), 2, 10, "150.00").await;
     recompute(&env, ALICE).await;
@@ -520,9 +548,20 @@ async fn a_sale_in_a_structure_or_without_polled_skills_has_no_margin(pool: PgPo
     );
 
     alice_with_fees(&env).await;
-    sqlx::query("UPDATE sales SET location_id = $1")
-        .bind(STRUCTURE)
-        .execute(&env.pool)
+    env.stores
+        .trades
+        .seed_trade(
+            ALICE,
+            &TradeSeed {
+                transaction_id: 31,
+                is_sale: true,
+                type_id: 34,
+                location_id: STRUCTURE,
+                quantity: 10,
+                unit_price_cents: 15_000,
+                at: day(2),
+            },
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -532,9 +571,9 @@ async fn a_sale_in_a_structure_or_without_polled_skills_has_no_margin(pool: PgPo
     );
 }
 
-#[sqlx::test]
-async fn a_higher_accounting_level_changes_the_margin_of_an_earlier_sale(pool: PgPool) {
-    let env = two_characters(pool).await;
+#[tokio::test]
+async fn a_higher_accounting_level_changes_the_margin_of_an_earlier_sale() {
+    let env = two_characters().await;
     alice_with_fees(&env).await;
     buy(&env, (1, ALICE), 1, 10, "100.00").await;
     sold(&env, (31, ALICE), 2, 10, "150.00").await;
@@ -542,18 +581,15 @@ async fn a_higher_accounting_level_changes_the_margin_of_an_earlier_sale(pool: P
     assert_eq!(margin_of_sale(&env, 31).await.margin_cents, Some(42_823));
 
     // Accounting 4 is 7.5 * (1 - 0.44) = 4.2% instead of 3.375%.
-    sqlx::query("UPDATE character_skills SET active_level = 4 WHERE skill_id = 16622")
-        .execute(&env.pool)
-        .await
-        .unwrap();
+    env.stores.fees.seed_skill(ALICE, 16622, 4).await.unwrap();
 
     // 1500 * (1 - 0.042 - 0.0141) - 1000 = 415.85
     assert_eq!(margin_of_sale(&env, 31).await.margin_cents, Some(41_585));
 }
 
-#[sqlx::test]
-async fn only_the_selected_personal_trades_in_the_range_are_listed_newest_first(pool: PgPool) {
-    let env = two_characters(pool).await;
+#[tokio::test]
+async fn only_the_selected_personal_trades_in_the_range_are_listed_newest_first() {
+    let env = two_characters().await;
     buy(&env, (1, ALICE), 1, 10, "100.00").await;
     sold(&env, (31, ALICE), 2, 4, "150.00").await;
     sold(&env, (32, ALICE), 2, 3, "150.00").await;
@@ -580,9 +616,9 @@ async fn only_the_selected_personal_trades_in_the_range_are_listed_newest_first(
     assert_eq!(order, [(false, 3), (true, 32), (true, 31)]);
 }
 
-#[sqlx::test]
-async fn a_purchase_has_no_margin(pool: PgPool) {
-    let env = two_characters(pool).await;
+#[tokio::test]
+async fn a_purchase_has_no_margin() {
+    let env = two_characters().await;
     alice_with_fees(&env).await;
     buy(&env, (1, ALICE), 1, 10, "100.00").await;
 

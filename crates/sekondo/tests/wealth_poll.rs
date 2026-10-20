@@ -3,26 +3,28 @@ mod common;
 use common::PollEnv;
 use sekondo::{clock::Clock, poller::PollOutcome, wealth_poller::Kind};
 use serde_json::json;
-use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 
 const ALICE: i64 = 90000001;
 
-async fn linked(pool: PgPool) -> PollEnv {
-    let env = PollEnv::new(pool).await;
+async fn linked() -> PollEnv {
+    let env = PollEnv::new().await;
     let account = env.new_account().await;
     env.link(account, ALICE).await;
     env
 }
 
 async fn balances(env: &PollEnv, character: i64) -> Vec<i64> {
-    sqlx::query_scalar(
-        "SELECT (balance * 100)::bigint FROM wallet_balances WHERE character_id = $1 ORDER BY polled_at",
-    )
-    .bind(character)
-    .fetch_all(&env.pool)
-    .await
-    .unwrap()
+    let rows = env.stores.wealth.wallet_balances(character).await.unwrap();
+    rows.into_iter().map(|(_, cents)| cents).collect()
+}
+
+fn kind_named(kind: &str) -> Kind {
+    match kind {
+        "wallet" => Kind::Wallet,
+        "assets" => Kind::Assets,
+        _ => Kind::Transactions,
+    }
 }
 
 async fn sync_row(
@@ -30,20 +32,24 @@ async fn sync_row(
     character: i64,
     kind: &str,
 ) -> (Option<OffsetDateTime>, OffsetDateTime, Option<String>, i32) {
-    sqlx::query_as(
-        "SELECT last_success_at, next_poll_at, last_error, failures FROM wealth_sync \
-         WHERE character_id = $1 AND kind = $2",
+    let state = env
+        .stores
+        .wealth
+        .wealth_sync(character, kind_named(kind))
+        .await
+        .unwrap()
+        .expect("a sync row");
+    (
+        state.last_success_at,
+        state.next_poll_at,
+        state.last_error,
+        state.failures,
     )
-    .bind(character)
-    .bind(kind)
-    .fetch_one(&env.pool)
-    .await
-    .unwrap()
 }
 
-#[sqlx::test]
-async fn a_wallet_poll_records_the_balance_and_when_it_happened(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_wallet_poll_records_the_balance_and_when_it_happened() {
+    let env = linked().await;
     env.control("wallet", json!({"character_id": ALICE, "balance": 1234.56}))
         .await;
     let polled_at = env.clock.now();
@@ -58,9 +64,9 @@ async fn a_wallet_poll_records_the_balance_and_when_it_happened(pool: PgPool) {
     assert_eq!((error, failures), (None, 0));
 }
 
-#[sqlx::test]
-async fn every_poll_adds_a_row_so_the_balance_has_a_history(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn every_poll_adds_a_row_so_the_balance_has_a_history() {
+    let env = linked().await;
     env.wealth.poll(ALICE, Kind::Wallet).await;
     env.control("wallet", json!({"character_id": ALICE, "balance": 10.0}))
         .await;
@@ -70,9 +76,9 @@ async fn every_poll_adds_a_row_so_the_balance_has_a_history(pool: PgPool) {
     assert_eq!(balances(&env, ALICE).await, [250_000_000, 1000]);
 }
 
-#[sqlx::test]
-async fn the_next_poll_waits_for_esis_expiry_when_that_is_later(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn the_next_poll_waits_for_esis_expiry_when_that_is_later() {
+    let env = linked().await;
     env.control("esi-expires", json!({"seconds": 3 * 3600}))
         .await;
     let polled_at = env.clock.now();
@@ -83,9 +89,9 @@ async fn the_next_poll_waits_for_esis_expiry_when_that_is_later(pool: PgPool) {
     assert!(next >= polled_at + Duration::hours(3), "{next}");
 }
 
-#[sqlx::test]
-async fn a_character_needing_relogin_is_not_requested_and_keeps_its_balance(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_character_needing_relogin_is_not_requested_and_keeps_its_balance() {
+    let env = linked().await;
     env.wealth.poll(ALICE, Kind::Wallet).await;
     env.repo.mark_needs_relogin(ALICE).await.unwrap();
     let calls = env.stub.esi_calls("wallet");
@@ -99,9 +105,9 @@ async fn a_character_needing_relogin_is_not_requested_and_keeps_its_balance(pool
     assert_eq!(balances(&env, ALICE).await.len(), 1);
 }
 
-#[sqlx::test]
-async fn the_scheduler_skips_characters_needing_relogin(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn the_scheduler_skips_characters_needing_relogin() {
+    let env = linked().await;
     env.repo.mark_needs_relogin(ALICE).await.unwrap();
     env.wealth.tick().await; // schedules nothing for it
     env.clock.advance(Duration::hours(2));
@@ -110,15 +116,18 @@ async fn the_scheduler_skips_characters_needing_relogin(pool: PgPool) {
     assert_eq!(env.stub.esi_calls("wallet"), 0);
 }
 
-#[sqlx::test]
-async fn the_scheduler_polls_a_new_character_within_one_interval(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn the_scheduler_polls_a_new_character_within_one_interval() {
+    let env = linked().await;
     assert_eq!(env.wealth.tick().await, 0, "first polls lie ahead");
-    let scheduled: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM wealth_sync WHERE kind = 'wallet'")
-            .fetch_one(&env.pool)
-            .await
-            .unwrap();
+    let scheduled = env
+        .stores
+        .wealth
+        .wealth_sync(ALICE, Kind::Wallet)
+        .await
+        .unwrap()
+        .into_iter()
+        .count();
     assert_eq!(scheduled, 1);
 
     env.clock.advance(env.interval + Duration::minutes(1));
@@ -127,9 +136,9 @@ async fn the_scheduler_polls_a_new_character_within_one_interval(pool: PgPool) {
     assert_eq!(env.wealth.tick().await, 0, "not due again right away");
 }
 
-#[sqlx::test]
-async fn a_failed_poll_keeps_the_balance_and_records_the_failure(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_failed_poll_keeps_the_balance_and_records_the_failure() {
+    let env = linked().await;
     env.wealth.poll(ALICE, Kind::Wallet).await;
     let (success_before, ..) = sync_row(&env, ALICE, "wallet").await;
     env.control("wallet", json!({"character_id": ALICE, "balance": 1.0}))
@@ -150,9 +159,9 @@ async fn a_failed_poll_keeps_the_balance_and_records_the_failure(pool: PgPool) {
     assert_eq!(next, failed_at + Duration::minutes(1));
 }
 
-#[sqlx::test]
-async fn an_esi_pause_defers_the_poll_without_counting_a_failure(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn an_esi_pause_defers_the_poll_without_counting_a_failure() {
+    let env = linked().await;
     env.wealth.poll(ALICE, Kind::Wallet).await;
     env.control(
         "esi-fail-next",
@@ -173,9 +182,9 @@ async fn an_esi_pause_defers_the_poll_without_counting_a_failure(pool: PgPool) {
     assert!(next >= at + Duration::seconds(120));
 }
 
-#[sqlx::test]
-async fn a_wallet_failure_does_not_touch_the_order_poll_and_the_other_way_round(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_wallet_failure_does_not_touch_the_order_poll_and_the_other_way_round() {
+    let env = linked().await;
     env.poller.poll_character(ALICE).await;
     env.wealth.poll(ALICE, Kind::Wallet).await;
 
@@ -187,12 +196,14 @@ async fn a_wallet_failure_does_not_touch_the_order_poll_and_the_other_way_round(
         PollOutcome::Failed
     );
     assert_eq!(env.poller.poll_character(ALICE).await, PollOutcome::Updated);
-    let order_failures: i32 =
-        sqlx::query_scalar("SELECT failures FROM order_sync WHERE character_id = $1")
-            .bind(ALICE)
-            .fetch_one(&env.pool)
-            .await
-            .unwrap();
+    let order_failures = env
+        .stores
+        .orders
+        .order_sync(ALICE)
+        .await
+        .unwrap()
+        .unwrap()
+        .failures;
     assert_eq!(order_failures, 0);
 
     env.control("esi-fail-next", json!({"route": "orders", "status": 500}))
@@ -207,9 +218,9 @@ async fn a_wallet_failure_does_not_touch_the_order_poll_and_the_other_way_round(
     assert_eq!(wallet_failures, 0);
 }
 
-#[sqlx::test]
-async fn a_character_unlinked_during_its_poll_is_dropped(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn a_character_unlinked_during_its_poll_is_dropped() {
+    let env = PollEnv::new().await;
     // Never linked: the token service does not know it.
     assert_eq!(
         env.wealth.poll(ALICE, Kind::Wallet).await,
@@ -244,40 +255,22 @@ async fn set_assets(
 }
 
 async fn asset_ids(env: &PollEnv, character: i64) -> Vec<i64> {
-    sqlx::query_scalar(
-        "SELECT item_id FROM current_assets WHERE character_id = $1 ORDER BY item_id",
-    )
-    .bind(character)
-    .fetch_all(&env.pool)
-    .await
-    .unwrap()
+    env.stores.wealth.asset_ids(character).await.unwrap()
 }
 
 async fn inventory_values(env: &PollEnv, character: i64) -> Vec<i64> {
-    sqlx::query_scalar(
-        "SELECT (value * 100)::bigint FROM inventory_values WHERE character_id = $1 ORDER BY recorded_at",
-    )
-    .bind(character)
-    .fetch_all(&env.pool)
-    .await
-    .unwrap()
+    let rows = env.stores.wealth.inventory_values(character).await.unwrap();
+    rows.into_iter().map(|(_, cents)| cents).collect()
 }
 
 async fn set_price(env: &PollEnv, type_id: i64, price: Option<&str>) {
-    sqlx::query(
-        "INSERT INTO item_prices (type_id, average_price) VALUES ($1, $2::numeric)
-         ON CONFLICT (type_id) DO UPDATE SET average_price = excluded.average_price",
-    )
-    .bind(type_id)
-    .bind(price)
-    .execute(&env.pool)
-    .await
-    .unwrap();
+    let cents = price.map(|p| (p.parse::<f64>().unwrap() * 100.0).round() as i64);
+    env.stores.market.seed_price(type_id, cents).await.unwrap();
 }
 
-#[sqlx::test]
-async fn the_assets_of_all_pages_become_the_current_assets(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn the_assets_of_all_pages_become_the_current_assets() {
+    let env = linked().await;
     let items: Vec<_> = (1..=5).map(|id| asset(id, 34, 1)).collect();
     set_assets(&env, ALICE, items, 2).await;
 
@@ -290,9 +283,9 @@ async fn the_assets_of_all_pages_become_the_current_assets(pool: PgPool) {
     assert_eq!(env.stub.esi_calls("assets"), 3);
 }
 
-#[sqlx::test]
-async fn an_item_that_is_gone_stops_being_an_asset(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn an_item_that_is_gone_stops_being_an_asset() {
+    let env = linked().await;
     set_assets(&env, ALICE, vec![asset(1, 34, 1), asset(2, 34, 1)], 1000).await;
     env.wealth.poll(ALICE, Kind::Assets).await;
 
@@ -303,9 +296,9 @@ async fn an_item_that_is_gone_stops_being_an_asset(pool: PgPool) {
     assert_eq!(asset_ids(&env, ALICE).await, [2]);
 }
 
-#[sqlx::test]
-async fn a_failure_on_the_second_page_keeps_the_assets_and_retries_later(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_failure_on_the_second_page_keeps_the_assets_and_retries_later() {
+    let env = linked().await;
     set_assets(&env, ALICE, vec![asset(1, 34, 1), asset(2, 34, 1)], 1).await;
     env.wealth.poll(ALICE, Kind::Assets).await;
     // The second page cannot be read: its only item lacks the item id.
@@ -326,9 +319,9 @@ async fn a_failure_on_the_second_page_keeps_the_assets_and_retries_later(pool: P
     assert_eq!(next, failed_at + Duration::minutes(1));
 }
 
-#[sqlx::test]
-async fn assets_are_not_polled_again_within_the_hour_whatever_the_order_interval(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn assets_are_not_polled_again_within_the_hour_whatever_the_order_interval() {
+    let env = linked().await;
     let polled_at = env.clock.now();
 
     env.wealth.poll(ALICE, Kind::Assets).await;
@@ -338,14 +331,27 @@ async fn assets_are_not_polled_again_within_the_hour_whatever_the_order_interval
     assert!(next >= polled_at + Duration::hours(1), "{next}");
 }
 
-#[sqlx::test]
-async fn the_scheduler_polls_wallet_assets_and_transactions_independently(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn the_scheduler_polls_wallet_assets_and_transactions_independently() {
+    let env = linked().await;
     env.wealth.tick().await;
-    let kinds: Vec<String> = sqlx::query_scalar("SELECT kind FROM wealth_sync ORDER BY kind")
-        .fetch_all(&env.pool)
-        .await
-        .unwrap();
+    let mut kinds = Vec::new();
+    for (name, kind) in [
+        ("assets", Kind::Assets),
+        ("transactions", Kind::Transactions),
+        ("wallet", Kind::Wallet),
+    ] {
+        if env
+            .stores
+            .wealth
+            .wealth_sync(ALICE, kind)
+            .await
+            .unwrap()
+            .is_some()
+        {
+            kinds.push(name);
+        }
+    }
     assert_eq!(kinds, ["assets", "transactions", "wallet"]);
 
     // After 70 minutes all are due: the wallet (20 minute interval), the assets and the
@@ -364,9 +370,9 @@ async fn the_scheduler_polls_wallet_assets_and_transactions_independently(pool: 
     assert_eq!(assets_failures, 0);
 }
 
-#[sqlx::test]
-async fn every_assets_poll_records_the_inventory_value_from_the_stored_prices(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn every_assets_poll_records_the_inventory_value_from_the_stored_prices() {
+    let env = linked().await;
     // Alice holds 1000 of type 34 and 50 of type 35. Add a blueprint copy and an unpriced item.
     let mut copy = asset(3, 34, 1);
     copy["is_blueprint_copy"] = json!(true);
@@ -387,16 +393,16 @@ async fn every_assets_poll_records_the_inventory_value_from_the_stored_prices(po
     assert_eq!(inventory_values(&env, ALICE).await, [601_250]);
 }
 
-#[sqlx::test]
-async fn without_any_price_the_inventory_is_worth_nothing_but_still_recorded(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn without_any_price_the_inventory_is_worth_nothing_but_still_recorded() {
+    let env = linked().await;
     env.wealth.poll(ALICE, Kind::Assets).await;
     assert_eq!(inventory_values(&env, ALICE).await, [0]);
 }
 
-#[sqlx::test]
-async fn an_item_that_changed_hands_moves_to_its_new_owner(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn an_item_that_changed_hands_moves_to_its_new_owner() {
+    let env = linked().await;
     let account = env.new_account().await;
     env.link(account, BOB).await;
     set_assets(&env, ALICE, vec![asset(1, 34, 1)], 1000).await;
@@ -417,11 +423,8 @@ async fn an_item_that_changed_hands_moves_to_its_new_owner(pool: PgPool) {
 // ---- names ----
 
 async fn name_of(env: &PollEnv, id: i64) -> Option<Option<String>> {
-    sqlx::query_scalar("SELECT name FROM names WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&env.pool)
-        .await
-        .unwrap()
+    let rows = env.stores.market.names_of(&[id]).await.unwrap();
+    rows.into_iter().next().map(|(_, name)| name)
 }
 
 fn asset_at(id: i64, type_id: i64, location: i64, location_type: &str) -> serde_json::Value {
@@ -431,9 +434,9 @@ fn asset_at(id: i64, type_id: i64, location: i64, location_type: &str) -> serde_
     })
 }
 
-#[sqlx::test]
-async fn the_names_of_asset_types_stations_and_systems_are_resolved(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn the_names_of_asset_types_stations_and_systems_are_resolved() {
+    let env = linked().await;
     // The stub knows no solar system; the lookup is the same for any public ID, so a known
     // region ID stands in for the solar system.
     set_assets(
@@ -464,9 +467,9 @@ async fn the_names_of_asset_types_stations_and_systems_are_resolved(pool: PgPool
     );
 }
 
-#[sqlx::test]
-async fn a_structure_is_named_with_the_owners_token_and_a_refused_one_stays_unnamed(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_structure_is_named_with_the_owners_token_and_a_refused_one_stays_unnamed() {
+    let env = linked().await;
     env.control(
         "structure-access",
         json!({"structure_id": 1000000000002_i64, "allowed": false}),
@@ -494,17 +497,22 @@ async fn a_structure_is_named_with_the_owners_token_and_a_refused_one_stays_unna
         Some(None),
         "retried daily"
     );
-    let retry: Option<OffsetDateTime> =
-        sqlx::query_scalar("SELECT retry_after FROM names WHERE id = 1000000000002")
-            .fetch_one(&env.pool)
-            .await
-            .unwrap();
+    let retry = env
+        .stores
+        .market
+        .names_table()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|name| name.id == 1000000000002)
+        .unwrap()
+        .retry_after;
     assert!(retry.unwrap() > env.clock.now() + Duration::hours(23));
 }
 
-#[sqlx::test]
-async fn a_name_that_cannot_be_resolved_never_fails_the_assets_poll(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_name_that_cannot_be_resolved_never_fails_the_assets_poll() {
+    let env = linked().await;
     env.control("esi-fail-next", json!({"route": "names", "status": 503}))
         .await;
 
@@ -553,29 +561,69 @@ fn sale(id: i64) -> serde_json::Value {
     transaction(id, false, true)
 }
 
+/// Every purchase and sale stored of the character, as the trades page lists them.
+async fn trades_of(env: &PollEnv, character: i64) -> Vec<sekondo::trades::TradeRow> {
+    let account = env.account_of(character).await;
+    let mut rows = env
+        .stores
+        .trades
+        .list_trades(
+            account,
+            &[character],
+            time::macros::datetime!(2000-01-01 0:00 UTC),
+            time::macros::datetime!(2100-01-01 0:00 UTC),
+        )
+        .await
+        .unwrap();
+    rows.sort_by_key(|row| row.transaction_id);
+    rows
+}
+
 async fn sale_ids(env: &PollEnv, character: i64) -> Vec<i64> {
-    sqlx::query_scalar(
-        "SELECT transaction_id FROM sales WHERE character_id = $1 ORDER BY transaction_id",
-    )
-    .bind(character)
-    .fetch_all(&env.pool)
-    .await
-    .unwrap()
+    let rows = trades_of(env, character).await;
+    rows.iter()
+        .filter(|r| r.is_sale)
+        .map(|r| r.transaction_id)
+        .collect()
 }
 
 async fn purchase_ids(env: &PollEnv, character: i64) -> Vec<i64> {
-    sqlx::query_scalar(
-        "SELECT transaction_id FROM purchases WHERE character_id = $1 ORDER BY transaction_id",
-    )
-    .bind(character)
-    .fetch_all(&env.pool)
-    .await
-    .unwrap()
+    let rows = trades_of(env, character).await;
+    rows.iter()
+        .filter(|r| !r.is_sale)
+        .map(|r| r.transaction_id)
+        .collect()
 }
 
-#[sqlx::test]
-async fn a_first_poll_reads_back_over_several_requests_and_stores_every_purchase(pool: PgPool) {
-    let env = linked(pool).await;
+/// A personal sell order of 10 units that was seen before the purchases it is costed from.
+async fn remember_order_11(env: &PollEnv) {
+    let issued = time::macros::datetime!(2026-10-02 12:00 UTC);
+    let order = sekondo::esi::EsiOrder {
+        order_id: 11,
+        type_id: 34,
+        region_id: 10000002,
+        location_id: 60003760,
+        is_buy_order: false,
+        is_corporation: false,
+        price_cents: 20_000,
+        volume_remain: 10,
+        volume_total: 10,
+        min_volume: 1,
+        range: "station".to_owned(),
+        escrow_cents: None,
+        issued,
+        duration: 90,
+    };
+    env.stores
+        .orders
+        .replace_orders(ALICE, issued, &[order], issued + Duration::hours(1), None)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_first_poll_reads_back_over_several_requests_and_stores_every_purchase() {
+    let env = linked().await;
     set_transactions(&env, ALICE, (1..=5).map(purchase).collect(), Some(2)).await;
 
     let outcome = env.wealth.poll(ALICE, Kind::Transactions).await;
@@ -584,19 +632,25 @@ async fn a_first_poll_reads_back_over_several_requests_and_stores_every_purchase
     assert_eq!(purchase_ids(&env, ALICE).await, [1, 2, 3, 4, 5]);
     // [5, 4], [3, 2], [1], and the empty answer past the oldest.
     assert_eq!(env.stub.esi_calls("transactions"), 4);
-    let stored: (i64, i64, String, i64) = sqlx::query_as(
-        "SELECT type_id, quantity, unit_price::text, location_id FROM purchases \
-         WHERE transaction_id = 5",
-    )
-    .fetch_one(&env.pool)
-    .await
-    .unwrap();
-    assert_eq!(stored, (34, 10, "100.25".to_owned(), 60003760));
+    let stored = trades_of(&env, ALICE)
+        .await
+        .into_iter()
+        .find(|row| row.transaction_id == 5)
+        .map(|row| {
+            (
+                row.type_id,
+                row.quantity,
+                row.unit_price_cents,
+                row.location_id,
+            )
+        })
+        .unwrap();
+    assert_eq!(stored, (34, 10, 10_025, 60003760));
 }
 
-#[sqlx::test]
-async fn a_later_poll_stops_at_a_transaction_it_already_stored(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_later_poll_stops_at_a_transaction_it_already_stored() {
+    let env = linked().await;
     set_transactions(&env, ALICE, (1..=5).map(purchase).collect(), Some(2)).await;
     env.wealth.poll(ALICE, Kind::Transactions).await;
     let calls = env.stub.esi_calls("transactions");
@@ -610,9 +664,9 @@ async fn a_later_poll_stops_at_a_transaction_it_already_stored(pool: PgPool) {
     assert_eq!(purchase_ids(&env, ALICE).await, [1, 2, 3, 4, 5, 6]);
 }
 
-#[sqlx::test]
-async fn a_poll_reads_on_past_answers_without_a_stored_transaction(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_poll_reads_on_past_answers_without_a_stored_transaction() {
+    let env = linked().await;
     set_transactions(&env, ALICE, vec![purchase(1)], Some(2)).await;
     env.wealth.poll(ALICE, Kind::Transactions).await;
     let calls = env.stub.esi_calls("transactions");
@@ -626,9 +680,9 @@ async fn a_poll_reads_on_past_answers_without_a_stored_transaction(pool: PgPool)
     assert_eq!(purchase_ids(&env, ALICE).await, [1, 2, 3, 4]);
 }
 
-#[sqlx::test]
-async fn a_poll_asks_for_at_most_fifty_answers(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_poll_asks_for_at_most_fifty_answers() {
+    let env = linked().await;
     // Corporation transactions are never stored, so nothing ever tells the poll to stop.
     let others = (1..=60)
         .map(|id| transaction(id, id % 2 == 0, false))
@@ -641,37 +695,44 @@ async fn a_poll_asks_for_at_most_fifty_answers(pool: PgPool) {
     assert_eq!(env.stub.esi_calls("transactions"), 50);
 }
 
-#[sqlx::test]
-async fn a_first_poll_stores_the_personal_purchases_and_sales(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_first_poll_stores_the_personal_purchases_and_sales() {
+    let env = linked().await;
     set_transactions(&env, ALICE, vec![sale(1), purchase(2), sale(3)], None).await;
 
     env.wealth.poll(ALICE, Kind::Transactions).await;
 
     assert_eq!(purchase_ids(&env, ALICE).await, [2]);
     assert_eq!(sale_ids(&env, ALICE).await, [1, 3]);
-    let stored: (i64, i64, String, i64, OffsetDateTime) = sqlx::query_as(
-        "SELECT type_id, quantity, unit_price::text, location_id, sold_at FROM sales \
-         WHERE transaction_id = 3",
-    )
-    .fetch_one(&env.pool)
-    .await
-    .unwrap();
+    let stored = trades_of(&env, ALICE)
+        .await
+        .into_iter()
+        .find(|row| row.transaction_id == 3)
+        .map(|row| {
+            (
+                row.type_id,
+                row.quantity,
+                row.unit_price_cents,
+                row.location_id,
+                row.at,
+            )
+        })
+        .unwrap();
     assert_eq!(
         stored,
         (
             34,
             10,
-            "100.25".to_owned(),
+            10_025,
             60003760,
             time::macros::datetime!(2026-10-01 12:00 UTC)
         )
     );
 }
 
-#[sqlx::test]
-async fn corporation_transactions_are_not_stored(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn corporation_transactions_are_not_stored() {
+    let env = linked().await;
     set_transactions(
         &env,
         ALICE,
@@ -691,9 +752,9 @@ async fn corporation_transactions_are_not_stored(pool: PgPool) {
     assert_eq!(sale_ids(&env, ALICE).await, [4]);
 }
 
-#[sqlx::test]
-async fn a_later_poll_stops_at_a_sale_it_already_stored(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_later_poll_stops_at_a_sale_it_already_stored() {
+    let env = linked().await;
     set_transactions(&env, ALICE, (1..=5).map(sale).collect(), Some(2)).await;
     env.wealth.poll(ALICE, Kind::Transactions).await;
     let calls = env.stub.esi_calls("transactions");
@@ -707,34 +768,28 @@ async fn a_later_poll_stops_at_a_sale_it_already_stored(pool: PgPool) {
     assert_eq!(sale_ids(&env, ALICE).await, [1, 2, 3, 4, 5, 6]);
 }
 
-#[sqlx::test]
-async fn a_sale_is_not_a_purchase_lot(pool: PgPool) {
-    let env = linked(pool).await;
-    sqlx::query(
-        "INSERT INTO sell_order_history (order_id, character_id, type_id, first_issued, volume_total) \
-         VALUES (11, $1, 34, '2026-10-02T12:00:00Z', 10)",
-    )
-    .bind(ALICE)
-    .execute(&env.pool)
-    .await
-    .unwrap();
+#[tokio::test]
+async fn a_sale_is_not_a_purchase_lot() {
+    let env = linked().await;
+    remember_order_11(&env).await;
     set_transactions(&env, ALICE, vec![sale(1)], None).await;
 
     env.wealth.poll(ALICE, Kind::Transactions).await;
 
     assert_eq!(purchase_ids(&env, ALICE).await, Vec::<i64>::new());
     assert_eq!(sale_ids(&env, ALICE).await, [1]);
-    let covered: Option<i64> =
-        sqlx::query_scalar("SELECT covered_units FROM sell_order_costs WHERE order_id = 11")
-            .fetch_optional(&env.pool)
-            .await
-            .unwrap();
+    let covered = env
+        .orders_of(ALICE)
+        .await
+        .into_iter()
+        .find(|row| row.order_id == 11)
+        .and_then(|row| row.covered_units);
     assert_eq!(covered.unwrap_or(0), 0, "the sale gave the order no lot");
 }
 
-#[sqlx::test]
-async fn a_purchase_is_stored_once_however_often_it_is_returned(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_purchase_is_stored_once_however_often_it_is_returned() {
+    let env = linked().await;
     set_transactions(&env, ALICE, vec![purchase(1)], None).await;
     env.wealth.poll(ALICE, Kind::Transactions).await;
     env.clock.advance(Duration::hours(2));
@@ -744,9 +799,9 @@ async fn a_purchase_is_stored_once_however_often_it_is_returned(pool: PgPool) {
     assert_eq!(purchase_ids(&env, ALICE).await, [1]);
 }
 
-#[sqlx::test]
-async fn purchases_outlive_the_window_of_esi(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn purchases_outlive_the_window_of_esi() {
+    let env = linked().await;
     set_transactions(&env, ALICE, vec![purchase(1)], None).await;
     env.wealth.poll(ALICE, Kind::Transactions).await;
 
@@ -757,9 +812,9 @@ async fn purchases_outlive_the_window_of_esi(pool: PgPool) {
     assert_eq!(purchase_ids(&env, ALICE).await, [1]);
 }
 
-#[sqlx::test]
-async fn a_character_needing_relogin_is_skipped_and_keeps_its_purchases(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_character_needing_relogin_is_skipped_and_keeps_its_purchases() {
+    let env = linked().await;
     set_transactions(&env, ALICE, vec![purchase(1)], None).await;
     env.wealth.poll(ALICE, Kind::Transactions).await;
     env.repo.mark_needs_relogin(ALICE).await.unwrap();
@@ -772,9 +827,9 @@ async fn a_character_needing_relogin_is_skipped_and_keeps_its_purchases(pool: Pg
     assert_eq!(purchase_ids(&env, ALICE).await, [1]);
 }
 
-#[sqlx::test]
-async fn re_login_skip_and_failure_keep_the_sales(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn re_login_skip_and_failure_keep_the_sales() {
+    let env = linked().await;
     set_transactions(&env, ALICE, vec![sale(1)], None).await;
     env.wealth.poll(ALICE, Kind::Transactions).await;
     env.control(
@@ -797,9 +852,9 @@ async fn re_login_skip_and_failure_keep_the_sales(pool: PgPool) {
     assert_eq!(sale_ids(&env, ALICE).await, [1]);
 }
 
-#[sqlx::test]
-async fn a_failed_poll_keeps_the_purchases_records_the_failure_and_retries_later(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_failed_poll_keeps_the_purchases_records_the_failure_and_retries_later() {
+    let env = linked().await;
     set_transactions(&env, ALICE, vec![purchase(1)], None).await;
     env.wealth.poll(ALICE, Kind::Transactions).await;
     env.control(
@@ -828,9 +883,9 @@ async fn a_failed_poll_keeps_the_purchases_records_the_failure_and_retries_later
     );
 }
 
-#[sqlx::test]
-async fn transactions_are_polled_hourly_whatever_the_order_interval(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn transactions_are_polled_hourly_whatever_the_order_interval() {
+    let env = linked().await;
     let polled_at = env.clock.now();
 
     env.wealth.poll(ALICE, Kind::Transactions).await;
@@ -840,40 +895,31 @@ async fn transactions_are_polled_hourly_whatever_the_order_interval(pool: PgPool
     assert!(next >= polled_at + Duration::hours(1), "{next}");
 }
 
-#[sqlx::test]
-async fn a_purchase_stored_late_feeds_an_order_remembered_before_it(pool: PgPool) {
-    let env = linked(pool).await;
-    sqlx::query(
-        "INSERT INTO sell_order_history (order_id, character_id, type_id, first_issued, volume_total) \
-         VALUES (11, $1, 34, '2026-10-02T12:00:00Z', 10)",
-    )
-    .bind(ALICE)
-    .execute(&env.pool)
-    .await
-    .unwrap();
+#[tokio::test]
+async fn a_purchase_stored_late_feeds_an_order_remembered_before_it() {
+    let env = linked().await;
+    remember_order_11(&env).await;
     set_transactions(&env, ALICE, vec![purchase(1)], None).await;
 
     env.wealth.poll(ALICE, Kind::Transactions).await;
 
-    let cost: (i64, String) = sqlx::query_as(
-        "SELECT covered_units, cost::text FROM sell_order_costs WHERE order_id = 11",
-    )
-    .fetch_one(&env.pool)
-    .await
-    .unwrap();
-    assert_eq!(cost, (10, "1002.50".to_owned()));
+    let order = env
+        .orders_of(ALICE)
+        .await
+        .into_iter()
+        .find(|row| row.order_id == 11)
+        .unwrap();
+    let cost = (order.covered_units.unwrap(), order.cost_cents.unwrap());
+    assert_eq!(cost, (10, 100_250));
 }
 
-#[sqlx::test]
-async fn sales_are_filled_in_once_after_the_upgrade(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn sales_are_filled_in_once_after_the_upgrade() {
+    let env = linked().await;
     // Before the upgrade only the purchase was stored, and the poll had stopped at it.
     set_transactions(&env, ALICE, vec![purchase(5)], Some(2)).await;
     env.wealth.poll(ALICE, Kind::Transactions).await;
-    sqlx::query("UPDATE wealth_sync SET full_read = true WHERE kind = 'transactions'")
-        .execute(&env.pool)
-        .await
-        .unwrap();
+    env.stores.wealth.seed_full_read(ALICE, true).await.unwrap();
     let mut history: Vec<_> = (1..=4).map(sale).collect();
     history.push(purchase(5));
     set_transactions(&env, ALICE, history, Some(2)).await;
@@ -886,11 +932,7 @@ async fn sales_are_filled_in_once_after_the_upgrade(pool: PgPool) {
 
     assert_eq!(env.stub.esi_calls("transactions"), calls + 4);
     assert_eq!(sale_ids(&env, ALICE).await, [1, 2, 3, 4]);
-    let flag: bool =
-        sqlx::query_scalar("SELECT full_read FROM wealth_sync WHERE kind = 'transactions'")
-            .fetch_one(&env.pool)
-            .await
-            .unwrap();
+    let flag = env.stores.wealth.full_read(ALICE).await.unwrap();
     assert!(!flag, "the flag is cleared by the successful poll");
 
     // The second poll stops at the stored purchase again.
@@ -900,15 +942,12 @@ async fn sales_are_filled_in_once_after_the_upgrade(pool: PgPool) {
     assert_eq!(env.stub.esi_calls("transactions"), calls + 1);
 }
 
-#[sqlx::test]
-async fn a_failed_full_read_keeps_the_flag_for_the_retry(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_failed_full_read_keeps_the_flag_for_the_retry() {
+    let env = linked().await;
     set_transactions(&env, ALICE, vec![purchase(1)], None).await;
     env.wealth.poll(ALICE, Kind::Transactions).await;
-    sqlx::query("UPDATE wealth_sync SET full_read = true WHERE kind = 'transactions'")
-        .execute(&env.pool)
-        .await
-        .unwrap();
+    env.stores.wealth.seed_full_read(ALICE, true).await.unwrap();
     env.control(
         "esi-fail-next",
         json!({"route": "transactions", "status": 503}),
@@ -919,34 +958,34 @@ async fn a_failed_full_read_keeps_the_flag_for_the_retry(pool: PgPool) {
     let outcome = env.wealth.poll(ALICE, Kind::Transactions).await;
 
     assert_eq!(outcome, PollOutcome::Failed);
-    let flag: bool =
-        sqlx::query_scalar("SELECT full_read FROM wealth_sync WHERE kind = 'transactions'")
-            .fetch_one(&env.pool)
-            .await
-            .unwrap();
+    let flag = env.stores.wealth.full_read(ALICE).await.unwrap();
     assert!(flag);
 }
 
-#[sqlx::test]
-async fn a_new_sale_gets_its_cost_from_the_purchases_in_the_same_poll(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_new_sale_gets_its_cost_from_the_purchases_in_the_same_poll() {
+    let env = linked().await;
     let mut bought = purchase(1);
     bought["date"] = json!("2026-09-30T12:00:00Z");
     set_transactions(&env, ALICE, vec![bought, sale(2)], None).await;
 
     env.wealth.poll(ALICE, Kind::Transactions).await;
 
-    let cost: (i64, String) =
-        sqlx::query_as("SELECT covered_units, cost::text FROM sale_costs WHERE transaction_id = 2")
-            .fetch_one(&env.pool)
-            .await
-            .unwrap();
-    assert_eq!(cost, (10, "1002.50".to_owned()));
+    let sold = trades_of(&env, ALICE)
+        .await
+        .into_iter()
+        .find(|row| row.transaction_id == 2)
+        .unwrap();
+    let cost = (
+        sold.covered_units.unwrap(),
+        sold.cost_per_unit_cents.unwrap() * 10,
+    );
+    assert_eq!(cost, (10, 100_250));
 }
 
-#[sqlx::test]
-async fn the_names_of_the_traded_items_and_stations_are_resolved(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn the_names_of_the_traded_items_and_stations_are_resolved() {
+    let env = linked().await;
     set_transactions(&env, ALICE, vec![purchase(1), sale(2)], None).await;
 
     env.wealth.poll(ALICE, Kind::Transactions).await;

@@ -5,7 +5,6 @@ use std::collections::{HashMap, HashSet};
 use axum::{Router, extract::State, routing::get};
 use common::{AppBuilder, Browser, TestApp};
 use sekondo::{account, app::AppState};
-use sqlx::PgPool;
 use tower_sessions::Session;
 use url::Url;
 use uuid::Uuid;
@@ -22,12 +21,8 @@ fn routes() -> Router<AppState> {
     Router::new().route("/test/signin", get(signin))
 }
 
-async fn app(pool: PgPool) -> TestApp {
-    AppBuilder::new(pool)
-        .routes(routes())
-        .with_stub()
-        .spawn()
-        .await
+async fn app() -> TestApp {
+    AppBuilder::new().routes(routes()).with_stub().spawn().await
 }
 
 fn params(location: &str) -> (Url, HashMap<String, String>) {
@@ -39,11 +34,10 @@ fn params(location: &str) -> (Url, HashMap<String, String>) {
     (url, map)
 }
 
-#[sqlx::test]
-async fn login_redirects_to_the_sso_authorize_url_with_exactly_the_required_and_the_optional_scopes(
-    pool: PgPool,
-) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn login_redirects_to_the_sso_authorize_url_with_exactly_the_required_and_the_optional_scopes()
+ {
+    let app = app().await;
     let browser = app.browser();
     let res = browser.get(&app.url("/auth/login")).await;
     assert!(res.status().is_redirection());
@@ -76,9 +70,9 @@ async fn login_redirects_to_the_sso_authorize_url_with_exactly_the_required_and_
     assert!(q["state"].len() >= 32);
 }
 
-#[sqlx::test]
-async fn every_attempt_gets_a_fresh_state_and_challenge(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn every_attempt_gets_a_fresh_state_and_challenge() {
+    let app = app().await;
     let first = params(&Browser::location(
         &app.browser().get(&app.url("/auth/login")).await,
     ))
@@ -91,17 +85,17 @@ async fn every_attempt_gets_a_fresh_state_and_challenge(pool: PgPool) {
     assert_ne!(first["code_challenge"], second["code_challenge"]);
 }
 
-#[sqlx::test]
-async fn add_without_a_session_redirects_to_the_landing_page(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn add_without_a_session_redirects_to_the_landing_page() {
+    let app = app().await;
     let res = app.browser().get(&app.url("/auth/add")).await;
     assert!(res.status().is_redirection());
     assert_eq!(Browser::location(&res), "/");
 }
 
-#[sqlx::test]
-async fn add_when_signed_in_starts_an_sso_flow(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn add_when_signed_in_starts_an_sso_flow() {
+    let app = app().await;
     let browser = app.browser();
     browser.get(&app.url("/test/signin")).await;
     let res = browser.get(&app.url("/auth/add")).await;
@@ -111,9 +105,9 @@ async fn add_when_signed_in_starts_an_sso_flow(pool: PgPool) {
     assert_eq!(q["scope"].split(' ').count(), 7);
 }
 
-#[sqlx::test]
-async fn login_when_already_signed_in_goes_to_the_dashboard(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn login_when_already_signed_in_goes_to_the_dashboard() {
+    let app = app().await;
     let browser = app.browser();
     browser.get(&app.url("/test/signin")).await;
     let res = browser.get(&app.url("/auth/login")).await;

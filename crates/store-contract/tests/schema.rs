@@ -1,4 +1,10 @@
-use sqlx::PgPool;
+//! The schema and the migrations, against a freshly migrated PostgreSQL with TimescaleDB. Run with
+//! `cargo test -p store-contract --features postgres`.
+#![cfg(feature = "postgres")]
+
+use sqlx::{PgPool, migrate::Migrator};
+
+static MIGRATOR: Migrator = sqlx::migrate!("../sekondo/migrations");
 
 async fn count(pool: &PgPool, table: &str) -> i64 {
     sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
@@ -21,7 +27,7 @@ async fn insert_character(pool: &PgPool, account: uuid::Uuid, id: i64) {
         .unwrap();
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn deleting_an_account_removes_its_characters_and_tokens(pool: PgPool) {
     let account: uuid::Uuid =
         sqlx::query_scalar("INSERT INTO accounts DEFAULT VALUES RETURNING id")
@@ -47,7 +53,7 @@ async fn deleting_an_account_removes_its_characters_and_tokens(pool: PgPool) {
     assert_eq!(count(&pool, "character_tokens").await, 1);
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn deleting_a_character_removes_only_its_tokens(pool: PgPool) {
     let account: uuid::Uuid =
         sqlx::query_scalar("INSERT INTO accounts DEFAULT VALUES RETURNING id")
@@ -67,7 +73,7 @@ async fn deleting_a_character_removes_only_its_tokens(pool: PgPool) {
     assert_eq!(count(&pool, "accounts").await, 1);
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn a_character_belongs_to_exactly_one_account(pool: PgPool) {
     let a: uuid::Uuid = sqlx::query_scalar("INSERT INTO accounts DEFAULT VALUES RETURNING id")
         .fetch_one(&pool)
@@ -92,7 +98,7 @@ async fn insert_account(pool: &PgPool) -> uuid::Uuid {
         .unwrap()
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn order_snapshots_is_a_hypertable(pool: PgPool) {
     let hypertables: Vec<String> =
         sqlx::query_scalar("SELECT hypertable_name::text FROM timescaledb_information.hypertables")
@@ -114,7 +120,7 @@ async fn order_snapshots_is_a_hypertable(pool: PgPool) {
     assert_eq!(interval_secs, 7.0 * 86_400.0);
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn deleting_a_character_removes_its_order_data(pool: PgPool) {
     let account = insert_account(&pool).await;
     insert_character(&pool, account, 1).await;
@@ -165,7 +171,7 @@ async fn deleting_a_character_removes_its_order_data(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn names_can_hold_an_unresolvable_structure(pool: PgPool) {
     sqlx::query(
         "INSERT INTO names (id, category, name, resolved_at, retry_after) \
@@ -177,7 +183,7 @@ async fn names_can_hold_an_unresolvable_structure(pool: PgPool) {
     assert_eq!(count(&pool, "names").await, 1);
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn order_poll_totals_is_a_hypertable_with_thirty_day_chunks(pool: PgPool) {
     let hypertables: Vec<String> =
         sqlx::query_scalar("SELECT hypertable_name::text FROM timescaledb_information.hypertables")
@@ -199,7 +205,7 @@ async fn order_poll_totals_is_a_hypertable_with_thirty_day_chunks(pool: PgPool) 
     assert_eq!(interval_secs, 30.0 * 86_400.0);
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn deleting_a_character_removes_its_poll_totals(pool: PgPool) {
     let account = insert_account(&pool).await;
     insert_character(&pool, account, 1).await;
@@ -229,7 +235,7 @@ async fn deleting_a_character_removes_its_poll_totals(pool: PgPool) {
 
 /// Everything in the migration after the `-- backfill` marker.
 fn backfill_statement() -> &'static str {
-    let migration = include_str!("../migrations/20261016000004_order_poll_totals.sql");
+    let migration = include_str!("../../sekondo/migrations/20261016000004_order_poll_totals.sql");
     migration
         .split_once("-- backfill\n")
         .expect("a `-- backfill` marker in the migration")
@@ -279,7 +285,7 @@ async fn totals_at(pool: &PgPool, character: i64, polled_at: &str) -> Totals {
     .unwrap()
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn the_backfill_sums_each_snapshot_poll_into_one_entry(pool: PgPool) {
     let account = insert_account(&pool).await;
     insert_character(&pool, account, 1).await;
@@ -341,7 +347,7 @@ async fn the_backfill_sums_each_snapshot_poll_into_one_entry(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn market_orders_hold_one_public_order_per_id_and_no_account_data(pool: PgPool) {
     let columns: Vec<String> = sqlx::query_scalar(
         "SELECT column_name FROM information_schema.columns \
@@ -374,7 +380,7 @@ async fn market_orders_hold_one_public_order_per_id_and_no_account_data(pool: Pg
     );
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn market_orders_are_indexed_by_region_and_item(pool: PgPool) {
     let indexes: Vec<String> =
         sqlx::query_scalar("SELECT indexdef FROM pg_indexes WHERE tablename = 'market_orders'")
@@ -387,7 +393,7 @@ async fn market_orders_are_indexed_by_region_and_item(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn market_sync_has_one_row_per_region_and_item(pool: PgPool) {
     let insert = "INSERT INTO market_sync (region_id, type_id, next_poll_at) \
                   VALUES (10000002, 34, now())";
@@ -420,7 +426,7 @@ async fn market_sync_has_one_row_per_region_and_item(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn wallet_balances_and_inventory_values_are_hypertables_with_thirty_day_chunks(pool: PgPool) {
     let hypertables: Vec<String> =
         sqlx::query_scalar("SELECT hypertable_name::text FROM timescaledb_information.hypertables")
@@ -444,7 +450,7 @@ async fn wallet_balances_and_inventory_values_are_hypertables_with_thirty_day_ch
     }
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn the_wealth_tables_exist_and_the_price_tables_have_no_owner(pool: PgPool) {
     for table in [
         "wallet_balances",
@@ -467,7 +473,7 @@ async fn the_wealth_tables_exist_and_the_price_tables_have_no_owner(pool: PgPool
     assert!(owned.is_empty(), "{owned:?}");
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn wealth_sync_only_knows_wallet_and_assets(pool: PgPool) {
     let account = insert_account(&pool).await;
     insert_character(&pool, account, 1).await;
@@ -494,7 +500,7 @@ async fn wealth_sync_only_knows_wallet_and_assets(pool: PgPool) {
     assert!(twice.is_err(), "one row per character and kind");
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn the_fee_tables_exist_and_the_public_ones_have_no_owner(pool: PgPool) {
     for table in [
         "character_skills",
@@ -516,11 +522,11 @@ async fn the_fee_tables_exist_and_the_public_ones_have_no_owner(pool: PgPool) {
     assert!(owned.is_empty(), "{owned:?}");
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn the_faction_table_is_loaded_from_the_checked_in_csv(pool: PgPool) {
     let csv = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/data/npc_corporation_factions.csv"
+        "/../sekondo/data/npc_corporation_factions.csv"
     ))
     .unwrap();
     let mut expected: Vec<(i64, i64)> = csv
@@ -545,7 +551,7 @@ async fn the_faction_table_is_loaded_from_the_checked_in_csv(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn fee_sync_only_knows_skills_standings_and_location(pool: PgPool) {
     let account = insert_account(&pool).await;
     insert_character(&pool, account, 1).await;
@@ -572,7 +578,7 @@ async fn fee_sync_only_knows_skills_standings_and_location(pool: PgPool) {
     assert!(twice.is_err(), "one row per character and kind");
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn a_character_has_one_location_that_is_a_station_or_a_structure(pool: PgPool) {
     let account = insert_account(&pool).await;
     insert_character(&pool, account, 1).await;
@@ -596,7 +602,7 @@ async fn a_character_has_one_location_that_is_a_station_or_a_structure(pool: PgP
     assert!(insert("station").await.is_err(), "one row per character");
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn standings_keep_every_digit_and_only_know_npc_corporations_and_factions(pool: PgPool) {
     let account = insert_account(&pool).await;
     insert_character(&pool, account, 1).await;
@@ -621,7 +627,7 @@ async fn standings_keep_every_digit_and_only_know_npc_corporations_and_factions(
     assert!(agent.is_err());
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn deleting_a_character_removes_its_fee_data_and_keeps_the_public_tables(pool: PgPool) {
     let account = insert_account(&pool).await;
     insert_character(&pool, account, 1).await;
@@ -655,7 +661,7 @@ async fn deleting_a_character_removes_its_fee_data_and_keeps_the_public_tables(p
 
 /// Everything in the migration after the `-- backfill` marker.
 fn history_backfill_statement() -> &'static str {
-    include_str!("../migrations/20261017000005_trade_margin.sql")
+    include_str!("../../sekondo/migrations/20261017000005_trade_margin.sql")
         .split_once("-- backfill\n")
         .expect("a `-- backfill` marker in the migration")
         .1
@@ -685,7 +691,7 @@ async fn insert_sell_snapshot(
     .unwrap();
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn the_history_backfill_keeps_the_earliest_issued_and_skips_corp_and_buy_orders(
     pool: PgPool,
 ) {
@@ -741,7 +747,7 @@ async fn the_history_backfill_keeps_the_earliest_issued_and_skips_corp_and_buy_o
     assert_eq!(rows, [(1, 1, 34, "2026-10-01 10:00:00+00".to_owned(), 20)]);
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn purchases_and_remembered_orders_are_keyed_and_indexed_for_the_allocation(pool: PgPool) {
     let account = insert_account(&pool).await;
     insert_character(&pool, account, 1).await;
@@ -779,7 +785,7 @@ async fn purchases_and_remembered_orders_are_keyed_and_indexed_for_the_allocatio
     );
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn a_transactions_sync_row_is_allowed_and_an_unknown_kind_is_not(pool: PgPool) {
     let account = insert_account(&pool).await;
     insert_character(&pool, account, 1).await;
@@ -795,13 +801,13 @@ async fn a_transactions_sync_row_is_allowed_and_an_unknown_kind_is_not(pool: PgP
 
 /// Everything in the trades migration after the `-- full read` marker.
 fn full_read_statement() -> &'static str {
-    include_str!("../migrations/20261019000001_trades.sql")
+    include_str!("../../sekondo/migrations/20261019000001_trades.sql")
         .split_once("-- full read\n")
         .expect("a `-- full read` marker in the migration")
         .1
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn the_full_read_flag_is_set_for_existing_transactions_rows_only(pool: PgPool) {
     let account = insert_account(&pool).await;
     insert_character(&pool, account, 1).await;
@@ -844,7 +850,7 @@ async fn the_full_read_flag_is_set_for_existing_transactions_rows_only(pool: PgP
     );
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn sales_and_their_costs_are_keyed_indexed_and_cascade(pool: PgPool) {
     let account = insert_account(&pool).await;
     insert_character(&pool, account, 1).await;
@@ -898,7 +904,7 @@ async fn columns_of(pool: &PgPool, table: &str) -> Vec<String> {
     .unwrap()
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn station_snapshots_is_a_hypertable_compressed_after_a_day_and_kept_thirty(pool: PgPool) {
     let interval_secs: f64 = sqlx::query_scalar(
         "SELECT extract(epoch FROM d.time_interval)::float8 FROM timescaledb_information.dimensions d \
@@ -937,7 +943,7 @@ async fn station_snapshots_is_a_hypertable_compressed_after_a_day_and_kept_thirt
     assert_eq!(after("policy_retention").await, 30.0 * 86_400.0);
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn the_station_tables_hold_the_book_the_snapshot_and_the_sync_state(pool: PgPool) {
     assert_eq!(
         columns_of(&pool, "station_orders").await,
@@ -1006,7 +1012,7 @@ async fn the_station_tables_hold_the_book_the_snapshot_and_the_sync_state(pool: 
     assert_eq!(failures, 0);
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn market_history_and_its_sync_state_are_keyed_per_item_and_day(pool: PgPool) {
     assert_eq!(
         columns_of(&pool, "market_history").await,
@@ -1038,7 +1044,7 @@ async fn market_history_and_its_sync_state_are_keyed_per_item_and_day(pool: PgPo
     );
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn item_stats_are_one_row_per_item_and_hold_no_account_data(pool: PgPool) {
     let columns = columns_of(&pool, "station_item_stats").await;
     for column in [
@@ -1085,7 +1091,7 @@ async fn item_stats_are_one_row_per_item_and_hold_no_account_data(pool: PgPool) 
     );
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn opportunity_settings_default_and_go_with_the_account(pool: PgPool) {
     let account = insert_account(&pool).await;
     let other = insert_account(&pool).await;
@@ -1192,7 +1198,7 @@ async fn roll_up(pool: &PgPool) {
     }
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn an_hour_keeps_minimum_maximum_and_average_apart(pool: PgPool) {
     for (at, sell, taken) in [
         ("2026-09-01 10:05:00+00", 110.0, 1),
@@ -1218,7 +1224,7 @@ async fn an_hour_keeps_minimum_maximum_and_average_apart(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn a_day_averages_over_its_snapshots_not_over_its_hourly_averages(pool: PgPool) {
     // Hour 0 has three snapshots at 100, hour 1 has one at 200: the day's average is 125, not 150.
     for at in [
@@ -1261,7 +1267,7 @@ async fn fill_hours(pool: &PgPool, day: &str, hours: std::ops::Range<u32>) {
     }
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn a_covered_day_takes_low_and_high_from_its_own_data(pool: PgPool) {
     fill_hours(&pool, "2026-09-01", 0..24).await;
     history_day(&pool, 34, "2026-09-01", 111.5, 500.0, 50.0, 7777).await;
@@ -1289,7 +1295,7 @@ async fn a_covered_day_takes_low_and_high_from_its_own_data(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn a_gap_in_own_data_falls_back_to_the_history_and_says_so(pool: PgPool) {
     fill_hours(&pool, "2026-09-01", 0..5).await;
     history_day(&pool, 34, "2026-09-01", 111.5, 500.0, 50.0, 7777).await;
@@ -1317,7 +1323,7 @@ async fn a_gap_in_own_data_falls_back_to_the_history_and_says_so(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn a_day_of_exactly_twenty_hours_counts_as_covered_and_nineteen_does_not(pool: PgPool) {
     fill_hours(&pool, "2026-09-01", 0..20).await;
     fill_hours(&pool, "2026-09-02", 0..19).await;
@@ -1342,7 +1348,7 @@ async fn a_day_of_exactly_twenty_hours_counts_as_covered_and_nineteen_does_not(p
     );
 }
 
-#[sqlx::test]
+#[sqlx::test(migrator = "MIGRATOR")]
 async fn the_rollups_only_read_completed_periods_and_have_policies(pool: PgPool) {
     for view in ["station_hourly", "station_daily"] {
         let materialized_only: bool = sqlx::query_scalar(

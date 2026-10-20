@@ -1,12 +1,11 @@
 mod common;
 
 use common::{AppBuilder, Browser, TestApp};
-use sqlx::PgPool;
 
 const ALICE: i64 = 90000001;
 
-async fn app(pool: PgPool) -> TestApp {
-    AppBuilder::new(pool).with_stub().spawn().await
+async fn app() -> TestApp {
+    AppBuilder::new().with_stub().spawn().await
 }
 
 async fn signed_in(app: &TestApp) -> Browser {
@@ -39,9 +38,9 @@ fn current_links(html: &str) -> Vec<String> {
         .collect()
 }
 
-#[sqlx::test]
-async fn a_signed_in_user_requesting_the_root_is_sent_to_the_dashboard(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn a_signed_in_user_requesting_the_root_is_sent_to_the_dashboard() {
+    let app = app().await;
     let browser = signed_in(&app).await;
 
     let res = browser.get(&app.url("/")).await;
@@ -50,11 +49,9 @@ async fn a_signed_in_user_requesting_the_root_is_sent_to_the_dashboard(pool: PgP
     assert_eq!(Browser::location(&res), "/dashboard");
 }
 
-#[sqlx::test]
-async fn completing_the_sign_in_lands_on_the_dashboard_showing_the_totals_of_the_orders(
-    pool: PgPool,
-) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn completing_the_sign_in_lands_on_the_dashboard_showing_the_totals_of_the_orders() {
+    let app = app().await;
     let browser = app.browser();
     let mut res = browser.sso_round_trip(&app, "/auth/login", ALICE).await;
     app.state.poller.poll_character(ALICE).await;
@@ -79,9 +76,9 @@ async fn completing_the_sign_in_lands_on_the_dashboard_showing_the_totals_of_the
     );
 }
 
-#[sqlx::test]
-async fn an_unauthenticated_request_for_the_dashboard_goes_to_the_landing_page(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn an_unauthenticated_request_for_the_dashboard_goes_to_the_landing_page() {
+    let app = app().await;
 
     let res = app.browser().get(&app.url("/dashboard")).await;
 
@@ -98,9 +95,9 @@ const NAV_LINKS: [&str; 6] = [
     "/opportunities/expansion",
 ];
 
-#[sqlx::test]
-async fn every_signed_in_page_has_the_navigation_with_its_own_entry_marked(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn every_signed_in_page_has_the_navigation_with_its_own_entry_marked() {
+    let app = app().await;
     let browser = signed_in(&app).await;
 
     for (path, current) in [
@@ -124,9 +121,9 @@ async fn every_signed_in_page_has_the_navigation_with_its_own_entry_marked(pool:
     }
 }
 
-#[sqlx::test]
-async fn the_landing_page_has_no_signed_in_navigation(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn the_landing_page_has_no_signed_in_navigation() {
+    let app = app().await;
 
     let html = page(&app, &app.browser(), "/").await;
 
@@ -149,9 +146,9 @@ fn unescaped(html: &str) -> String {
     html.replace("&#38;", "&").replace("&amp;", "&")
 }
 
-#[sqlx::test]
-async fn navigation_links_carry_a_narrowed_selection(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn navigation_links_carry_a_narrowed_selection() {
+    let app = app().await;
     let browser = two_characters(&app).await;
 
     for path in [
@@ -171,9 +168,9 @@ async fn navigation_links_carry_a_narrowed_selection(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
-async fn navigation_links_stay_plain_without_a_filter_or_with_every_character(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn navigation_links_stay_plain_without_a_filter_or_with_every_character() {
+    let app = app().await;
     let browser = two_characters(&app).await;
 
     for path in [
@@ -196,9 +193,9 @@ fn sidebar(html: &str) -> &str {
     aside.split_once("</aside>").expect("unclosed sidebar").0
 }
 
-#[sqlx::test]
-async fn every_entry_has_an_icon_a_label_and_keeps_its_name_when_the_label_is_hidden(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn every_entry_has_an_icon_a_label_and_keeps_its_name_when_the_label_is_hidden() {
+    let app = app().await;
     let browser = signed_in(&app).await;
 
     for path in [
@@ -245,9 +242,9 @@ async fn every_entry_has_an_icon_a_label_and_keeps_its_name_when_the_label_is_hi
     }
 }
 
-#[sqlx::test]
-async fn the_entries_are_ordered_and_sign_out_comes_last(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn the_entries_are_ordered_and_sign_out_comes_last() {
+    let app = app().await;
     let browser = signed_in(&app).await;
 
     let html = page(&app, &browser, "/dashboard?range=30d&page=2&per_page=100").await;

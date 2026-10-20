@@ -1,10 +1,8 @@
 mod common;
 
-use sqlx::PgPool;
-
-#[sqlx::test]
-async fn security_headers_are_present_on_every_kind_of_response(pool: PgPool) {
-    let app = common::spawn(pool).await;
+#[tokio::test]
+async fn security_headers_are_present_on_every_kind_of_response() {
+    let app = common::spawn().await;
     // An endpoint, a page, a static file and an unknown path.
     for path in ["/healthz", "/", "/static/htmx.min.js", "/does-not-exist"] {
         let res = app.client.get(app.url(path)).send().await.unwrap();
@@ -43,9 +41,9 @@ async fn security_headers_are_present_on_every_kind_of_response(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
-async fn landing_page_has_login_button_and_no_inline_script(pool: PgPool) {
-    let app = common::spawn(pool).await;
+#[tokio::test]
+async fn landing_page_has_login_button_and_no_inline_script() {
+    let app = common::spawn().await;
     let body = app
         .client
         .get(app.url("/"))

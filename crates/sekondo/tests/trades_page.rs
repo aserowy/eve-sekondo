@@ -1,15 +1,14 @@
 mod common;
 
 use common::{AppBuilder, Browser, TestApp, kpi};
-use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 
 const ALICE: i64 = 90000001;
 const BOB: i64 = 90000002;
 const JITA: i64 = 60003760;
 
-async fn app(pool: PgPool) -> TestApp {
-    AppBuilder::new(pool).with_stub().spawn().await
+async fn app() -> TestApp {
+    AppBuilder::new().with_stub().spawn().await
 }
 
 async fn signed_in(app: &TestApp) -> Browser {
@@ -24,73 +23,93 @@ async fn get(app: &TestApp, browser: &Browser, path: &str) -> String {
     res.text().await.unwrap()
 }
 
-async fn name(pool: &PgPool, id: i64, name: &str) {
-    sqlx::query("INSERT INTO names (id, category, name, resolved_at) VALUES ($1, 'x', $2, now())")
-        .bind(id)
-        .bind(name)
-        .execute(pool)
+async fn name(app: &TestApp, id: i64, name: &str) {
+    app.stores
+        .market
+        .store_names(
+            &[sekondo::store::NameRow {
+                id,
+                category: "x".to_owned(),
+                name: Some(name.to_owned()),
+            }],
+            OffsetDateTime::now_utc(),
+            None,
+        )
         .await
         .unwrap();
 }
 
+/// ISK as written in the figures, in cents.
+fn cents(isk: &str) -> i64 {
+    (isk.parse::<f64>().unwrap() * 100.0).round() as i64
+}
+
 async fn trade(
-    pool: &PgPool,
+    app: &TestApp,
     table: &str,
     (id, character): (i64, i64),
     (quantity, price): (i64, &str),
     at: OffsetDateTime,
 ) {
-    let date = if table == "sales" {
-        "sold_at"
-    } else {
-        "bought_at"
-    };
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "INSERT INTO {table} (transaction_id, character_id, type_id, location_id, quantity, \
-         unit_price, {date}) VALUES ($1, $2, 34, {JITA}, $3, $4::numeric, $5)"
-    )))
-    .bind(id)
-    .bind(character)
-    .bind(quantity)
-    .bind(price)
-    .bind(at)
-    .execute(pool)
-    .await
-    .unwrap();
+    app.stores
+        .trades
+        .seed_trade(
+            character,
+            &sekondo::store::TradeSeed {
+                transaction_id: id,
+                is_sale: table == "sales",
+                type_id: 34,
+                location_id: JITA,
+                quantity,
+                unit_price_cents: cents(price),
+                at,
+            },
+        )
+        .await
+        .unwrap();
 }
 
-async fn cost(pool: &PgPool, sale: i64, covered: i64, cost: &str) {
-    sqlx::query(
-        "INSERT INTO sale_costs (transaction_id, covered_units, cost) VALUES ($1, $2, $3::numeric)",
-    )
-    .bind(sale)
-    .bind(covered)
-    .bind(cost)
-    .execute(pool)
-    .await
-    .unwrap();
+async fn cost(app: &TestApp, sale: i64, covered: i64, cost: &str) {
+    app.stores
+        .trades
+        .seed_sale_cost(sale, covered, cents(cost))
+        .await
+        .unwrap();
 }
 
 /// Alice has Accounting 5 and Broker Relations 5 with standings that give 3.375% and 1.41% in
 /// Jita 4-4.
-async fn alice_with_fees(pool: &PgPool) {
-    for statement in [
-        "INSERT INTO fee_sync (character_id, kind, next_poll_at, last_success_at) \
-         VALUES (90000001, 'skills', now(), now()), (90000001, 'standings', now(), now())",
-        "INSERT INTO character_skills (character_id, skill_id, active_level) \
-         VALUES (90000001, 16622, 5), (90000001, 3446, 5)",
-        "INSERT INTO character_standings (character_id, from_id, from_type, standing) \
-         VALUES (90000001, 500001, 'faction', 2.0), (90000001, 1000035, 'npc_corp', 1.5)",
-        "INSERT INTO station_owners (station_id, owner_id, resolved_at) \
-         VALUES (60003760, 1000035, now())",
+async fn alice_with_fees(app: &TestApp) {
+    let now = OffsetDateTime::now_utc();
+    let fees = &app.stores.fees;
+    for kind in [
+        sekondo::fee_poller::Kind::Skills,
+        sekondo::fee_poller::Kind::Standings,
     ] {
-        sqlx::query(statement).execute(pool).await.unwrap();
+        fees.seed_fee_success(ALICE, kind, now).await.unwrap();
     }
+    for skill in [16622, 3446] {
+        fees.seed_skill(ALICE, skill, 5).await.unwrap();
+    }
+    for (from_id, from_type, standing) in [(500001, "faction", "2.0"), (1000035, "npc_corp", "1.5")]
+    {
+        fees.seed_standing(
+            ALICE,
+            &sekondo::store::StandingInput {
+                from_id,
+                from_type: from_type.to_owned(),
+                standing: standing.to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    fees.insert_station_owner(JITA, 1000035, now).await.unwrap();
 }
 
-#[sqlx::test]
-async fn unauthenticated_requests_are_redirected_to_the_landing_page(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn unauthenticated_requests_are_redirected_to_the_landing_page() {
+    let app = app().await;
     for path in ["/trades", "/trades/table", "/trades/freshness"] {
         let res = app.browser().get(&app.url(path)).await;
         assert!(res.status().is_redirection(), "{path}");
@@ -98,11 +117,9 @@ async fn unauthenticated_requests_are_redirected_to_the_landing_page(pool: PgPoo
     }
 }
 
-#[sqlx::test]
-async fn the_page_has_its_title_and_the_character_filter_and_the_range_in_the_filter_section(
-    pool: PgPool,
-) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn the_page_has_its_title_and_the_character_filter_and_the_range_in_the_filter_section() {
+    let app = app().await;
     let browser = signed_in(&app).await;
 
     let html = get(&app, &browser, "/trades").await;
@@ -143,13 +160,13 @@ async fn the_page_has_its_title_and_the_character_filter_and_the_range_in_the_fi
     assert_eq!(current, ["Trades"]);
 }
 
-#[sqlx::test]
-async fn the_default_and_an_unknown_range_are_seven_days(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn the_default_and_an_unknown_range_are_seven_days() {
+    let app = app().await;
     let browser = signed_in(&app).await;
     let now = OffsetDateTime::now_utc();
     trade(
-        &pool,
+        &app,
         "sales",
         (1, ALICE),
         (10, "150"),
@@ -157,7 +174,7 @@ async fn the_default_and_an_unknown_range_are_seven_days(pool: PgPool) {
     )
     .await;
     trade(
-        &pool,
+        &app,
         "sales",
         (2, ALICE),
         (10, "150"),
@@ -180,9 +197,9 @@ async fn the_default_and_an_unknown_range_are_seven_days(pool: PgPool) {
     assert!(month.contains(r#"data-transaction="2""#));
 }
 
-#[sqlx::test]
-async fn a_range_switch_keeps_the_selection_in_every_link(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn a_range_switch_keeps_the_selection_in_every_link() {
+    let app = app().await;
     let browser = signed_in(&app).await;
     browser.sso_round_trip(&app, "/auth/add", BOB).await;
 
@@ -197,15 +214,15 @@ async fn a_range_switch_keeps_the_selection_in_every_link(pool: PgPool) {
     )));
 }
 
-#[sqlx::test]
-async fn foreign_characters_in_chars_are_ignored(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn foreign_characters_in_chars_are_ignored() {
+    let app = app().await;
     let browser = signed_in(&app).await;
     let stranger = app.browser();
     stranger.sso_round_trip(&app, "/auth/login", 90000003).await;
     let now = OffsetDateTime::now_utc();
     trade(
-        &pool,
+        &app,
         "sales",
         (1, ALICE),
         (10, "150"),
@@ -213,7 +230,7 @@ async fn foreign_characters_in_chars_are_ignored(pool: PgPool) {
     )
     .await;
     trade(
-        &pool,
+        &app,
         "sales",
         (2, 90000003),
         (10, "150"),
@@ -227,21 +244,16 @@ async fn foreign_characters_in_chars_are_ignored(pool: PgPool) {
     assert!(!html.contains(r#"data-transaction="2""#));
 }
 
-#[sqlx::test]
-async fn a_sale_row_reads_with_its_value_and_margin(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn a_sale_row_reads_with_its_value_and_margin() {
+    let app = app().await;
     let browser = signed_in(&app).await;
-    alice_with_fees(&pool).await;
-    name(&pool, 34, "Tritanium").await;
-    name(
-        &pool,
-        JITA,
-        "Jita IV - Moon 4 - Caldari Navy Assembly Plant",
-    )
-    .await;
+    alice_with_fees(&app).await;
+    name(&app, 34, "Tritanium").await;
+    name(&app, JITA, "Jita IV - Moon 4 - Caldari Navy Assembly Plant").await;
     let sold_at = OffsetDateTime::now_utc() - Duration::hours(3);
-    trade(&pool, "sales", (1, ALICE), (10, "150.00"), sold_at).await;
-    cost(&pool, 1, 10, "1000.00").await;
+    trade(&app, "sales", (1, ALICE), (10, "150.00"), sold_at).await;
+    cost(&app, 1, 10, "1000.00").await;
 
     let html = get(&app, &browser, "/trades/table").await;
 
@@ -266,12 +278,12 @@ async fn a_sale_row_reads_with_its_value_and_margin(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn a_purchase_row_has_an_empty_margin(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn a_purchase_row_has_an_empty_margin() {
+    let app = app().await;
     let browser = signed_in(&app).await;
     let at = OffsetDateTime::now_utc() - Duration::hours(3);
-    trade(&pool, "purchases", (1, ALICE), (1000, "2500000.00"), at).await;
+    trade(&app, "purchases", (1, ALICE), (1000, "2500000.00"), at).await;
 
     let html = get(&app, &browser, "/trades/table").await;
 
@@ -288,14 +300,14 @@ async fn a_purchase_row_has_an_empty_margin(pool: PgPool) {
     assert!(!margin.contains('\u{2014}'), "{margin}");
 }
 
-#[sqlx::test]
-async fn a_sale_with_a_partly_known_cost_reads_a_dash_and_says_how_much_is_known(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn a_sale_with_a_partly_known_cost_reads_a_dash_and_says_how_much_is_known() {
+    let app = app().await;
     let browser = signed_in(&app).await;
-    alice_with_fees(&pool).await;
+    alice_with_fees(&app).await;
     let at = OffsetDateTime::now_utc() - Duration::hours(3);
-    trade(&pool, "sales", (1, ALICE), (10, "150.00"), at).await;
-    cost(&pool, 1, 4, "400.00").await;
+    trade(&app, "sales", (1, ALICE), (10, "150.00"), at).await;
+    cost(&app, 1, 4, "400.00").await;
 
     let html = get(&app, &browser, "/trades/table").await;
 
@@ -306,14 +318,14 @@ async fn a_sale_with_a_partly_known_cost_reads_a_dash_and_says_how_much_is_known
     assert!(html.contains('\u{2014}'));
 }
 
-#[sqlx::test]
-async fn a_negative_margin_is_in_the_error_style(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn a_negative_margin_is_in_the_error_style() {
+    let app = app().await;
     let browser = signed_in(&app).await;
-    alice_with_fees(&pool).await;
+    alice_with_fees(&app).await;
     let at = OffsetDateTime::now_utc() - Duration::hours(3);
-    trade(&pool, "sales", (1, ALICE), (10, "90.00"), at).await;
-    cost(&pool, 1, 10, "1000.00").await;
+    trade(&app, "sales", (1, ALICE), (10, "90.00"), at).await;
+    cost(&app, 1, 10, "1000.00").await;
 
     let html = get(&app, &browser, "/trades/table").await;
 
@@ -323,14 +335,14 @@ async fn a_negative_margin_is_in_the_error_style(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn the_kpi_cards_sum_the_range_and_count_the_sales_left_out(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn the_kpi_cards_sum_the_range_and_count_the_sales_left_out() {
+    let app = app().await;
     let browser = signed_in(&app).await;
-    alice_with_fees(&pool).await;
+    alice_with_fees(&app).await;
     let now = OffsetDateTime::now_utc();
     trade(
-        &pool,
+        &app,
         "purchases",
         (1, ALICE),
         (10, "100.00"),
@@ -338,23 +350,23 @@ async fn the_kpi_cards_sum_the_range_and_count_the_sales_left_out(pool: PgPool) 
     )
     .await;
     trade(
-        &pool,
+        &app,
         "sales",
         (2, ALICE),
         (10, "150.00"),
         now - Duration::hours(8),
     )
     .await;
-    cost(&pool, 2, 10, "1000.00").await;
+    cost(&app, 2, 10, "1000.00").await;
     trade(
-        &pool,
+        &app,
         "sales",
         (3, ALICE),
         (4, "150.00"),
         now - Duration::hours(7),
     )
     .await;
-    cost(&pool, 3, 0, "0.00").await;
+    cost(&app, 3, 0, "0.00").await;
 
     let html = get(&app, &browser, "/trades/table").await;
 
@@ -376,61 +388,52 @@ async fn the_kpi_cards_sum_the_range_and_count_the_sales_left_out(pool: PgPool) 
     assert!(!html.contains("<tfoot"), "the table has no totals row");
 }
 
-#[sqlx::test]
-async fn the_margin_card_has_no_note_when_every_sale_has_a_margin_and_is_red_when_negative(
-    pool: PgPool,
-) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn the_margin_card_has_no_note_when_every_sale_has_a_margin_and_is_red_when_negative() {
+    let app = app().await;
     let browser = signed_in(&app).await;
-    alice_with_fees(&pool).await;
+    alice_with_fees(&app).await;
     let now = OffsetDateTime::now_utc();
     trade(
-        &pool,
+        &app,
         "sales",
         (2, ALICE),
         (10, "150.00"),
         now - Duration::hours(8),
     )
     .await;
-    cost(&pool, 2, 10, "1000.00").await;
+    cost(&app, 2, 10, "1000.00").await;
 
     let html = get(&app, &browser, "/trades/table").await;
     assert!(!kpi(&html, "kpi-margin").title.contains("left out"));
 
     trade(
-        &pool,
+        &app,
         "sales",
         (3, ALICE),
         (10, "90.00"),
         now - Duration::hours(7),
     )
     .await;
-    cost(&pool, 3, 10, "1000.00").await;
+    cost(&app, 3, 10, "1000.00").await;
     let html = get(&app, &browser, "/trades/table").await;
     // 428.23 - 143.07
     let margin = kpi(&html, "kpi-margin");
     assert_eq!(margin.value, "285.16");
 
-    sqlx::query("DELETE FROM sale_costs WHERE transaction_id = 2")
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM sales WHERE transaction_id = 2")
-        .execute(&pool)
-        .await
-        .unwrap();
+    app.stores.trades.delete_sale(2).await.unwrap();
     let html = get(&app, &browser, "/trades/table").await;
     let margin = kpi(&html, "kpi-margin");
     assert_eq!(margin.value, "-143.07");
     assert!(margin.class.starts_with("kpi error"), "{}", margin.class);
 }
 
-#[sqlx::test]
-async fn with_only_a_purchase_the_margin_card_reads_zero(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn with_only_a_purchase_the_margin_card_reads_zero() {
+    let app = app().await;
     let browser = signed_in(&app).await;
     let at = OffsetDateTime::now_utc() - Duration::hours(3);
-    trade(&pool, "purchases", (1, ALICE), (10, "100.00"), at).await;
+    trade(&app, "purchases", (1, ALICE), (10, "100.00"), at).await;
 
     let html = get(&app, &browser, "/trades/table").await;
 
@@ -440,11 +443,11 @@ async fn with_only_a_purchase_the_margin_card_reads_zero(pool: PgPool) {
 // ---- pagination ----
 
 /// Alice sold `count` times, one per minute, the newest has transaction ID `count`.
-async fn many_sales(pool: &PgPool, count: i64) {
+async fn many_sales(app: &TestApp, count: i64) {
     let now = OffsetDateTime::now_utc();
     for id in 1..=count {
         trade(
-            pool,
+            app,
             "sales",
             (id, ALICE),
             (1, "100.00"),
@@ -461,11 +464,11 @@ fn transaction_ids(html: &str) -> Vec<i64> {
         .collect()
 }
 
-#[sqlx::test]
-async fn the_totals_span_every_page_while_the_table_shows_fifty(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn the_totals_span_every_page_while_the_table_shows_fifty() {
+    let app = app().await;
     let browser = signed_in(&app).await;
-    many_sales(&pool, 80).await;
+    many_sales(&app, 80).await;
 
     let html = get(&app, &browser, "/trades/table").await;
 
@@ -475,11 +478,11 @@ async fn the_totals_span_every_page_while_the_table_shows_fifty(pool: PgPool) {
     assert!(html.contains("Page 1 of 2"));
 }
 
-#[sqlx::test]
-async fn page_three_of_120_shows_the_101st_to_the_120th_newest_trade(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn page_three_of_120_shows_the_101st_to_the_120th_newest_trade() {
+    let app = app().await;
     let browser = signed_in(&app).await;
-    many_sales(&pool, 120).await;
+    many_sales(&app, 120).await;
 
     let html = get(&app, &browser, "/trades/table?page=3&range=30d").await;
 
@@ -490,11 +493,11 @@ async fn page_three_of_120_shows_the_101st_to_the_120th_newest_trade(pool: PgPoo
     assert_eq!(transaction_ids(&first)[0], 120);
 }
 
-#[sqlx::test]
-async fn a_page_past_the_end_is_the_last_page_and_the_range_links_start_on_page_one(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn a_page_past_the_end_is_the_last_page_and_the_range_links_start_on_page_one() {
+    let app = app().await;
     let browser = signed_in(&app).await;
-    many_sales(&pool, 60).await;
+    many_sales(&app, 60).await;
 
     let html = get(&app, &browser, "/trades/table?page=9&per_page=25").await;
 
@@ -512,11 +515,11 @@ async fn a_page_past_the_end_is_the_last_page_and_the_range_links_start_on_page_
     );
 }
 
-#[sqlx::test]
-async fn the_live_refresh_url_of_the_page_carries_the_page_and_the_range(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn the_live_refresh_url_of_the_page_carries_the_page_and_the_range() {
+    let app = app().await;
     let browser = signed_in(&app).await;
-    many_sales(&pool, 120).await;
+    many_sales(&app, 120).await;
 
     let html = get(&app, &browser, "/trades?range=30d&page=2")
         .await
@@ -532,49 +535,54 @@ async fn the_live_refresh_url_of_the_page_carries_the_page_and_the_range(pool: P
 
 // ---- freshness ----
 
-async fn sync(pool: &PgPool, character: i64, last: Option<OffsetDateTime>) {
-    sqlx::query(
-        "INSERT INTO wealth_sync (character_id, kind, next_poll_at, last_success_at) \
-         VALUES ($1, 'transactions', now(), $2)",
-    )
-    .bind(character)
-    .bind(last)
-    .execute(pool)
-    .await
-    .unwrap();
+async fn sync(app: &TestApp, character: i64, last: Option<OffsetDateTime>) {
+    let wealth = &app.stores.wealth;
+    let next = OffsetDateTime::now_utc();
+    match last {
+        Some(at) => {
+            wealth
+                .store_transactions(character, at, &[], next, None)
+                .await
+                .unwrap();
+        }
+        None => wealth
+            .insert_schedule(
+                sekondo::wealth_poller::Kind::Transactions,
+                &[character],
+                &[next],
+            )
+            .await
+            .unwrap(),
+    }
 }
 
-#[sqlx::test]
-async fn the_freshness_shows_the_transactions_times_and_stale_after_two_hours(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn the_freshness_shows_the_transactions_times_and_stale_after_two_hours() {
+    let app = app().await;
     let browser = signed_in(&app).await;
     let now = OffsetDateTime::now_utc();
     let fresh = now - Duration::minutes(5);
-    sync(&pool, ALICE, Some(fresh)).await;
+    sync(&app, ALICE, Some(fresh)).await;
 
     let html = get(&app, &browser, "/trades/freshness").await;
     assert!(html.contains("Alice Alpha"));
     assert!(html.contains(&sekondo::format::eve_time(fresh)));
     assert!(!html.contains("Stale"), "{html}");
 
-    sqlx::query("UPDATE wealth_sync SET last_success_at = $1")
-        .bind(now - Duration::hours(3))
-        .execute(&pool)
-        .await
-        .unwrap();
+    sync(&app, ALICE, Some(now - Duration::hours(3))).await;
     let html = get(&app, &browser, "/trades/freshness").await;
     assert!(html.contains("Stale"));
     assert!(!html.contains("warnings"), "no warning count: {html}");
 }
 
-#[sqlx::test]
-async fn a_character_needing_relogin_is_stale_and_links_to_login_and_a_new_one_waits(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn a_character_needing_relogin_is_stale_and_links_to_login_and_a_new_one_waits() {
+    let app = app().await;
     let browser = signed_in(&app).await;
     let html = get(&app, &browser, "/trades/freshness").await;
     assert!(html.contains("Waiting for first update"));
 
-    sync(&pool, ALICE, Some(OffsetDateTime::now_utc())).await;
+    sync(&app, ALICE, Some(OffsetDateTime::now_utc())).await;
     app.state.repo.mark_needs_relogin(ALICE).await.unwrap();
     let html = get(&app, &browser, "/trades/freshness").await;
 
@@ -582,9 +590,9 @@ async fn a_character_needing_relogin_is_stale_and_links_to_login_and_a_new_one_w
     assert!(html.contains(r#"href="/auth/add""#) && html.contains("Log in again"));
 }
 
-#[sqlx::test]
-async fn the_freshness_does_not_depend_on_the_range_and_covers_only_the_selection(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn the_freshness_does_not_depend_on_the_range_and_covers_only_the_selection() {
+    let app = app().await;
     let browser = signed_in(&app).await;
     browser.sso_round_trip(&app, "/auth/add", BOB).await;
 

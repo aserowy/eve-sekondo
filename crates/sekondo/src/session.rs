@@ -1,6 +1,6 @@
-//! Cookie sessions stored in Postgres, with an idle timeout and an absolute lifetime.
+//! Cookie sessions, with an idle timeout and an absolute lifetime.
 
-use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::{
@@ -8,7 +8,6 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 use tower_sessions::{
     ExpiredDeletion, Expiry, Session, SessionManagerLayer, SessionStore,
@@ -17,7 +16,7 @@ use tower_sessions::{
     session_store,
 };
 
-use crate::app::AppState;
+use crate::{app::AppState, store::SessionData};
 
 pub const COOKIE_NAME: &str = "__Host-sekondo";
 pub const IDLE_TIMEOUT: Duration = Duration::days(7);
@@ -26,108 +25,53 @@ pub const ABSOLUTE_LIFETIME: Duration = Duration::days(30);
 const STARTED_AT: &str = "started_at";
 const LAST_SEEN: &str = "last_seen";
 
-#[derive(Clone, Debug)]
-pub struct PgSessionStore {
-    pool: PgPool,
+/// The tower-sessions store over whichever session data the app was built with.
+#[derive(Clone)]
+pub struct AppSessionStore {
+    data: Arc<dyn SessionData>,
 }
 
-impl PgSessionStore {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+impl AppSessionStore {
+    pub fn new(data: Arc<dyn SessionData>) -> Self {
+        Self { data }
     }
 }
 
-fn backend(e: sqlx::Error) -> session_store::Error {
-    session_store::Error::Backend(e.to_string())
+impl std::fmt::Debug for AppSessionStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppSessionStore").finish_non_exhaustive()
+    }
 }
 
 #[async_trait]
-impl SessionStore for PgSessionStore {
+impl SessionStore for AppSessionStore {
     async fn create(&self, record: &mut Record) -> session_store::Result<()> {
-        let mut tx = self.pool.begin().await.map_err(backend)?;
-        loop {
-            let exists: bool =
-                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE id = $1)")
-                    .bind(record.id.to_string())
-                    .fetch_one(&mut *tx)
-                    .await
-                    .map_err(backend)?;
-            if !exists {
-                break;
-            }
-            record.id = Id::default();
-        }
-        upsert(&mut *tx, record).await?;
-        tx.commit().await.map_err(backend)
+        self.data.create(record).await
     }
 
     async fn save(&self, record: &Record) -> session_store::Result<()> {
-        upsert(&self.pool, record).await
+        self.data.save(record).await
     }
 
     async fn load(&self, id: &Id) -> session_store::Result<Option<Record>> {
-        let row: Option<(serde_json::Value, OffsetDateTime)> = sqlx::query_as(
-            "SELECT data, expiry_date FROM sessions WHERE id = $1 AND expiry_date > now()",
-        )
-        .bind(id.to_string())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(backend)?;
-        row.map(|(data, expiry_date)| {
-            let data: HashMap<String, serde_json::Value> = serde_json::from_value(data)
-                .map_err(|e| session_store::Error::Decode(e.to_string()))?;
-            Ok(Record {
-                id: *id,
-                data,
-                expiry_date,
-            })
-        })
-        .transpose()
+        self.data.load(id).await
     }
 
     async fn delete(&self, id: &Id) -> session_store::Result<()> {
-        sqlx::query("DELETE FROM sessions WHERE id = $1")
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await
-            .map_err(backend)?;
-        Ok(())
+        self.data.delete(id).await
     }
 }
 
 #[async_trait]
-impl ExpiredDeletion for PgSessionStore {
+impl ExpiredDeletion for AppSessionStore {
     async fn delete_expired(&self) -> session_store::Result<()> {
-        sqlx::query("DELETE FROM sessions WHERE expiry_date < now()")
-            .execute(&self.pool)
-            .await
-            .map_err(backend)?;
-        Ok(())
+        self.data.delete_expired().await
     }
-}
-
-async fn upsert<'e>(
-    executor: impl sqlx::PgExecutor<'e>,
-    record: &Record,
-) -> session_store::Result<()> {
-    let data = serde_json::to_value(&record.data)
-        .map_err(|e| session_store::Error::Encode(e.to_string()))?;
-    sqlx::query(
-        "INSERT INTO sessions (id, data, expiry_date) VALUES ($1, $2, $3)
-         ON CONFLICT (id) DO UPDATE SET data = excluded.data, expiry_date = excluded.expiry_date",
-    )
-    .bind(record.id.to_string())
-    .bind(data)
-    .bind(record.expiry_date)
-    .execute(executor)
-    .await
-    .map_err(backend)?;
-    Ok(())
 }
 
 /// `__Host-` makes browsers enforce Secure, Path=/ and no Domain. SameSite=Lax (not Strict) so the
 /// cookie is sent on the SSO callback, a top-level cross-site GET.
-pub fn layer(store: PgSessionStore) -> SessionManagerLayer<PgSessionStore> {
+pub fn layer(store: AppSessionStore) -> SessionManagerLayer<AppSessionStore> {
     SessionManagerLayer::new(store)
         .with_name(COOKIE_NAME)
         .with_secure(true)
@@ -157,7 +101,7 @@ fn lifetime_exceeded(started_at: i64, last_seen: i64, now: i64) -> bool {
 
 /// Whether the stored session still exists, is signed in and is within its lifetime. A read-only
 /// check for long-lived connections: unlike [`enforce_lifetime`] it records no activity.
-pub async fn is_active(store: &PgSessionStore, id: &Id, now: OffsetDateTime) -> bool {
+pub async fn is_active(store: &AppSessionStore, id: &Id, now: OffsetDateTime) -> bool {
     let Ok(Some(record)) = store.load(id).await else {
         return false;
     };

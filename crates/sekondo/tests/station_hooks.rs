@@ -5,7 +5,6 @@ mod common;
 
 use common::{AppBuilder, Browser, TestApp};
 use serde_json::{Value, json};
-use sqlx::PgPool;
 
 const ALICE: i64 = 90000001;
 
@@ -47,11 +46,24 @@ async fn hook(
     browser.send(request).await
 }
 
-async fn count(pool: &PgPool, table: &str) -> i64 {
-    sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
-        .fetch_one(pool)
+const FORGE: i64 = 10000002;
+const JITA_44: i64 = 60003760;
+
+async fn book_size(app: &TestApp) -> usize {
+    app.stores.station.book(FORGE, JITA_44).await.unwrap().len()
+}
+
+async fn snapshots(app: &TestApp) -> Vec<sekondo::store::SnapshotRecord> {
+    app.stores.station.snapshots(FORGE, JITA_44).await.unwrap()
+}
+
+async fn history_days(app: &TestApp) -> usize {
+    app.stores
+        .station
+        .history_table(FORGE, 34)
         .await
         .unwrap()
+        .len()
 }
 
 fn order(id: i64, buy: bool, price: f64) -> Value {
@@ -63,9 +75,9 @@ fn order(id: i64, buy: bool, price: f64) -> Value {
     })
 }
 
-#[sqlx::test]
-async fn the_book_hook_runs_one_refresh(pool: PgPool) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+#[tokio::test]
+async fn the_book_hook_runs_one_refresh() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let (browser, token) = signed_in(&app).await;
     app.stub_control(
         "market-orders",
@@ -77,25 +89,30 @@ async fn the_book_hook_runs_one_refresh(pool: PgPool) {
 
     assert_eq!(res.status(), 200);
     assert_eq!(res.text().await.unwrap(), "updated");
-    assert_eq!(count(&pool, "station_orders").await, 2);
-    assert_eq!(count(&pool, "station_snapshots").await, 1);
+    assert_eq!(book_size(&app).await, 2);
+    assert_eq!(snapshots(&app).await.len(), 1);
 }
 
-#[sqlx::test]
-async fn the_history_hook_runs_until_nothing_is_due(pool: PgPool) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+#[tokio::test]
+async fn the_history_hook_runs_until_nothing_is_due() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let (browser, token) = signed_in(&app).await;
-    for (id, buy) in [(1, true), (2, false)] {
-        sqlx::query(
-            "INSERT INTO station_orders (region_id, station_id, order_id, type_id, is_buy_order, price, volume_remain)
-             VALUES (10000002, 60003760, $1, 34, $2, 10, 5)",
-        )
-        .bind(id)
-        .bind(buy)
-        .execute(&pool)
+    let now = app.state.clock.now();
+    let book: Vec<_> = [(1, true), (2, false)]
+        .into_iter()
+        .map(|(order_id, is_buy_order)| sekondo::store::StationOrder {
+            order_id,
+            type_id: 34,
+            is_buy_order,
+            price_cents: 1_000,
+            volume_remain: 5,
+        })
+        .collect();
+    app.stores
+        .station
+        .replace_station_book(FORGE, JITA_44, now, &book, now, None)
         .await
         .unwrap();
-    }
 
     let res = hook(&app, &browser, &token, "station-history", None).await;
 
@@ -104,9 +121,9 @@ async fn the_history_hook_runs_until_nothing_is_due(pool: PgPool) {
     assert_eq!(app.stub().esi_calls("history"), 1);
 }
 
-#[sqlx::test]
-async fn the_seed_hook_inserts_snapshots_and_history_for_past_times(pool: PgPool) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+#[tokio::test]
+async fn the_seed_hook_inserts_snapshots_and_history_for_past_times() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let (browser, token) = signed_in(&app).await;
 
     let res = hook(
@@ -130,26 +147,25 @@ async fn the_seed_hook_inserts_snapshots_and_history_for_past_times(pool: PgPool
 
     assert_eq!(res.status(), 200);
     assert_eq!(res.text().await.unwrap(), "2 snapshots, 2 history days");
-    assert_eq!(count(&pool, "station_snapshots").await, 2);
-    assert_eq!(count(&pool, "market_history").await, 2);
-    let (best_sell, taken): (String, i64) = sqlx::query_as(
-        "SELECT best_sell::text, buy_taken + sell_taken FROM station_snapshots ORDER BY recorded_at DESC LIMIT 1",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!((best_sell.as_str(), taken), ("130.00", 10));
+    let seeded = snapshots(&app).await;
+    assert_eq!(seeded.len(), 2);
+    assert_eq!(history_days(&app).await, 2);
+    let newest = seeded.last().unwrap();
+    assert_eq!(
+        (
+            newest.best_sell.as_str(),
+            newest.buy_taken + newest.sell_taken
+        ),
+        ("130.00", 10)
+    );
     // Defaults fill what the body leaves out.
-    let near: i64 = sqlx::query_scalar("SELECT min(buy_near_units) FROM station_snapshots")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let near = seeded.iter().map(|s| s.buy_near_units).min().unwrap();
     assert!(near > 0);
 }
 
-#[sqlx::test]
-async fn the_rollup_hook_materializes_both_aggregates(pool: PgPool) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+#[tokio::test]
+async fn the_rollup_hook_materializes_both_aggregates() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let (browser, token) = signed_in(&app).await;
     hook(
         &app,
@@ -161,11 +177,19 @@ async fn the_rollup_hook_materializes_both_aggregates(pool: PgPool) {
         ]})),
     )
     .await;
-    assert_eq!(count(&pool, "station_hourly").await, 0, "not rolled up yet");
+    let hourly = |app: &TestApp| {
+        let station = app.stores.station.clone();
+        async move { station.hourly_buckets(FORGE, JITA_44).await.unwrap().len() }
+    };
+    let daily = |app: &TestApp| {
+        let station = app.stores.station.clone();
+        async move { station.daily_buckets(FORGE, JITA_44).await.unwrap().len() }
+    };
+    assert_eq!(hourly(&app).await, 0, "not rolled up yet");
 
     let res = hook(&app, &browser, &token, "station-rollups", None).await;
 
     assert_eq!(res.status(), 200);
-    assert_eq!(count(&pool, "station_hourly").await, 1);
-    assert_eq!(count(&pool, "station_daily").await, 1);
+    assert_eq!(hourly(&app).await, 1);
+    assert_eq!(daily(&app).await, 1);
 }

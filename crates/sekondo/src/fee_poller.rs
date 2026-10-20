@@ -4,12 +4,11 @@
 //! wealth polls, and the other way round.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{Arc, Mutex},
 };
 
 use futures_util::StreamExt;
-use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -27,6 +26,7 @@ use crate::{
         BACKOFF_START, CLAIM_LEASE, PollOutcome, SCHEDULER_TICK, is_foreign_key_violation, jitter,
         spread,
     },
+    store::{AccountStore, FeeStore, MarketStore, StandingInput, StoreError, Stores},
     tokens::{TokenError, TokenService},
 };
 
@@ -61,20 +61,22 @@ impl Kind {
     }
 
     /// The scope a character must have been granted to be polled for this kind, if any.
-    fn optional_scope(self) -> Option<&'static str> {
+    pub(crate) fn optional_scope(self) -> Option<&'static str> {
         match self {
             Kind::Location => Some(LOCATION_SCOPE),
             Kind::Skills | Kind::Standings => None,
         }
     }
 
-    fn parse(raw: &str) -> Option<Self> {
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|kind| kind.as_str() == raw)
     }
 }
 
 pub struct FeePoller {
-    pool: PgPool,
+    fees: Arc<dyn FeeStore>,
+    accounts: Arc<dyn AccountStore>,
+    market: Arc<dyn MarketStore>,
     tokens: Arc<TokenService>,
     esi: Arc<EsiClient>,
     events: Arc<dyn EventBus>,
@@ -86,14 +88,16 @@ pub struct FeePoller {
 
 impl FeePoller {
     pub fn new(
-        pool: PgPool,
+        stores: &Stores,
         tokens: Arc<TokenService>,
         esi: Arc<EsiClient>,
         events: Arc<dyn EventBus>,
         clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
-            pool,
+            fees: stores.fees.clone(),
+            accounts: stores.accounts.clone(),
+            market: stores.market.clone(),
             tokens,
             esi,
             events,
@@ -108,14 +112,7 @@ impl FeePoller {
     pub async fn poll(&self, character_id: i64, kind: Kind) -> PollOutcome {
         let now = self.clock.now();
         if let Some(scope) = kind.optional_scope() {
-            match sqlx::query_scalar::<_, bool>(
-                "SELECT $2 = ANY(scopes) FROM characters WHERE character_id = $1",
-            )
-            .bind(character_id)
-            .bind(scope)
-            .fetch_optional(&self.pool)
-            .await
-            {
+            match self.fees.has_scope(character_id, scope).await {
                 Ok(Some(true)) => {}
                 Ok(Some(false)) => return PollOutcome::Skipped,
                 Ok(None) => return PollOutcome::Dropped,
@@ -130,15 +127,7 @@ impl FeePoller {
             Ok(token) => token,
             Err(TokenError::NeedsRelogin) => {
                 // Make it due again, so it is polled right after it logged in.
-                let _ = sqlx::query(
-                    "UPDATE fee_sync SET next_poll_at = LEAST(next_poll_at, $3)
-                     WHERE character_id = $1 AND kind = $2",
-                )
-                .bind(character_id)
-                .bind(kind.as_str())
-                .bind(now)
-                .execute(&self.pool)
-                .await;
+                let _ = self.fees.make_due(character_id, kind, now).await;
                 return PollOutcome::NeedsRelogin;
             }
             Err(TokenError::UnknownCharacter) => return PollOutcome::Dropped,
@@ -162,7 +151,7 @@ impl FeePoller {
                         let id = match docked {
                             EsiLocation::Station(id) | EsiLocation::Structure(id) => id,
                         };
-                        names::resolve(&self.pool, &self.esi, &token, [id], now).await;
+                        names::resolve(&*self.market, &self.esi, &token, [id], now).await;
                     }
                     self.store_location(character_id, now, &response).await
                 }
@@ -186,14 +175,8 @@ impl FeePoller {
     }
 
     async fn publish_for_character(&self, character_id: i64) {
-        match sqlx::query_scalar::<_, Uuid>(
-            "SELECT account_id FROM characters WHERE character_id = $1",
-        )
-        .bind(character_id)
-        .fetch_optional(&self.pool)
-        .await
-        {
-            Ok(Some(account)) => self.publish(account),
+        match self.accounts.find_character(character_id).await {
+            Ok(Some(character)) => self.publish(character.account_id),
             Ok(None) => {}
             Err(e) => tracing::error!(character_id, "cannot look up the account to signal: {e}"),
         }
@@ -222,7 +205,7 @@ impl FeePoller {
         character_id: i64,
         kind: Kind,
         now: OffsetDateTime,
-        error: sqlx::Error,
+        error: StoreError,
     ) -> PollOutcome {
         if is_foreign_key_violation(&error) {
             tracing::info!(character_id, "character was unlinked during its poll");
@@ -232,6 +215,14 @@ impl FeePoller {
             .await
     }
 
+    /// `max(polled_at + interval, ESI's Expires)`, pushed back by a little jitter.
+    fn next_poll_at(
+        polled_at: OffsetDateTime,
+        expires_at: Option<OffsetDateTime>,
+    ) -> OffsetDateTime {
+        (polled_at + FEE_INTERVAL).max(expires_at.unwrap_or(polled_at)) + jitter(FEE_INTERVAL)
+    }
+
     /// Replaces the stored skills with the two that matter, in one transaction with the sync
     /// state. Answers whether what the page shows changed.
     async fn store_skills(
@@ -239,7 +230,7 @@ impl FeePoller {
         character_id: i64,
         polled_at: OffsetDateTime,
         response: &EsiResponse<EsiSkills>,
-    ) -> Result<bool, sqlx::Error> {
+    ) -> Result<bool, StoreError> {
         let (ids, levels): (Vec<i64>, Vec<i16>) = response
             .body
             .skills
@@ -247,32 +238,16 @@ impl FeePoller {
             .filter(|s| matches!(s.skill_id, ACCOUNTING | BROKER_RELATIONS))
             .map(|s| (s.skill_id, s.active_skill_level))
             .unzip();
-        let mut tx = self.pool.begin().await?;
-        let before = fees::FeeSnapshot::of(&mut tx, &[character_id]).await?;
-        sqlx::query("DELETE FROM character_skills WHERE character_id = $1")
-            .bind(character_id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(
-            "INSERT INTO character_skills (character_id, skill_id, active_level)
-             SELECT $1, s, l FROM unnest($2::bigint[], $3::smallint[]) AS u(s, l)",
-        )
-        .bind(character_id)
-        .bind(&ids)
-        .bind(&levels)
-        .execute(&mut *tx)
-        .await?;
-        self.record_success(
-            &mut tx,
-            character_id,
-            Kind::Skills,
-            polled_at,
-            response.expires_at,
-        )
-        .await?;
-        let after = fees::FeeSnapshot::of(&mut tx, &[character_id]).await?;
-        tx.commit().await?;
-        Ok(before != after)
+        self.fees
+            .store_skills(
+                character_id,
+                &ids,
+                &levels,
+                polled_at,
+                Self::next_poll_at(polled_at, response.expires_at),
+                response.expires_at,
+            )
+            .await
     }
 
     /// Replaces the stored standings with the NPC corporation and faction ones (agents are
@@ -283,44 +258,26 @@ impl FeePoller {
         character_id: i64,
         polled_at: OffsetDateTime,
         response: &EsiResponse<Vec<EsiStanding>>,
-    ) -> Result<bool, sqlx::Error> {
-        let kept: Vec<&EsiStanding> = response
+    ) -> Result<bool, StoreError> {
+        let kept: Vec<StandingInput> = response
             .body
             .iter()
             .filter(|s| matches!(s.from_type.as_str(), "npc_corp" | "faction"))
+            .map(|s| StandingInput {
+                from_id: s.from_id,
+                from_type: s.from_type.clone(),
+                standing: s.standing.clone(),
+            })
             .collect();
-        let from_id: Vec<i64> = kept.iter().map(|s| s.from_id).collect();
-        let from_type: Vec<&str> = kept.iter().map(|s| s.from_type.as_str()).collect();
-        let standing: Vec<&str> = kept.iter().map(|s| s.standing.as_str()).collect();
-        let mut tx = self.pool.begin().await?;
-        let before = fees::FeeSnapshot::of(&mut tx, &[character_id]).await?;
-        sqlx::query("DELETE FROM character_standings WHERE character_id = $1")
-            .bind(character_id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(
-            "INSERT INTO character_standings (character_id, from_id, from_type, standing)
-             SELECT $1, i, t, s::numeric
-             FROM unnest($2::bigint[], $3::text[], $4::text[]) AS u(i, t, s)
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(character_id)
-        .bind(&from_id)
-        .bind(&from_type)
-        .bind(&standing)
-        .execute(&mut *tx)
-        .await?;
-        self.record_success(
-            &mut tx,
-            character_id,
-            Kind::Standings,
-            polled_at,
-            response.expires_at,
-        )
-        .await?;
-        let after = fees::FeeSnapshot::of(&mut tx, &[character_id]).await?;
-        tx.commit().await?;
-        Ok(before != after)
+        self.fees
+            .store_standings(
+                character_id,
+                &kept,
+                polled_at,
+                Self::next_poll_at(polled_at, response.expires_at),
+                response.expires_at,
+            )
+            .await
     }
 
     /// Remembers the station or structure the character is docked in. In open space the last
@@ -330,73 +287,20 @@ impl FeePoller {
         character_id: i64,
         polled_at: OffsetDateTime,
         response: &EsiResponse<EsiCharacterLocation>,
-    ) -> Result<bool, sqlx::Error> {
-        let mut tx = self.pool.begin().await?;
-        let before = fees::FeeSnapshot::of(&mut tx, &[character_id]).await?;
-        if let Some(docked) = response.body.docked() {
-            let (location_id, kind) = match docked {
-                EsiLocation::Station(id) => (id, "station"),
-                EsiLocation::Structure(id) => (id, "structure"),
-            };
-            sqlx::query(
-                "INSERT INTO character_locations (character_id, location_id, kind, updated_at)
-                 VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (character_id) DO UPDATE SET
-                     location_id = excluded.location_id,
-                     kind = excluded.kind,
-                     updated_at = excluded.updated_at",
+    ) -> Result<bool, StoreError> {
+        let docked = response.body.docked().map(|docked| match docked {
+            EsiLocation::Station(id) => (id, "station"),
+            EsiLocation::Structure(id) => (id, "structure"),
+        });
+        self.fees
+            .store_location(
+                character_id,
+                docked,
+                polled_at,
+                Self::next_poll_at(polled_at, response.expires_at),
+                response.expires_at,
             )
-            .bind(character_id)
-            .bind(location_id)
-            .bind(kind)
-            .bind(polled_at)
-            .execute(&mut *tx)
-            .await?;
-        }
-        self.record_success(
-            &mut tx,
-            character_id,
-            Kind::Location,
-            polled_at,
-            response.expires_at,
-        )
-        .await?;
-        let after = fees::FeeSnapshot::of(&mut tx, &[character_id]).await?;
-        tx.commit().await?;
-        Ok(before != after)
-    }
-
-    async fn record_success(
-        &self,
-        tx: &mut sqlx::PgConnection,
-        character_id: i64,
-        kind: Kind,
-        polled_at: OffsetDateTime,
-        expires_at: Option<OffsetDateTime>,
-    ) -> Result<(), sqlx::Error> {
-        let next_poll_at =
-            (polled_at + FEE_INTERVAL).max(expires_at.unwrap_or(polled_at)) + jitter(FEE_INTERVAL);
-        sqlx::query(
-            "INSERT INTO fee_sync
-                 (character_id, kind, next_poll_at, last_success_at, last_attempt_at, last_error,
-                  esi_expires_at, failures)
-             VALUES ($1, $2, $3, $4, $4, NULL, $5, 0)
-             ON CONFLICT (character_id, kind) DO UPDATE SET
-                 next_poll_at = excluded.next_poll_at,
-                 last_success_at = excluded.last_success_at,
-                 last_attempt_at = excluded.last_attempt_at,
-                 last_error = NULL,
-                 esi_expires_at = excluded.esi_expires_at,
-                 failures = 0",
-        )
-        .bind(character_id)
-        .bind(kind.as_str())
-        .bind(next_poll_at)
-        .bind(polled_at)
-        .bind(expires_at)
-        .execute(tx)
-        .await?;
-        Ok(())
+            .await
     }
 
     async fn record_failure(
@@ -411,26 +315,10 @@ impl FeePoller {
             kind = kind.as_str(),
             "fee poll failed: {reason}"
         );
-        let result = sqlx::query(
-            "INSERT INTO fee_sync (character_id, kind, next_poll_at, last_attempt_at, last_error, failures)
-             VALUES ($1, $2, $3, $4, $5, 1)
-             ON CONFLICT (character_id, kind) DO UPDATE SET
-                 next_poll_at = $4 + LEAST(
-                     $6::float8 * power(2, LEAST(fee_sync.failures, 20)) * interval '1 second',
-                     $7::float8 * interval '1 second'),
-                 last_attempt_at = $4,
-                 last_error = $5,
-                 failures = fee_sync.failures + 1",
-        )
-        .bind(character_id)
-        .bind(kind.as_str())
-        .bind(now + BACKOFF_START)
-        .bind(now)
-        .bind(reason)
-        .bind(BACKOFF_START.as_seconds_f64())
-        .bind(FEE_INTERVAL.as_seconds_f64())
-        .execute(&self.pool)
-        .await;
+        let result = self
+            .fees
+            .record_failure(character_id, kind, now, reason, BACKOFF_START, FEE_INTERVAL)
+            .await;
         match result {
             Ok(_) => PollOutcome::Failed,
             Err(e) if is_foreign_key_violation(&e) => PollOutcome::Dropped,
@@ -448,19 +336,10 @@ impl FeePoller {
         now: OffsetDateTime,
         until: OffsetDateTime,
     ) -> PollOutcome {
-        let result = sqlx::query(
-            "INSERT INTO fee_sync (character_id, kind, next_poll_at, last_attempt_at)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT (character_id, kind) DO UPDATE SET
-                 next_poll_at = excluded.next_poll_at,
-                 last_attempt_at = excluded.last_attempt_at",
-        )
-        .bind(character_id)
-        .bind(kind.as_str())
-        .bind(until + jitter(FEE_INTERVAL))
-        .bind(now)
-        .execute(&self.pool)
-        .await;
+        let result = self
+            .fees
+            .record_deferral(character_id, kind, now, until + jitter(FEE_INTERVAL))
+            .await;
         match result {
             Err(e) if is_foreign_key_violation(&e) => PollOutcome::Dropped,
             Err(e) => {
@@ -481,22 +360,7 @@ impl FeePoller {
     /// fails is retried on a later tick, later each time. Answers how many owners were learned.
     pub async fn resolve_stations(&self) -> usize {
         let now = self.clock.now();
-        let unknown: Vec<i64> = match sqlx::query_scalar(
-            "SELECT l.location_id FROM (
-                 SELECT location_id FROM current_orders
-                 UNION
-                 SELECT location_id FROM sales
-                 UNION
-                 SELECT location_id FROM character_locations WHERE kind = 'station'
-             ) l
-             WHERE l.location_id < $1
-               AND NOT EXISTS (SELECT 1 FROM station_owners s WHERE s.station_id = l.location_id)
-             ORDER BY l.location_id",
-        )
-        .bind(STRUCTURE_ID_MIN)
-        .fetch_all(&self.pool)
-        .await
-        {
+        let unknown: Vec<i64> = match self.fees.stations_without_owner(STRUCTURE_ID_MIN).await {
             Ok(unknown) => unknown,
             Err(e) => {
                 tracing::error!("cannot list the stations without an owner: {e}");
@@ -552,16 +416,11 @@ impl FeePoller {
         if retry_after.is_some_and(|after| after > now) {
             return;
         }
-        match fees::ensure_station_owner(&self.pool, &self.esi, STATION_ID, now).await {
+        match fees::ensure_station_owner(&*self.fees, &self.esi, STATION_ID, now).await {
             Ok(learned) => {
                 self.station_retries.lock().unwrap().remove(&STATION_ID);
                 if learned {
-                    match sqlx::query_scalar::<_, Uuid>(
-                        "SELECT DISTINCT account_id FROM characters",
-                    )
-                    .fetch_all(&self.pool)
-                    .await
-                    {
+                    match self.accounts.account_ids().await {
                         Ok(accounts) => accounts.into_iter().for_each(|a| self.publish(a)),
                         Err(e) => tracing::error!("cannot list the accounts to signal: {e}"),
                     }
@@ -591,40 +450,11 @@ impl FeePoller {
         station_id: i64,
         owner_id: i64,
         now: OffsetDateTime,
-    ) -> Result<(), sqlx::Error> {
-        let mut tx = self.pool.begin().await?;
-        let characters: Vec<(i64, Uuid)> = sqlx::query_as(
-            "SELECT DISTINCT t.character_id, c.account_id FROM (
-                 SELECT character_id FROM current_orders WHERE location_id = $1
-                 UNION
-                 SELECT character_id FROM sales WHERE location_id = $1
-                 UNION
-                 SELECT character_id FROM character_locations WHERE location_id = $1
-             ) t
-             JOIN characters c ON c.character_id = t.character_id",
-        )
-        .bind(station_id)
-        .fetch_all(&mut *tx)
-        .await?;
-        let ids: Vec<i64> = characters.iter().map(|(id, _)| *id).collect();
-        let before = fees::FeeSnapshot::of(&mut tx, &ids).await?;
-        sqlx::query(
-            "INSERT INTO station_owners (station_id, owner_id, resolved_at) VALUES ($1, $2, $3)
-             ON CONFLICT (station_id) DO NOTHING",
-        )
-        .bind(station_id)
-        .bind(owner_id)
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
-        let after = fees::FeeSnapshot::of(&mut tx, &ids).await?;
-        tx.commit().await?;
-
-        let accounts: HashSet<Uuid> = characters
-            .iter()
-            .filter(|(id, _)| before.of_character(*id) != after.of_character(*id))
-            .map(|(_, account)| *account)
-            .collect();
+    ) -> Result<(), StoreError> {
+        let accounts = self
+            .fees
+            .store_station_owner(station_id, owner_id, now)
+            .await?;
         for account in accounts {
             self.publish(account);
         }
@@ -675,12 +505,14 @@ impl FeePoller {
     /// Polls both kinds of every character of the account now and looks up the owners of its
     /// stations, whatever the schedule says. For the browser tests.
     #[cfg(feature = "test-hooks")]
-    pub async fn refresh_account(&self, account_id: Uuid) -> Result<(), sqlx::Error> {
-        let characters: Vec<i64> =
-            sqlx::query_scalar("SELECT character_id FROM characters WHERE account_id = $1")
-                .bind(account_id)
-                .fetch_all(&self.pool)
-                .await?;
+    pub async fn refresh_account(&self, account_id: Uuid) -> Result<(), StoreError> {
+        let characters: Vec<i64> = self
+            .accounts
+            .list_characters(account_id)
+            .await?
+            .into_iter()
+            .map(|c| c.character_id)
+            .collect();
         for character_id in characters {
             for kind in Kind::ALL {
                 self.poll(character_id, kind).await;
@@ -694,19 +526,12 @@ impl FeePoller {
 
     /// Gives every character and kind without a schedule a first poll time inside the next
     /// interval, spread by the character and the kind.
-    async fn schedule_new(&self, now: OffsetDateTime) -> Result<(), sqlx::Error> {
+    async fn schedule_new(&self, now: OffsetDateTime) -> Result<(), StoreError> {
         for kind in Kind::ALL {
-            let unscheduled: Vec<i64> = sqlx::query_scalar(
-                "SELECT c.character_id FROM characters c
-                 WHERE NOT c.needs_relogin
-                   AND ($2::text IS NULL OR $2 = ANY(c.scopes))
-                   AND NOT EXISTS (SELECT 1 FROM fee_sync s
-                                   WHERE s.character_id = c.character_id AND s.kind = $1)",
-            )
-            .bind(kind.as_str())
-            .bind(kind.optional_scope())
-            .fetch_all(&self.pool)
-            .await?;
+            let unscheduled = self
+                .fees
+                .list_unscheduled(kind, kind.optional_scope())
+                .await?;
             if unscheduled.is_empty() {
                 continue;
             }
@@ -718,44 +543,18 @@ impl FeePoller {
                     now + spread(&key, FEE_INTERVAL)
                 })
                 .collect();
-            sqlx::query(
-                "INSERT INTO fee_sync (character_id, kind, next_poll_at)
-                 SELECT c, $1, t FROM unnest($2::bigint[], $3::timestamptz[]) AS u(c, t)
-                 ON CONFLICT (character_id, kind) DO NOTHING",
-            )
-            .bind(kind.as_str())
-            .bind(&unscheduled)
-            .bind(&times)
-            .execute(&self.pool)
-            .await?;
+            self.fees
+                .insert_schedule(kind, &unscheduled, &times)
+                .await?;
         }
         Ok(())
     }
 
     /// Takes the due pairs of characters that do not need a re-login. They are pushed back by a
     /// lease, so neither this nor another tick takes them again while their poll runs.
-    async fn claim_due(&self, now: OffsetDateTime) -> Result<Vec<(i64, Kind)>, sqlx::Error> {
-        let claimed: Vec<(i64, String)> = sqlx::query_as(
-            "UPDATE fee_sync w SET next_poll_at = $1 + $2::float8 * interval '1 second'
-             WHERE (w.character_id, w.kind) IN (
-                 SELECT s.character_id, s.kind FROM fee_sync s
-                 JOIN characters c USING (character_id)
-                 WHERE NOT c.needs_relogin AND s.next_poll_at <= $1
-                   AND (s.kind <> 'location' OR $4 = ANY(c.scopes))
-                 ORDER BY s.next_poll_at
-                 LIMIT $3
-                 FOR UPDATE OF s SKIP LOCKED)
-             RETURNING w.character_id, w.kind",
-        )
-        .bind(now)
-        .bind(CLAIM_LEASE.as_seconds_f64())
-        .bind((self.concurrency * 8) as i64)
-        .bind(LOCATION_SCOPE)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(claimed
-            .into_iter()
-            .filter_map(|(id, kind)| Kind::parse(&kind).map(|kind| (id, kind)))
-            .collect())
+    async fn claim_due(&self, now: OffsetDateTime) -> Result<Vec<(i64, Kind)>, StoreError> {
+        self.fees
+            .claim_due(now, CLAIM_LEASE, (self.concurrency * 8) as i64)
+            .await
     }
 }

@@ -1,12 +1,11 @@
 mod common;
 
 use common::{AppBuilder, Browser, TestApp};
-use sqlx::PgPool;
 
 const ALICE: i64 = 90000001;
 
-async fn app(pool: PgPool) -> TestApp {
-    AppBuilder::new(pool).with_stub().spawn().await
+async fn app() -> TestApp {
+    AppBuilder::new().with_stub().spawn().await
 }
 
 async fn token(app: &TestApp, browser: &Browser) -> String {
@@ -36,30 +35,26 @@ fn logout(app: &TestApp, browser: &Browser, token: Option<&str>) -> reqwest::Req
     request
 }
 
-async fn session_rows(pool: &PgPool) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM sessions")
-        .fetch_one(pool)
-        .await
-        .unwrap()
+/// The stored record of the session the cookie names.
+async fn session_record(app: &TestApp, cookie: &str) -> Option<tower_sessions::session::Record> {
+    let id: tower_sessions::session::Id = cookie.split_once('=').unwrap().1.parse().unwrap();
+    app.stores.sessions.load(&id).await.unwrap()
 }
 
-#[sqlx::test]
-async fn signing_out_deletes_the_server_side_session_and_the_old_cookie_stops_working(
-    pool: PgPool,
-) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn signing_out_deletes_the_server_side_session_and_the_old_cookie_stops_working() {
+    let app = app().await;
     let browser = app.browser();
     browser.sso_round_trip(&app, "/auth/login", ALICE).await;
     let cookie = browser.cookie().unwrap();
     let token = token(&app, &browser).await;
-    let before = session_rows(&pool).await;
+    assert!(session_record(&app, &cookie).await.is_some());
 
     let res = browser.send(logout(&app, &browser, Some(&token))).await;
     assert_eq!(res.status(), 200);
     assert_eq!(res.headers()["hx-redirect"], "/");
-    assert_eq!(
-        session_rows(&pool).await,
-        before - 1,
+    assert!(
+        session_record(&app, &cookie).await.is_none(),
         "the session record is deleted, not just the cookie"
     );
 
@@ -75,9 +70,9 @@ async fn signing_out_deletes_the_server_side_session_and_the_old_cookie_stops_wo
     assert_eq!(Browser::location(&res), "/");
 }
 
-#[sqlx::test]
-async fn logging_in_again_after_sign_out_returns_to_the_same_account(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn logging_in_again_after_sign_out_returns_to_the_same_account() {
+    let app = app().await;
     let browser = app.browser();
     browser.sso_round_trip(&app, "/auth/login", ALICE).await;
     browser.sso_round_trip(&app, "/auth/add", 90000002).await;
@@ -98,9 +93,9 @@ async fn logging_in_again_after_sign_out_returns_to_the_same_account(pool: PgPoo
     );
 }
 
-#[sqlx::test]
-async fn without_htmx_sign_out_redirects_to_the_landing_page(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn without_htmx_sign_out_redirects_to_the_landing_page() {
+    let app = app().await;
     let browser = app.browser();
     browser.sso_round_trip(&app, "/auth/login", ALICE).await;
     let token = token(&app, &browser).await;
@@ -116,9 +111,9 @@ async fn without_htmx_sign_out_redirects_to_the_landing_page(pool: PgPool) {
     assert_eq!(Browser::location(&res), "/");
 }
 
-#[sqlx::test]
-async fn sign_out_without_a_csrf_token_is_forbidden_and_keeps_the_session(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn sign_out_without_a_csrf_token_is_forbidden_and_keeps_the_session() {
+    let app = app().await;
     let browser = app.browser();
     browser.sso_round_trip(&app, "/auth/login", ALICE).await;
 
@@ -131,9 +126,9 @@ async fn sign_out_without_a_csrf_token_is_forbidden_and_keeps_the_session(pool: 
     );
 }
 
-#[sqlx::test]
-async fn sign_out_from_a_foreign_origin_is_forbidden(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn sign_out_from_a_foreign_origin_is_forbidden() {
+    let app = app().await;
     let browser = app.browser();
     browser.sso_round_trip(&app, "/auth/login", ALICE).await;
     let token = token(&app, &browser).await;
@@ -149,9 +144,9 @@ async fn sign_out_from_a_foreign_origin_is_forbidden(pool: PgPool) {
     assert_eq!(browser.get(&app.url("/characters")).await.status(), 200);
 }
 
-#[sqlx::test]
-async fn logging_out_is_not_possible_with_a_get_request(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn logging_out_is_not_possible_with_a_get_request() {
+    let app = app().await;
     let browser = app.browser();
     browser.sso_round_trip(&app, "/auth/login", ALICE).await;
     let res = browser.get(&app.url("/auth/logout")).await;

@@ -3,7 +3,6 @@ mod common;
 use axum::{Router, routing::post};
 use common::{ManualClock, TestApp, cookie_pair};
 use sekondo::app::AppState;
-use sqlx::PgPool;
 
 fn routes() -> Router<AppState> {
     async fn changed() -> &'static str {
@@ -53,22 +52,22 @@ fn post_change_as(
         .header("x-csrf-token", token)
 }
 
-async fn app(pool: PgPool) -> TestApp {
-    common::spawn_with(pool, ManualClock::new(), routes()).await
+async fn app() -> TestApp {
+    common::spawn_with(ManualClock::new(), routes()).await
 }
 
-#[sqlx::test]
-async fn valid_request_is_accepted(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn valid_request_is_accepted() {
+    let app = app().await;
     let v = visit(&app).await;
     let res = post_change(&app, &v).send().await.unwrap();
     assert_eq!(res.status(), 200);
     assert_eq!(res.text().await.unwrap(), "changed");
 }
 
-#[sqlx::test]
-async fn token_is_256_bit_and_stable_within_a_session(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn token_is_256_bit_and_stable_within_a_session() {
+    let app = app().await;
     let v = visit(&app).await;
     assert_eq!(v.token.len(), 43, "32 bytes, base64url without padding");
 
@@ -85,9 +84,9 @@ async fn token_is_256_bit_and_stable_within_a_session(pool: PgPool) {
     assert!(again.contains(&v.token));
 }
 
-#[sqlx::test]
-async fn missing_token_is_rejected(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn missing_token_is_rejected() {
+    let app = app().await;
     let v = visit(&app).await;
     let res = app
         .client
@@ -100,9 +99,9 @@ async fn missing_token_is_rejected(pool: PgPool) {
     assert_eq!(res.status(), 403);
 }
 
-#[sqlx::test]
-async fn token_from_another_session_is_rejected(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn token_from_another_session_is_rejected() {
+    let app = app().await;
     let mine = visit(&app).await;
     let other = visit(&app).await;
     assert_ne!(mine.token, other.token);
@@ -113,9 +112,9 @@ async fn token_from_another_session_is_rejected(pool: PgPool) {
     assert_eq!(res.status(), 403);
 }
 
-#[sqlx::test]
-async fn request_without_a_session_is_rejected(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn request_without_a_session_is_rejected() {
+    let app = app().await;
     let v = visit(&app).await;
     let res = app
         .client
@@ -128,9 +127,9 @@ async fn request_without_a_session_is_rejected(pool: PgPool) {
     assert_eq!(res.status(), 403);
 }
 
-#[sqlx::test]
-async fn foreign_origin_is_rejected_even_with_a_valid_token(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn foreign_origin_is_rejected_even_with_a_valid_token() {
+    let app = app().await;
     let v = visit(&app).await;
     let res = post_change_as(&app, &v, "https://evil.example", &v.token)
         .send()
@@ -139,9 +138,9 @@ async fn foreign_origin_is_rejected_even_with_a_valid_token(pool: PgPool) {
     assert_eq!(res.status(), 403);
 }
 
-#[sqlx::test]
-async fn missing_origin_falls_back_to_referer(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn missing_origin_falls_back_to_referer() {
+    let app = app().await;
     let v = visit(&app).await;
     let build = |referer: Option<String>| {
         let mut req = app
@@ -168,9 +167,9 @@ async fn missing_origin_falls_back_to_referer(pool: PgPool) {
     assert_eq!(neither.status(), 403);
 }
 
-#[sqlx::test]
-async fn cross_site_fetch_metadata_is_rejected(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn cross_site_fetch_metadata_is_rejected() {
+    let app = app().await;
     let v = visit(&app).await;
     let res = post_change(&app, &v)
         .header("sec-fetch-site", "cross-site")
@@ -186,9 +185,9 @@ async fn cross_site_fetch_metadata_is_rejected(pool: PgPool) {
     assert_eq!(same.status(), 200);
 }
 
-#[sqlx::test]
-async fn token_may_come_from_a_form_field(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn token_may_come_from_a_form_field() {
+    let app = app().await;
     let v = visit(&app).await;
     let form = |token: &str| {
         app.client
@@ -202,9 +201,9 @@ async fn token_may_come_from_a_form_field(pool: PgPool) {
     assert_eq!(form("wrong").send().await.unwrap().status(), 403);
 }
 
-#[sqlx::test]
-async fn safe_methods_are_not_checked(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn safe_methods_are_not_checked() {
+    let app = app().await;
     let res = app.client.get(app.url("/healthz")).send().await.unwrap();
     assert_eq!(res.status(), 200);
 }

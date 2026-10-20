@@ -4,7 +4,8 @@
 mod common;
 
 use common::{AppBuilder, Browser, TestApp};
-use sqlx::PgPool;
+use sekondo::{fee_poller::Kind, store::StandingInput};
+use time::OffsetDateTime;
 
 const ALICE: i64 = 90000001;
 const BOB: i64 = 90000002;
@@ -12,8 +13,8 @@ const JITA: i64 = 60003760;
 const AMARR: i64 = 60008494;
 const STRUCTURE: i64 = 1000000000001;
 
-async fn setup(pool: &PgPool) -> (TestApp, Browser) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+async fn setup() -> (TestApp, Browser) {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let browser = app.browser();
     browser.sso_round_trip(&app, "/auth/login", ALICE).await;
     (app, browser)
@@ -24,109 +25,123 @@ async fn add_bob(app: &TestApp, browser: &Browser) {
     let _ = res;
 }
 
-async fn order(pool: &PgPool, id: i64, character: i64, location: i64) {
-    sqlx::query(
-        "INSERT INTO current_orders (order_id, character_id, type_id, region_id, location_id, \
-         is_buy_order, is_corporation, price, volume_remain, volume_total, min_volume, range, \
-         issued, duration) \
-         VALUES ($1, $2, 34, 10000002, $3, false, false, 10, 1, 1, 1, 'station', now(), 90)",
-    )
-    .bind(id)
-    .bind(character)
-    .bind(location)
-    .execute(pool)
-    .await
-    .unwrap();
-}
-
-async fn name(pool: &PgPool, id: i64, name: &str) {
-    sqlx::query(
-        "INSERT INTO names (id, category, name, resolved_at) VALUES ($1, 'station', $2, now())",
-    )
-    .bind(id)
-    .bind(name)
-    .execute(pool)
-    .await
-    .unwrap();
-}
-
-async fn polled(pool: &PgPool, character: i64) {
-    for kind in ["skills", "standings"] {
-        sqlx::query(
-            "INSERT INTO fee_sync (character_id, kind, next_poll_at, last_success_at) \
-             VALUES ($1, $2, now(), now())",
+async fn order(app: &TestApp, id: i64, character: i64, location: i64) {
+    app.stores
+        .orders
+        .seed_order(
+            character,
+            &sekondo::esi::EsiOrder {
+                order_id: id,
+                type_id: 34,
+                region_id: 10000002,
+                location_id: location,
+                is_buy_order: false,
+                is_corporation: false,
+                price_cents: 1000,
+                volume_remain: 1,
+                volume_total: 1,
+                min_volume: 1,
+                range: "station".to_owned(),
+                escrow_cents: None,
+                issued: OffsetDateTime::now_utc(),
+                duration: 90,
+            },
         )
-        .bind(character)
-        .bind(kind)
-        .execute(pool)
         .await
         .unwrap();
+}
+
+async fn name(app: &TestApp, id: i64, name: &str) {
+    app.stores
+        .market
+        .store_names(
+            &[sekondo::store::NameRow {
+                id,
+                category: "station".to_owned(),
+                name: Some(name.to_owned()),
+            }],
+            OffsetDateTime::now_utc(),
+            None,
+        )
+        .await
+        .unwrap();
+}
+
+async fn polled(app: &TestApp, character: i64) {
+    for kind in [Kind::Skills, Kind::Standings] {
+        app.stores
+            .fees
+            .seed_fee_success(character, kind, OffsetDateTime::now_utc())
+            .await
+            .unwrap();
     }
 }
 
 /// Accounting 5, Broker Relations 5, faction standing 2.0, corporation standing 1.5 (Caldari Navy).
-async fn trained(pool: &PgPool, character: i64) {
-    polled(pool, character).await;
+async fn trained(app: &TestApp, character: i64) {
+    polled(app, character).await;
     for (skill, level) in [(16622_i64, 5_i16), (3446, 5)] {
-        sqlx::query("INSERT INTO character_skills (character_id, skill_id, active_level) VALUES ($1, $2, $3)")
-            .bind(character)
-            .bind(skill)
-            .bind(level)
-            .execute(pool)
+        app.stores
+            .fees
+            .seed_skill(character, skill, level)
             .await
             .unwrap();
     }
-    for (id, kind, value) in [(500001_i64, "faction", "2.0"), (1000035, "npc_corp", "1.5")] {
-        sqlx::query(
-            "INSERT INTO character_standings (character_id, from_id, from_type, standing) \
-             VALUES ($1, $2, $3, $4::numeric)",
-        )
-        .bind(character)
-        .bind(id)
-        .bind(kind)
-        .bind(value)
-        .execute(pool)
-        .await
-        .unwrap();
+    for (from_id, kind, value) in [(500001_i64, "faction", "2.0"), (1000035, "npc_corp", "1.5")] {
+        app.stores
+            .fees
+            .seed_standing(
+                character,
+                &StandingInput {
+                    from_id,
+                    from_type: kind.to_owned(),
+                    standing: value.to_owned(),
+                },
+            )
+            .await
+            .unwrap();
     }
-    sqlx::query("INSERT INTO station_owners (station_id, owner_id, resolved_at) VALUES ($1, 1000035, now()) ON CONFLICT DO NOTHING")
-        .bind(JITA)
-        .execute(pool)
+    app.stores
+        .fees
+        .insert_station_owner(JITA, 1000035, OffsetDateTime::now_utc())
         .await
         .unwrap();
 }
 
 const LOCATION_SCOPE: &str = "esi-location.read_location.v1";
 
-async fn grant_location_scope(pool: &PgPool, character: i64) {
-    sqlx::query("UPDATE characters SET scopes = ARRAY[$2] WHERE character_id = $1")
-        .bind(character)
-        .bind(LOCATION_SCOPE)
-        .execute(pool)
+async fn grant_location_scope(app: &TestApp, character: i64) {
+    app.stores
+        .accounts
+        .set_scopes(character, &[LOCATION_SCOPE.to_owned()])
         .await
         .unwrap();
 }
 
-async fn revoke_location_scope(pool: &PgPool, character: i64) {
-    sqlx::query("UPDATE characters SET scopes = array_remove(scopes, $2) WHERE character_id = $1")
-        .bind(character)
-        .bind(LOCATION_SCOPE)
-        .execute(pool)
+async fn revoke_location_scope(app: &TestApp, character: i64) {
+    let mut scopes = app
+        .stores
+        .accounts
+        .find_character(character)
+        .await
+        .unwrap()
+        .unwrap()
+        .scopes;
+    scopes.retain(|scope| scope != LOCATION_SCOPE);
+    app.stores
+        .accounts
+        .set_scopes(character, &scopes)
         .await
         .unwrap();
 }
 
-async fn docked(pool: &PgPool, character: i64, location: i64, kind: &str) {
-    sqlx::query(
-        "INSERT INTO character_locations (character_id, location_id, kind, updated_at) \
-         VALUES ($1, $2, $3, now())",
-    )
-    .bind(character)
-    .bind(location)
-    .bind(kind)
-    .execute(pool)
-    .await
-    .unwrap();
+async fn docked(app: &TestApp, character: i64, location: i64, kind: &str) {
+    let now = OffsetDateTime::now_utc();
+    app.stores
+        .fees
+        .store_location(character, Some((location, kind)), now, now, None)
+        .await
+        .unwrap();
 }
 
 async fn page(app: &TestApp, browser: &Browser, path: &str) -> String {
@@ -180,15 +195,13 @@ fn fees_of(html: &str, character: i64) -> Vec<Fee> {
 
 const JITA_NAME: &str = "Jita IV - Moon 4 - Caldari Navy Assembly Plant";
 
-#[sqlx::test]
-async fn an_npc_station_gives_its_rates_with_the_inputs_on_hover_and_names_character_and_station(
-    pool: PgPool,
-) {
-    let (app, browser) = setup(&pool).await;
-    name(&pool, JITA, JITA_NAME).await;
-    trained(&pool, ALICE).await;
-    grant_location_scope(&pool, ALICE).await;
-    docked(&pool, ALICE, JITA, "station").await;
+#[tokio::test]
+async fn an_npc_station_gives_its_rates_with_the_inputs_on_hover_and_names_character_and_station() {
+    let (app, browser) = setup().await;
+    name(&app, JITA, JITA_NAME).await;
+    trained(&app, ALICE).await;
+    grant_location_scope(&app, ALICE).await;
+    docked(&app, ALICE, JITA, "station").await;
 
     let html = page(&app, &browser, "/orders/sell").await;
 
@@ -214,29 +227,27 @@ async fn an_npc_station_gives_its_rates_with_the_inputs_on_hover_and_names_chara
     }
 }
 
-#[sqlx::test]
-async fn the_cards_are_on_the_buy_page_too(pool: PgPool) {
-    let (app, browser) = setup(&pool).await;
-    trained(&pool, ALICE).await;
+#[tokio::test]
+async fn the_cards_are_on_the_buy_page_too() {
+    let (app, browser) = setup().await;
+    trained(&app, ALICE).await;
 
     let html = page(&app, &browser, "/orders/buy").await;
 
     assert_eq!(fees_of(&html, ALICE)[0].text, "3.38%");
 }
 
-#[sqlx::test]
-async fn a_docked_character_has_its_fees_at_its_station_whether_or_not_it_has_orders_there(
-    pool: PgPool,
-) {
-    let (app, browser) = setup(&pool).await;
-    name(&pool, AMARR, "Amarr VIII").await;
-    order(&pool, 1, ALICE, JITA).await;
-    trained(&pool, ALICE).await;
-    grant_location_scope(&pool, ALICE).await;
-    docked(&pool, ALICE, AMARR, "station").await;
-    sqlx::query("INSERT INTO station_owners (station_id, owner_id, resolved_at) VALUES ($1, 1000086, now())")
-        .bind(AMARR)
-        .execute(&pool)
+#[tokio::test]
+async fn a_docked_character_has_its_fees_at_its_station_whether_or_not_it_has_orders_there() {
+    let (app, browser) = setup().await;
+    name(&app, AMARR, "Amarr VIII").await;
+    order(&app, 1, ALICE, JITA).await;
+    trained(&app, ALICE).await;
+    grant_location_scope(&app, ALICE).await;
+    docked(&app, ALICE, AMARR, "station").await;
+    app.stores
+        .fees
+        .insert_station_owner(AMARR, 1000086, OffsetDateTime::now_utc())
         .await
         .unwrap();
 
@@ -250,13 +261,13 @@ async fn a_docked_character_has_its_fees_at_its_station_whether_or_not_it_has_or
     );
 }
 
-#[sqlx::test]
-async fn a_structure_reads_owner_fee_and_no_minimum_margin(pool: PgPool) {
-    let (app, browser) = setup(&pool).await;
-    name(&pool, STRUCTURE, "Alpha Keepstar").await;
-    trained(&pool, ALICE).await;
-    grant_location_scope(&pool, ALICE).await;
-    docked(&pool, ALICE, STRUCTURE, "structure").await;
+#[tokio::test]
+async fn a_structure_reads_owner_fee_and_no_minimum_margin() {
+    let (app, browser) = setup().await;
+    name(&app, STRUCTURE, "Alpha Keepstar").await;
+    trained(&app, ALICE).await;
+    grant_location_scope(&app, ALICE).await;
+    docked(&app, ALICE, STRUCTURE, "structure").await;
 
     let fees = fees_of(&page(&app, &browser, "/orders/sell").await, ALICE);
 
@@ -266,9 +277,9 @@ async fn a_structure_reads_owner_fee_and_no_minimum_margin(pool: PgPool) {
     assert!(fees[0].detail.ends_with("Alpha Keepstar"));
 }
 
-#[sqlx::test]
-async fn a_character_whose_skills_were_not_polled_shows_dashes(pool: PgPool) {
-    let (app, browser) = setup(&pool).await;
+#[tokio::test]
+async fn a_character_whose_skills_were_not_polled_shows_dashes() {
+    let (app, browser) = setup().await;
 
     let fees = fees_of(&page(&app, &browser, "/orders/sell").await, ALICE);
 
@@ -278,13 +289,13 @@ async fn a_character_whose_skills_were_not_polled_shows_dashes(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
-async fn a_station_without_a_known_owner_has_a_tax_but_no_fee(pool: PgPool) {
-    let (app, browser) = setup(&pool).await;
-    name(&pool, AMARR, "Amarr VIII").await;
-    trained(&pool, ALICE).await;
-    grant_location_scope(&pool, ALICE).await;
-    docked(&pool, ALICE, AMARR, "station").await;
+#[tokio::test]
+async fn a_station_without_a_known_owner_has_a_tax_but_no_fee() {
+    let (app, browser) = setup().await;
+    name(&app, AMARR, "Amarr VIII").await;
+    trained(&app, ALICE).await;
+    grant_location_scope(&app, ALICE).await;
+    docked(&app, ALICE, AMARR, "station").await;
 
     let fees = fees_of(&page(&app, &browser, "/orders/sell").await, ALICE);
 
@@ -293,11 +304,11 @@ async fn a_station_without_a_known_owner_has_a_tax_but_no_fee(pool: PgPool) {
     assert_eq!(fees[2].text, "\u{2014}");
 }
 
-#[sqlx::test]
-async fn without_the_location_scope_the_cards_name_jita_and_offer_to_log_in_again(pool: PgPool) {
-    let (app, browser) = setup(&pool).await;
-    trained(&pool, ALICE).await;
-    revoke_location_scope(&pool, ALICE).await;
+#[tokio::test]
+async fn without_the_location_scope_the_cards_name_jita_and_offer_to_log_in_again() {
+    let (app, browser) = setup().await;
+    trained(&app, ALICE).await;
+    revoke_location_scope(&app, ALICE).await;
 
     let html = page(&app, &browser, "/orders/sell").await;
 
@@ -309,11 +320,11 @@ async fn without_the_location_scope_the_cards_name_jita_and_offer_to_log_in_agai
     assert!(html.contains(r#"href="/auth/add""#));
 }
 
-#[sqlx::test]
-async fn a_character_with_the_scope_that_was_never_docked_uses_jita_without_the_link(pool: PgPool) {
-    let (app, browser) = setup(&pool).await;
-    trained(&pool, ALICE).await;
-    grant_location_scope(&pool, ALICE).await;
+#[tokio::test]
+async fn a_character_with_the_scope_that_was_never_docked_uses_jita_without_the_link() {
+    let (app, browser) = setup().await;
+    trained(&app, ALICE).await;
+    grant_location_scope(&app, ALICE).await;
 
     let fees = fees_of(&page(&app, &browser, "/orders/sell").await, ALICE);
 
@@ -321,12 +332,12 @@ async fn a_character_with_the_scope_that_was_never_docked_uses_jita_without_the_
     assert!(fees.iter().all(|f| !f.relogin));
 }
 
-#[sqlx::test]
-async fn only_the_selected_characters_have_cards_in_the_order_they_were_linked(pool: PgPool) {
-    let (app, browser) = setup(&pool).await;
+#[tokio::test]
+async fn only_the_selected_characters_have_cards_in_the_order_they_were_linked() {
+    let (app, browser) = setup().await;
     add_bob(&app, &browser).await;
-    trained(&pool, ALICE).await;
-    polled(&pool, BOB).await;
+    trained(&app, ALICE).await;
+    polled(&app, BOB).await;
 
     let both = page(&app, &browser, "/orders/sell").await;
     assert!(
@@ -339,11 +350,11 @@ async fn only_the_selected_characters_have_cards_in_the_order_they_were_linked(p
     assert_eq!(only_bob.matches(r#"id="fee-"#).count(), 3);
 }
 
-#[sqlx::test]
-async fn the_freshness_does_not_list_fees(pool: PgPool) {
-    let (app, browser) = setup(&pool).await;
-    trained(&pool, ALICE).await;
-    order(&pool, 1, ALICE, JITA).await;
+#[tokio::test]
+async fn the_freshness_does_not_list_fees() {
+    let (app, browser) = setup().await;
+    trained(&app, ALICE).await;
+    order(&app, 1, ALICE, JITA).await;
 
     for path in ["/orders/freshness", "/orders/sell"] {
         let html = page(&app, &browser, path).await;
@@ -354,9 +365,9 @@ async fn the_freshness_does_not_list_fees(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
-async fn the_orders_pages_follow_fees_updated_in_the_content_and_no_other_page_does(pool: PgPool) {
-    let (app, browser) = setup(&pool).await;
+#[tokio::test]
+async fn the_orders_pages_follow_fees_updated_in_the_content_and_no_other_page_does() {
+    let (app, browser) = setup().await;
 
     let trigger = |html: &str, id: &str| {
         let start = html.find(&format!(r#"id="{id}""#)).unwrap();

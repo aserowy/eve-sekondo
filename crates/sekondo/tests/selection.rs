@@ -2,17 +2,16 @@ mod common;
 
 use common::PollEnv;
 use sekondo::{
-    orders::{Side, Sort, list_orders},
+    orders::{Side, Sort},
     selection::{CharacterSelection, ViewQuery},
 };
-use sqlx::PgPool;
 
 const ALICE: i64 = 90000001;
 const BOB: i64 = 90000002;
 const CAROL: i64 = 90000003;
 
-async fn two_accounts(pool: PgPool) -> (PollEnv, uuid::Uuid, uuid::Uuid) {
-    let env = PollEnv::new(pool).await;
+async fn two_accounts() -> (PollEnv, uuid::Uuid, uuid::Uuid) {
+    let env = PollEnv::new().await;
     let mine = env.new_account().await;
     let theirs = env.new_account().await;
     env.link(mine, ALICE).await;
@@ -43,7 +42,10 @@ async fn all_orders(
 ) -> Vec<(i64, i64)> {
     let mut rows = Vec::new();
     for side in [Side::Sell, Side::Buy] {
-        for row in list_orders(&env.pool, account, selection, side, Sort::default())
+        for row in env
+            .stores
+            .orders
+            .list_orders(account, selection.ids(), side, Sort::default())
             .await
             .unwrap()
         {
@@ -54,9 +56,9 @@ async fn all_orders(
     rows
 }
 
-#[sqlx::test]
-async fn a_foreign_character_id_never_yields_that_characters_orders(pool: PgPool) {
-    let (env, mine, _) = two_accounts(pool).await;
+#[tokio::test]
+async fn a_foreign_character_id_never_yields_that_characters_orders() {
+    let (env, mine, _) = two_accounts().await;
     let own = [ALICE, BOB];
 
     let query = ViewQuery {
@@ -74,9 +76,9 @@ async fn a_foreign_character_id_never_yields_that_characters_orders(pool: PgPool
     );
 }
 
-#[sqlx::test]
-async fn the_query_itself_is_scoped_to_the_account_even_if_given_a_foreign_id(pool: PgPool) {
-    let (env, mine, _) = two_accounts(pool).await;
+#[tokio::test]
+async fn the_query_itself_is_scoped_to_the_account_even_if_given_a_foreign_id() {
+    let (env, mine, _) = two_accounts().await;
     // Defence in depth: a selection built from the wrong list still cannot read Carol's orders.
     let selection = CharacterSelection::resolve(&[ALICE, CAROL], Some("90000003"));
     assert_eq!(selection.ids(), &[CAROL]);
@@ -84,9 +86,9 @@ async fn the_query_itself_is_scoped_to_the_account_even_if_given_a_foreign_id(po
     assert!(all_orders(&env, mine, &selection).await.is_empty());
 }
 
-#[sqlx::test]
-async fn a_subset_shows_only_the_selected_characters_orders(pool: PgPool) {
-    let (env, mine, _) = two_accounts(pool).await;
+#[tokio::test]
+async fn a_subset_shows_only_the_selected_characters_orders() {
+    let (env, mine, _) = two_accounts().await;
     let selection = CharacterSelection::resolve(&[ALICE, BOB], Some("90000002"));
 
     assert_eq!(all_orders(&env, mine, &selection).await, vec![(BOB, 6001)]);

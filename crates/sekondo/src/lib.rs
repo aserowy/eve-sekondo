@@ -35,6 +35,7 @@ pub mod sse;
 pub mod sso;
 pub mod station_book;
 pub mod station_history;
+pub mod store;
 #[cfg(feature = "test-hooks")]
 pub mod test_hooks;
 pub mod tls;

@@ -14,7 +14,6 @@ use sekondo::{
     tokens::{TokenError, TokenService},
 };
 use serde_json::json;
-use sqlx::PgPool;
 use time::Duration as TimeDuration;
 use url::Url;
 
@@ -26,17 +25,17 @@ const KEY: [u8; 32] = [5u8; 32];
 
 struct Env {
     stub: Stub,
-    pki: TestPki,
+    pki: &'static TestPki,
+    stores: sekondo::store::Stores,
     sso: Arc<SsoClient>,
     repo: Repo,
     clock: Arc<ManualClock>,
     tokens: TokenService,
-    pool: PgPool,
 }
 
-async fn env(pool: PgPool) -> Env {
+async fn env() -> Env {
     sekondo::tls::install_crypto_provider();
-    let pki = TestPki::generate();
+    let pki = common::pki();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let stub = Stub::start(
         StubConfig::new(CLIENT_ID, CLIENT_SECRET, CONTROL),
@@ -53,17 +52,18 @@ async fn env(pool: PgPool) -> Env {
         SecretString::from(CLIENT_SECRET.to_owned()),
         Duration::ZERO,
     ));
-    let repo = Repo::new(pool.clone(), TokenCipher::new(&SecretKey(KEY)));
+    let stores = common::stores();
+    let repo = Repo::new(stores.accounts.clone(), TokenCipher::new(&SecretKey(KEY)));
     let clock = ManualClock::new();
     let tokens = TokenService::new(repo.clone(), sso.clone(), clock.clone());
     Env {
         stub,
         pki,
+        stores,
         sso,
         repo,
         clock,
         tokens,
-        pool,
     }
 }
 
@@ -141,8 +141,8 @@ impl Env {
     }
 }
 
-async fn linked(pool: PgPool) -> Env {
-    let e = env(pool).await;
+async fn linked() -> Env {
+    let e = env().await;
     let account = e.repo.create_account().await.unwrap();
     e.link(account, ALICE).await;
     e
@@ -150,9 +150,9 @@ async fn linked(pool: PgPool) -> Env {
 
 // ---- Access token refresh ----
 
-#[sqlx::test]
-async fn a_valid_access_token_is_returned_without_contacting_sso(pool: PgPool) {
-    let e = linked(pool).await;
+#[tokio::test]
+async fn a_valid_access_token_is_returned_without_contacting_sso() {
+    let e = linked().await;
     let stored = e
         .repo
         .load_tokens(ALICE)
@@ -176,9 +176,9 @@ async fn a_valid_access_token_is_returned_without_contacting_sso(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn an_expiring_access_token_is_refreshed_and_the_rotated_refresh_token_stored(pool: PgPool) {
-    let e = linked(pool).await;
+#[tokio::test]
+async fn an_expiring_access_token_is_refreshed_and_the_rotated_refresh_token_stored() {
+    let e = linked().await;
     let before = e.repo.load_tokens(ALICE).await.unwrap().unwrap();
     let calls = e.stub.token_calls();
 
@@ -208,30 +208,27 @@ async fn an_expiring_access_token_is_refreshed_and_the_rotated_refresh_token_sto
     assert!(!e.needs_relogin(ALICE).await);
 }
 
-#[sqlx::test]
-async fn an_access_token_whose_stored_expiry_has_passed_is_refreshed(pool: PgPool) {
-    let e = linked(pool).await;
+#[tokio::test]
+async fn an_access_token_whose_stored_expiry_has_passed_is_refreshed() {
+    let e = linked().await;
     e.clock.advance(TimeDuration::hours(2));
     let calls = e.stub.token_calls();
     e.tokens.access_token(ALICE).await.unwrap();
     assert_eq!(e.stub.token_calls(), calls + 1);
 }
 
-#[sqlx::test]
-async fn simultaneous_requests_refresh_only_once(pool: PgPool) {
-    let e = linked(pool).await;
+#[tokio::test]
+async fn simultaneous_requests_refresh_only_once() {
+    let e = linked().await;
     // Expire the stored token in the database (not via the clock, which would also expire the new one).
-    sqlx::query("UPDATE character_tokens SET access_expires_at = now() - interval '1 hour'")
-        .execute(&e.pool)
+    e.stores
+        .accounts
+        .seed_access_expiry(
+            ALICE,
+            time::OffsetDateTime::now_utc() - TimeDuration::hours(1),
+        )
         .await
         .unwrap();
-    // Open several pooled connections first; otherwise the callers would be serialized by the
-    // time it takes to open new TLS connections to Postgres, and the race would never happen.
-    let _ = tokio::join!(
-        e.repo.find_character(ALICE),
-        e.repo.find_character(ALICE),
-        e.repo.find_character(ALICE)
-    );
     let calls = e.stub.token_calls();
 
     let (a, b, c) = tokio::join!(
@@ -247,9 +244,9 @@ async fn simultaneous_requests_refresh_only_once(pool: PgPool) {
     assert!(!e.needs_relogin(ALICE).await);
 }
 
-#[sqlx::test]
-async fn an_unknown_character_is_reported(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn an_unknown_character_is_reported() {
+    let e = env().await;
     assert!(matches!(
         e.tokens.access_token(1).await,
         Err(TokenError::UnknownCharacter)
@@ -258,9 +255,9 @@ async fn an_unknown_character_is_reported(pool: PgPool) {
 
 // ---- Needs re-login ----
 
-#[sqlx::test]
-async fn a_revoked_refresh_token_marks_the_character_and_stops_contacting_sso(pool: PgPool) {
-    let e = linked(pool).await;
+#[tokio::test]
+async fn a_revoked_refresh_token_marks_the_character_and_stops_contacting_sso() {
+    let e = linked().await;
     e.stub_control("revoke", json!({"character_id": ALICE}))
         .await;
     e.clock.advance(TimeDuration::hours(2));
@@ -282,9 +279,9 @@ async fn a_revoked_refresh_token_marks_the_character_and_stops_contacting_sso(po
     assert_eq!(e.stub.token_calls(), calls);
 }
 
-#[sqlx::test]
-async fn a_marked_character_keeps_its_data(pool: PgPool) {
-    let e = linked(pool).await;
+#[tokio::test]
+async fn a_marked_character_keeps_its_data() {
+    let e = linked().await;
     e.stub_control("revoke", json!({"character_id": ALICE}))
         .await;
     e.clock.advance(TimeDuration::hours(2));
@@ -300,9 +297,9 @@ async fn a_marked_character_keeps_its_data(pool: PgPool) {
     assert!(e.repo.load_tokens(ALICE).await.unwrap().is_some());
 }
 
-#[sqlx::test]
-async fn reduced_scopes_on_refresh_mark_the_character(pool: PgPool) {
-    let e = linked(pool).await;
+#[tokio::test]
+async fn reduced_scopes_on_refresh_mark_the_character() {
+    let e = linked().await;
     e.stub_control(
         "scopes",
         json!({"character_id": ALICE, "scopes": ["esi-universe.read_structures.v1"]}),
@@ -323,9 +320,9 @@ async fn reduced_scopes_on_refresh_mark_the_character(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn a_character_linked_with_two_scopes_needs_relogin_until_it_logs_in_with_four(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn a_character_linked_with_two_scopes_needs_relogin_until_it_logs_in_with_four() {
+    let e = env().await;
     let account = e.repo.create_account().await.unwrap();
     let old = [
         "esi-markets.read_character_orders.v1",
@@ -355,9 +352,9 @@ async fn a_character_linked_with_two_scopes_needs_relogin_until_it_logs_in_with_
         .expect("four scopes pass");
 }
 
-#[sqlx::test]
-async fn a_character_without_the_optional_location_scope_does_not_need_relogin(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn a_character_without_the_optional_location_scope_does_not_need_relogin() {
+    let e = env().await;
     let account = e.repo.create_account().await.unwrap();
     e.stub_control(
         "scopes",
@@ -381,9 +378,9 @@ async fn a_character_without_the_optional_location_scope_does_not_need_relogin(p
     );
 }
 
-#[sqlx::test]
-async fn a_character_linked_with_the_four_old_scopes_needs_relogin(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn a_character_linked_with_the_four_old_scopes_needs_relogin() {
+    let e = env().await;
     let account = e.repo.create_account().await.unwrap();
     let old = [
         "esi-markets.read_character_orders.v1",
@@ -411,9 +408,9 @@ async fn a_character_linked_with_the_four_old_scopes_needs_relogin(pool: PgPool)
     assert!(!e.needs_relogin(ALICE).await);
 }
 
-#[sqlx::test]
-async fn an_sso_server_error_is_temporary_and_does_not_mark_the_character(pool: PgPool) {
-    let e = linked(pool).await;
+#[tokio::test]
+async fn an_sso_server_error_is_temporary_and_does_not_mark_the_character() {
+    let e = linked().await;
     e.clock.advance(TimeDuration::hours(2));
     e.stub_control("fail-next-token", json!({})).await;
 
@@ -430,9 +427,9 @@ async fn an_sso_server_error_is_temporary_and_does_not_mark_the_character(pool: 
         .expect("the retry succeeds");
 }
 
-#[sqlx::test]
-async fn a_network_error_is_temporary_and_does_not_mark_the_character(pool: PgPool) {
-    let e = linked(pool).await;
+#[tokio::test]
+async fn a_network_error_is_temporary_and_does_not_mark_the_character() {
+    let e = linked().await;
     e.clock.advance(TimeDuration::hours(2));
     e.stub.shutdown();
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -444,11 +441,14 @@ async fn a_network_error_is_temporary_and_does_not_mark_the_character(pool: PgPo
     assert!(!e.needs_relogin(ALICE).await);
 }
 
-#[sqlx::test]
-async fn undecryptable_tokens_are_treated_like_a_rejected_refresh(pool: PgPool) {
-    let e = linked(pool.clone()).await;
+#[tokio::test]
+async fn undecryptable_tokens_are_treated_like_a_rejected_refresh() {
+    let e = linked().await;
     // The encryption key changed since the tokens were stored.
-    let other_key = Repo::new(pool, TokenCipher::new(&SecretKey([6u8; 32])));
+    let other_key = Repo::new(
+        e.stores.accounts.clone(),
+        TokenCipher::new(&SecretKey([6u8; 32])),
+    );
     let tokens = TokenService::new(other_key, e.sso.clone(), e.clock.clone());
     let calls = e.stub.token_calls();
 

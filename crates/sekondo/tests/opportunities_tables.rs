@@ -1,13 +1,12 @@
 mod common;
 
 use common::{AppBuilder, Browser, TestApp};
-use sqlx::PgPool;
 
 const ALICE: i64 = 90000001;
 const JITA_44: i64 = 60003760;
 
-async fn setup(pool: PgPool) -> (TestApp, Browser) {
-    let app = AppBuilder::new(pool).with_stub().spawn().await;
+async fn setup() -> (TestApp, Browser) {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let browser = app.browser();
     browser.sso_round_trip(&app, "/auth/login", ALICE).await;
     (app, browser)
@@ -94,48 +93,62 @@ impl Item {
         }
     }
 
-    async fn insert(&self, pool: &PgPool) {
-        sqlx::query(
-            "INSERT INTO station_item_stats
-                 (region_id, station_id, type_id, book_at, best_buy, best_sell, buy_near_orders,
-                  sell_near_orders, rho, indicators_at, volume_7d, volume_30d, sigma, returns,
-                  sma5, sma20, cross_day, volume_rising, percent_b, rsi14, expansion_at,
-                  expansion_kind, expansion_hour, expansion_sell)
-             VALUES (10000002, 60003760, $1, now(), $2::numeric, $3::numeric, $4, $5, $6, now(),
-                     $7, $8, $9, 29, $10, $11, $12::date, $13, $14, $15, now(),
-                     $16, $17, $18::numeric)",
-        )
-        .bind(self.type_id)
-        .bind(self.best_buy)
-        .bind(self.best_sell)
-        .bind(self.buy_near)
-        .bind(self.sell_near)
-        .bind(self.rho)
-        .bind(self.volume_7d)
-        .bind(self.volume_30d)
-        .bind(self.sigma)
-        .bind(self.sma5)
-        .bind(self.sma20)
-        .bind(self.cross_day)
-        .bind(self.volume_rising)
-        .bind(self.percent_b)
-        .bind(self.rsi14)
-        .bind(self.expansion_kind)
-        .bind(self.expansion_hour)
-        .bind(self.expansion_sell)
-        .execute(pool)
-        .await
-        .unwrap();
-        if let Some(name) = self.name {
-            sqlx::query(
-                "INSERT INTO names (id, category, name, resolved_at) VALUES ($1, 'inventory_type', $2, now())
-                 ON CONFLICT (id) DO NOTHING",
+    async fn insert(&self, app: &TestApp) {
+        let now = time::OffsetDateTime::now_utc();
+        let cross_day = self.cross_day.map(|day| {
+            time::Date::parse(
+                day,
+                time::macros::format_description!("[year]-[month]-[day]"),
             )
-            .bind(self.type_id)
-            .bind(name)
-            .execute(pool)
+            .unwrap()
+        });
+        app.stores
+            .station
+            .seed_item_stats(
+                10000002,
+                JITA_44,
+                self.type_id,
+                &sekondo::store::ItemStatsRecord {
+                    book_at: Some(now),
+                    best_buy: Some(self.best_buy.to_owned()),
+                    best_sell: Some(self.best_sell.to_owned()),
+                    buy_near_orders: Some(self.buy_near),
+                    sell_near_orders: Some(self.sell_near),
+                    rho: Some(self.rho),
+                    indicators_at: Some(now),
+                    volume_7d: Some(self.volume_7d),
+                    volume_30d: Some(self.volume_30d),
+                    sigma: self.sigma,
+                    returns: Some(29),
+                    sma5: self.sma5,
+                    sma20: self.sma20,
+                    cross_day,
+                    volume_rising: self.volume_rising,
+                    percent_b: self.percent_b,
+                    rsi14: self.rsi14,
+                    expansion_at: Some(now),
+                    expansion_kind: self.expansion_kind.map(str::to_owned),
+                    expansion_weekday: None,
+                    expansion_hour: self.expansion_hour,
+                    expansion_sell: self.expansion_sell.map(str::to_owned),
+                },
+            )
             .await
             .unwrap();
+        if let Some(name) = self.name {
+            app.stores
+                .market
+                .store_names(
+                    &[sekondo::store::NameRow {
+                        id: self.type_id,
+                        category: "inventory_type".to_owned(),
+                        name: Some(name.to_owned()),
+                    }],
+                    now,
+                    None,
+                )
+                .await
+                .unwrap();
         }
     }
 }
@@ -184,12 +197,10 @@ fn rows(section: &str) -> Vec<i64> {
         .collect()
 }
 
-#[sqlx::test]
-async fn a_classic_row_shows_the_current_best_buy_the_sell_price_and_the_shared_figures(
-    pool: PgPool,
-) {
-    let (app, browser) = setup(pool.clone()).await;
-    Item::new(34).insert(&pool).await;
+#[tokio::test]
+async fn a_classic_row_shows_the_current_best_buy_the_sell_price_and_the_shared_figures() {
+    let (app, browser) = setup().await;
+    Item::new(34).insert(&app).await;
 
     let html = get(&app, &browser, "/opportunities/tables").await;
     let classic = table(&html, "classic");
@@ -216,10 +227,10 @@ async fn a_classic_row_shows_the_current_best_buy_the_sell_price_and_the_shared_
     assert!(!cell(classic, 34, "min-volume").is_empty());
 }
 
-#[sqlx::test]
-async fn the_columns_say_that_the_buy_price_is_current_and_not_a_suggestion(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
-    Item::new(34).insert(&pool).await;
+#[tokio::test]
+async fn the_columns_say_that_the_buy_price_is_current_and_not_a_suggestion() {
+    let (app, browser) = setup().await;
+    Item::new(34).insert(&app).await;
 
     let html = get(&app, &browser, "/opportunities/tables").await;
 
@@ -227,14 +238,14 @@ async fn the_columns_say_that_the_buy_price_is_current_and_not_a_suggestion(pool
     assert!(!html.to_lowercase().contains("suggested buy"));
 }
 
-#[sqlx::test]
-async fn an_item_without_a_name_is_shown_as_its_type_id(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
+#[tokio::test]
+async fn an_item_without_a_name_is_shown_as_its_type_id() {
+    let (app, browser) = setup().await;
     Item {
         name: None,
         ..Item::new(12345)
     }
-    .insert(&pool)
+    .insert(&app)
     .await;
 
     let html = get(&app, &browser, "/opportunities/tables").await;
@@ -242,27 +253,27 @@ async fn an_item_without_a_name_is_shown_as_its_type_id(pool: PgPool) {
     assert_eq!(cell(table(&html, "classic"), 12345, "item"), "Type 12345");
 }
 
-#[sqlx::test]
-async fn items_that_fail_a_hard_rule_are_in_no_table(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
-    Item::new(1).insert(&pool).await; // passes
+#[tokio::test]
+async fn items_that_fail_a_hard_rule_are_in_no_table() {
+    let (app, browser) = setup().await;
+    Item::new(1).insert(&app).await; // passes
     Item {
         best_sell: "100.00",
         ..Item::new(2)
     }
-    .insert(&pool)
+    .insert(&app)
     .await; // no margin
     Item {
         sigma: None,
         ..Item::new(3)
     }
-    .insert(&pool)
+    .insert(&app)
     .await; // not enough history
     Item {
         volume_7d: 0.0,
         ..Item::new(4)
     }
-    .insert(&pool)
+    .insert(&app)
     .await; // no volume
     // Fills in far more than three days: a tiny volume and many competitors.
     Item {
@@ -271,7 +282,7 @@ async fn items_that_fail_a_hard_rule_are_in_no_table(pool: PgPool) {
         sell_near: 5,
         ..Item::new(5)
     }
-    .insert(&pool)
+    .insert(&app)
     .await;
 
     let html = get(&app, &browser, "/opportunities/tables").await;
@@ -279,16 +290,16 @@ async fn items_that_fail_a_hard_rule_are_in_no_table(pool: PgPool) {
     assert_eq!(rows(table(&html, "classic")), [1]);
 }
 
-#[sqlx::test]
-async fn more_than_fifty_matches_page_through_all_of_them_by_isk_per_day(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
+#[tokio::test]
+async fn more_than_fifty_matches_page_through_all_of_them_by_isk_per_day() {
+    let (app, browser) = setup().await;
     for i in 1..=80i64 {
         // A larger volume fills faster and so earns more per day.
         Item {
             volume_7d: 10_000_000.0 * i as f64,
             ..Item::new(1000 + i)
         }
-        .insert(&pool)
+        .insert(&app)
         .await;
     }
 
@@ -305,15 +316,15 @@ async fn more_than_fifty_matches_page_through_all_of_them_by_isk_per_day(pool: P
     assert_eq!(second.last(), Some(&1001));
 }
 
-#[sqlx::test]
-async fn the_page_is_applied_after_sorting_and_clamped_and_carried_by_the_controls(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
+#[tokio::test]
+async fn the_page_is_applied_after_sorting_and_clamped_and_carried_by_the_controls() {
+    let (app, browser) = setup().await;
     for i in 1..=80i64 {
         Item {
             volume_7d: 10_000_000.0 * i as f64,
             ..Item::new(1000 + i)
         }
-        .insert(&pool)
+        .insert(&app)
         .await;
     }
 
@@ -345,9 +356,9 @@ async fn the_page_is_applied_after_sorting_and_clamped_and_carried_by_the_contro
     assert!(!sort_link.contains("page="), "{sort_link}");
 }
 
-#[sqlx::test]
-async fn each_table_has_its_own_sorting_in_the_url_and_the_headers_carry_all_of_them(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
+#[tokio::test]
+async fn each_table_has_its_own_sorting_in_the_url_and_the_headers_carry_all_of_them() {
+    let (app, browser) = setup().await;
     // Both items are in the trend table too, so every table has its headers.
     let crossed = |item: Item| Item {
         cross_day: Some("2026-10-16"),
@@ -361,14 +372,14 @@ async fn each_table_has_its_own_sorting_in_the_url_and_the_headers_carry_all_of_
         volume_7d: 200_000_000.0,
         ..Item::new(35)
     })
-    .insert(&pool)
+    .insert(&app)
     .await;
     crossed(Item {
         name: Some("Tritanium"),
         volume_7d: 100_000_000.0,
         ..Item::new(34)
     })
-    .insert(&pool)
+    .insert(&app)
     .await;
 
     let default = get(&app, &browser, "/opportunities/tables").await;
@@ -403,17 +414,17 @@ async fn each_table_has_its_own_sorting_in_the_url_and_the_headers_carry_all_of_
     assert!(table(&html, "classic").contains("cs=item&cd=desc"));
 }
 
-#[sqlx::test]
-async fn an_unknown_sort_key_falls_back_to_isk_per_day(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
+#[tokio::test]
+async fn an_unknown_sort_key_falls_back_to_isk_per_day() {
+    let (app, browser) = setup().await;
     Item {
         name: Some("Pyerite"),
         volume_7d: 200_000_000.0,
         ..Item::new(35)
     }
-    .insert(&pool)
+    .insert(&app)
     .await;
-    Item::new(34).insert(&pool).await;
+    Item::new(34).insert(&app).await;
 
     let html = get(
         &app,
@@ -425,37 +436,42 @@ async fn an_unknown_sort_key_falls_back_to_isk_per_day(pool: PgPool) {
     assert_eq!(rows(table(&html, "classic")), [35, 34]);
 }
 
-#[sqlx::test]
-async fn a_row_is_marked_when_a_selected_character_has_an_order_of_that_side_at_the_station(
-    pool: PgPool,
-) {
-    let (app, browser) = setup(pool.clone()).await;
+#[tokio::test]
+async fn a_row_is_marked_when_a_selected_character_has_an_order_of_that_side_at_the_station() {
+    let (app, browser) = setup().await;
     for id in [34, 35, 36] {
-        Item::new(id).insert(&pool).await;
+        Item::new(id).insert(&app).await;
     }
-    let order = |order_id: i64, type_id: i64, buy: bool, location: i64| {
-        let pool = pool.clone();
-        async move {
-            sqlx::query(
-                "INSERT INTO current_orders (order_id, character_id, type_id, region_id, location_id,
-                     is_buy_order, is_corporation, price, volume_remain, volume_total, min_volume,
-                     range, issued, duration)
-                 VALUES ($1, $2, $3, 10000002, $4, $5, false, 10, 1, 1, 1, 'station', now(), 90)",
-            )
-            .bind(order_id)
-            .bind(ALICE)
-            .bind(type_id)
-            .bind(location)
-            .bind(buy)
-            .execute(&pool)
-            .await
-            .unwrap();
+    let now = time::OffsetDateTime::now_utc();
+    let order = |order_id: i64, type_id: i64, is_buy_order: bool, location_id: i64| {
+        sekondo::esi::EsiOrder {
+            order_id,
+            type_id,
+            region_id: 10000002,
+            location_id,
+            is_buy_order,
+            is_corporation: false,
+            price_cents: 1000,
+            volume_remain: 1,
+            volume_total: 1,
+            min_volume: 1,
+            range: "station".to_owned(),
+            escrow_cents: None,
+            issued: now,
+            duration: 90,
         }
     };
-    order(1, 34, false, JITA_44).await;
-    order(2, 35, true, JITA_44).await;
-    // Elsewhere does not count.
-    order(3, 36, false, 60008494).await;
+    let orders = [
+        order(1, 34, false, JITA_44),
+        order(2, 35, true, JITA_44),
+        // Elsewhere does not count.
+        order(3, 36, false, 60008494),
+    ];
+    app.stores
+        .orders
+        .replace_orders(ALICE, now, &orders, now + time::Duration::hours(1), None)
+        .await
+        .unwrap();
 
     let html = get(&app, &browser, "/opportunities/tables").await;
     let classic = table(&html, "classic");
@@ -469,9 +485,9 @@ async fn a_row_is_marked_when_a_selected_character_has_an_order_of_that_side_at_
     assert!(!cell(classic, 36, "item").contains("own"));
 }
 
-#[sqlx::test]
-async fn the_trend_table_lists_a_fresh_crossing_with_rising_volume_only(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
+#[tokio::test]
+async fn the_trend_table_lists_a_fresh_crossing_with_rising_volume_only() {
+    let (app, browser) = setup().await;
     let yesterday = (time::OffsetDateTime::now_utc() - time::Duration::days(1))
         .date()
         .to_string();
@@ -483,7 +499,7 @@ async fn the_trend_table_lists_a_fresh_crossing_with_rising_volume_only(pool: Pg
         sma20: Some(105.0),
         ..Item::new(34)
     }
-    .insert(&pool)
+    .insert(&app)
     .await;
     // Crossed, but the volume is not rising.
     Item {
@@ -493,9 +509,9 @@ async fn the_trend_table_lists_a_fresh_crossing_with_rising_volume_only(pool: Pg
         sma20: Some(105.0),
         ..Item::new(35)
     }
-    .insert(&pool)
+    .insert(&app)
     .await;
-    Item::new(36).insert(&pool).await;
+    Item::new(36).insert(&app).await;
 
     let html = get(&app, &browser, "/opportunities/tables").await;
     let trend = table(&html, "trend");
@@ -512,42 +528,30 @@ async fn the_trend_table_lists_a_fresh_crossing_with_rising_volume_only(pool: Pg
     assert_eq!(rows(table(&html, "classic")).len(), 3);
 }
 
-#[sqlx::test]
-async fn the_tables_say_which_fees_they_use(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
+#[tokio::test]
+async fn the_tables_say_which_fees_they_use() {
+    let (app, browser) = setup().await;
 
     let html = get(&app, &browser, "/opportunities/tables").await;
 
     assert!(html.contains("base rates"), "{html}");
 }
 
-#[sqlx::test]
-async fn the_tables_use_the_fees_of_the_selected_character_with_the_lowest_margin(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
-    Item::new(34).insert(&pool).await;
+#[tokio::test]
+async fn the_tables_use_the_fees_of_the_selected_character_with_the_lowest_margin() {
+    let (app, browser) = setup().await;
+    Item::new(34).insert(&app).await;
     // Skills and standings polled; the owner of Jita 4-4 is known: b = 3 - 0.3 * 5 = 1.5%,
     // t = 7.5 * (1 - 0.11 * 5) = 3.375%.
-    for kind in ["skills", "standings"] {
-        sqlx::query(
-            "INSERT INTO fee_sync (character_id, kind, next_poll_at, last_success_at)
-             VALUES ($1, $2, now(), now())",
-        )
-        .bind(ALICE)
-        .bind(kind)
-        .execute(&pool)
+    let now = time::OffsetDateTime::now_utc();
+    let fees = &app.stores.fees;
+    fees.store_skills(ALICE, &[16622, 3446], &[5, 5], now, now, None)
         .await
         .unwrap();
-    }
-    for skill in [16622_i64, 3446] {
-        sqlx::query("INSERT INTO character_skills (character_id, skill_id, active_level) VALUES ($1, $2, 5)")
-            .bind(ALICE)
-            .bind(skill)
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
-    sqlx::query("INSERT INTO station_owners (station_id, owner_id, resolved_at) VALUES (60003760, 1000035, now())")
-        .execute(&pool)
+    fees.store_standings(ALICE, &[], now, now, None)
+        .await
+        .unwrap();
+    fees.insert_station_owner(JITA_44, 1000035, now)
         .await
         .unwrap();
 
@@ -565,9 +569,9 @@ async fn the_tables_use_the_fees_of_the_selected_character_with_the_lowest_margi
 
 // ---- mean reversion ----
 
-#[sqlx::test]
-async fn an_oversold_item_is_listed_with_the_sma_20_rounded_down_as_its_sell_price(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
+#[tokio::test]
+async fn an_oversold_item_is_listed_with_the_sma_20_rounded_down_as_its_sell_price() {
+    let (app, browser) = setup().await;
     Item {
         best_buy: "120.00",
         best_sell: "160.00",
@@ -576,7 +580,7 @@ async fn an_oversold_item_is_listed_with_the_sma_20_rounded_down_as_its_sell_pri
         rsi14: Some(45.0),
         ..Item::new(34)
     }
-    .insert(&pool)
+    .insert(&app)
     .await;
 
     let html = get(&app, &browser, "/opportunities/tables").await;
@@ -588,9 +592,9 @@ async fn an_oversold_item_is_listed_with_the_sma_20_rounded_down_as_its_sell_pri
     assert_eq!(cell(reversion, 34, "rsi"), "45.0");
 }
 
-#[sqlx::test]
-async fn an_item_inside_its_bands_is_not_listed_but_a_low_rsi_alone_is_enough(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
+#[tokio::test]
+async fn an_item_inside_its_bands_is_not_listed_but_a_low_rsi_alone_is_enough() {
+    let (app, browser) = setup().await;
     let base = |id| Item {
         best_buy: "120.00",
         best_sell: "160.00",
@@ -603,7 +607,7 @@ async fn an_item_inside_its_bands_is_not_listed_but_a_low_rsi_alone_is_enough(po
         rsi14: Some(45.0),
         ..base(1)
     }
-    .insert(&pool)
+    .insert(&app)
     .await;
     // Within the band, but RSI 25: listed.
     Item {
@@ -611,7 +615,7 @@ async fn an_item_inside_its_bands_is_not_listed_but_a_low_rsi_alone_is_enough(po
         rsi14: Some(25.0),
         ..base(2)
     }
-    .insert(&pool)
+    .insert(&app)
     .await;
     // Oversold, but the SMA 20 is not above the current best buy: nothing to earn.
     Item {
@@ -621,7 +625,7 @@ async fn an_item_inside_its_bands_is_not_listed_but_a_low_rsi_alone_is_enough(po
         rsi14: Some(20.0),
         ..base(3)
     }
-    .insert(&pool)
+    .insert(&app)
     .await;
     // Fewer than 20 history days: no SMA 20, so not listed.
     Item {
@@ -630,7 +634,7 @@ async fn an_item_inside_its_bands_is_not_listed_but_a_low_rsi_alone_is_enough(po
         rsi14: Some(10.0),
         ..base(4)
     }
-    .insert(&pool)
+    .insert(&app)
     .await;
 
     let html = get(&app, &browser, "/opportunities/tables").await;
@@ -640,12 +644,10 @@ async fn an_item_inside_its_bands_is_not_listed_but_a_low_rsi_alone_is_enough(po
 
 // ---- recurring expansion ----
 
-#[sqlx::test]
-async fn a_recurring_window_is_listed_with_its_name_its_next_start_and_its_sell_price(
-    pool: PgPool,
-) {
+#[tokio::test]
+async fn a_recurring_window_is_listed_with_its_name_its_next_start_and_its_sell_price() {
     use sekondo::opportunities::analysis::WindowKind;
-    let (app, browser) = setup(pool.clone()).await;
+    let (app, browser) = setup().await;
     Item {
         best_buy: "100.00",
         best_sell: "110.00",
@@ -654,10 +656,10 @@ async fn a_recurring_window_is_listed_with_its_name_its_next_start_and_its_sell_
         expansion_sell: Some("125.20"),
         ..Item::new(34)
     }
-    .insert(&pool)
+    .insert(&app)
     .await;
     // No window: not in this table, but in the classic one.
-    Item::new(35).insert(&pool).await;
+    Item::new(35).insert(&app).await;
 
     let html = get(&app, &browser, "/opportunities/tables").await;
     let expansion = table(&html, "expansion");
@@ -672,26 +674,36 @@ async fn a_recurring_window_is_listed_with_its_name_its_next_start_and_its_sell_
     assert_eq!(rows(table(&html, "classic")), [35]);
 }
 
-async fn snapshot_days(pool: &PgPool, days: i64) {
-    for back in 1..=days {
-        sqlx::query(
-            "INSERT INTO station_snapshots (recorded_at, region_id, station_id, type_id, best_buy,
-                 best_sell, spread, buy_near_units, buy_near_orders, sell_near_units,
-                 sell_near_orders, buy_units, sell_units, buy_taken, sell_taken)
-             VALUES (now() - make_interval(days => $1) - interval '1 hour', 10000002, 60003760,
-                     34, 100, 110, 0.1, 1, 1, 1, 1, 1, 1, 0, 0)",
-        )
-        .bind(back as i32)
-        .execute(pool)
+async fn snapshot_days(app: &TestApp, days: i64) {
+    let rows: Vec<_> = (1..=days)
+        .map(|back| sekondo::store::SeedSnapshotRow {
+            recorded_at: time::OffsetDateTime::now_utc()
+                - time::Duration::days(back)
+                - time::Duration::hours(1),
+            type_id: 34,
+            best_buy: 100.0,
+            best_sell: 110.0,
+            buy_near_units: 1,
+            buy_near_orders: 1,
+            sell_near_units: 1,
+            sell_near_orders: 1,
+            buy_units: 1,
+            sell_units: 1,
+            buy_taken: 0,
+            sell_taken: 0,
+        })
+        .collect();
+    app.stores
+        .station
+        .seed_snapshots(10000002, JITA_44, &rows)
         .await
         .unwrap();
-    }
 }
 
-#[sqlx::test]
-async fn the_expansion_table_says_that_hourly_patterns_are_still_being_collected(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
-    snapshot_days(&pool, 3).await;
+#[tokio::test]
+async fn the_expansion_table_says_that_hourly_patterns_are_still_being_collected() {
+    let (app, browser) = setup().await;
+    snapshot_days(&app, 3).await;
 
     let html = get(&app, &browser, "/opportunities/tables").await;
 
@@ -702,10 +714,10 @@ async fn the_expansion_table_says_that_hourly_patterns_are_still_being_collected
     assert!(!table(&html, "classic").contains("Collecting hourly data"));
 }
 
-#[sqlx::test]
-async fn the_collecting_note_goes_away_after_seven_days(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
-    snapshot_days(&pool, 7).await;
+#[tokio::test]
+async fn the_collecting_note_goes_away_after_seven_days() {
+    let (app, browser) = setup().await;
+    snapshot_days(&app, 7).await;
 
     let html = get(&app, &browser, "/opportunities/tables").await;
 

@@ -63,7 +63,7 @@ pub async fn stream(State(state): State<AppState>, session: Session) -> Response
                 Some((Ok(event), st))
             }
             _ = st.ticker.tick() => {
-                let store = session::PgSessionStore::new(st.state.pool.clone());
+                let store = session::AppSessionStore::new(st.state.stores.sessions.clone());
                 if !session::is_active(&store, &st.session_id, st.state.clock.now()).await {
                     return None;
                 }

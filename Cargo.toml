@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/sekondo", "crates/eve-stub", "crates/esi-contract", "crates/esi-verify"]
+members = ["crates/sekondo", "crates/eve-stub", "crates/esi-contract", "crates/esi-verify", "crates/store-contract"]
 
 [workspace.package]
 edition = "2024"

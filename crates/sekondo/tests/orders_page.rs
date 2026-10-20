@@ -2,14 +2,13 @@ mod common;
 
 use common::{AppBuilder, Browser, TestApp, kpi};
 use serde_json::{Value, json};
-use sqlx::PgPool;
 
 const ALICE: i64 = 90000001;
 const BOB: i64 = 90000002;
 const CAROL: i64 = 90000003;
 
-async fn app(pool: PgPool) -> TestApp {
-    AppBuilder::new(pool).with_stub().spawn().await
+async fn app() -> TestApp {
+    AppBuilder::new().with_stub().spawn().await
 }
 
 async fn signed_in(app: &TestApp, character: i64) -> Browser {
@@ -76,16 +75,16 @@ fn order(id: i64, type_id: i64, location: i64, buy: bool, price: f64) -> Value {
 
 /// Alice's fixture: sells 5001 (Tritanium, 10 of 20 at 1.5m) and 5002 (Pyerite, 100 at 950.50),
 /// buy 5003 (Mexallon, escrow 2.5m, in a structure).
-async fn with_polled_fixture(pool: PgPool) -> (TestApp, Browser) {
-    let app = app(pool).await;
+async fn with_polled_fixture() -> (TestApp, Browser) {
+    let app = app().await;
     let browser = signed_in(&app, ALICE).await;
     app.state.poller.poll_character(ALICE).await;
     (app, browser)
 }
 
-#[sqlx::test]
-async fn sell_and_buy_orders_are_in_separate_tables(pool: PgPool) {
-    let (app, browser) = with_polled_fixture(pool).await;
+#[tokio::test]
+async fn sell_and_buy_orders_are_in_separate_tables() {
+    let (app, browser) = with_polled_fixture().await;
 
     let html = get(&app, &browser, "/orders").await;
 
@@ -97,9 +96,9 @@ async fn sell_and_buy_orders_are_in_separate_tables(pool: PgPool) {
     assert!(!buy.contains(r#"id="order-5001""#));
 }
 
-#[sqlx::test]
-async fn a_sell_row_shows_every_column(pool: PgPool) {
-    let (app, browser) = with_polled_fixture(pool).await;
+#[tokio::test]
+async fn a_sell_row_shows_every_column() {
+    let (app, browser) = with_polled_fixture().await;
 
     let html = get(&app, &browser, "/orders").await;
     let r = row(&html, 5001);
@@ -122,9 +121,9 @@ async fn a_sell_row_shows_every_column(pool: PgPool) {
     assert!(small.contains(">950.50<"), "{small}");
 }
 
-#[sqlx::test]
-async fn a_buy_row_shows_the_escrow_and_the_structure_name(pool: PgPool) {
-    let (app, browser) = with_polled_fixture(pool).await;
+#[tokio::test]
+async fn a_buy_row_shows_the_escrow_and_the_structure_name() {
+    let (app, browser) = with_polled_fixture().await;
 
     let html = get(&app, &browser, "/orders").await;
     let r = row(&html, 5003);
@@ -138,11 +137,9 @@ async fn a_buy_row_shows_the_escrow_and_the_structure_name(pool: PgPool) {
     assert!(r.contains("15 / 20"));
 }
 
-#[sqlx::test]
-async fn an_unresolved_name_shows_a_placeholder_and_an_inaccessible_structure_says_so(
-    pool: PgPool,
-) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn an_unresolved_name_shows_a_placeholder_and_an_inaccessible_structure_says_so() {
+    let app = app().await;
     let browser = signed_in(&app, ALICE).await;
     // 999999 is no known type, and the structure is refused.
     app.stub_control(
@@ -170,9 +167,9 @@ async fn an_unresolved_name_shows_a_placeholder_and_an_inaccessible_structure_sa
     );
 }
 
-#[sqlx::test]
-async fn corporation_orders_carry_a_marker(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn corporation_orders_carry_a_marker() {
+    let app = app().await;
     let browser = signed_in(&app, ALICE).await;
     let mut corp = order(1, 34, 60003760, false, 10.0);
     corp["is_corporation"] = json!(true);
@@ -189,9 +186,9 @@ async fn corporation_orders_carry_a_marker(pool: PgPool) {
     assert!(!row(&html, 2).contains("Corp"));
 }
 
-#[sqlx::test]
-async fn time_left_and_the_issue_date_are_shown_in_whole_units_and_eve_time(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn time_left_and_the_issue_date_are_shown_in_whole_units_and_eve_time() {
+    let app = app().await;
     let browser = signed_in(&app, ALICE).await;
     let issued =
         time::OffsetDateTime::now_utc() - time::Duration::days(80) - time::Duration::minutes(115);
@@ -213,9 +210,9 @@ async fn time_left_and_the_issue_date_are_shown_in_whole_units_and_eve_time(pool
     assert!(r.contains(&expected), "{expected} in {r}");
 }
 
-#[sqlx::test]
-async fn without_orders_both_tables_say_so(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn without_orders_both_tables_say_so() {
+    let app = app().await;
     let browser = signed_in(&app, CAROL).await;
     app.state.poller.poll_character(CAROL).await;
 
@@ -225,9 +222,9 @@ async fn without_orders_both_tables_say_so(pool: PgPool) {
     assert!(buy_table(&html).contains("No buy orders"));
 }
 
-#[sqlx::test]
-async fn only_orders_of_the_own_account_are_shown(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn only_orders_of_the_own_account_are_shown() {
+    let app = app().await;
     let alice = signed_in(&app, ALICE).await;
     let _bob = signed_in(&app, BOB).await;
     app.state.poller.poll_character(ALICE).await;
@@ -240,9 +237,9 @@ async fn only_orders_of_the_own_account_are_shown(pool: PgPool) {
     assert!(!html.contains("Bob Bravo"));
 }
 
-#[sqlx::test]
-async fn an_unauthenticated_request_is_redirected_to_the_landing_page(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn an_unauthenticated_request_is_redirected_to_the_landing_page() {
+    let app = app().await;
     for path in [
         "/orders/sell",
         "/orders/buy",
@@ -266,9 +263,9 @@ fn position(html: &str, order_id: i64) -> usize {
         .unwrap_or_else(|| panic!("order {order_id} missing"))
 }
 
-#[sqlx::test]
-async fn the_default_sorting_is_by_item_name_ascending(pool: PgPool) {
-    let (app, browser) = with_polled_fixture(pool).await;
+#[tokio::test]
+async fn the_default_sorting_is_by_item_name_ascending() {
+    let (app, browser) = with_polled_fixture().await;
 
     let html = get(&app, &browser, "/orders").await;
 
@@ -276,9 +273,9 @@ async fn the_default_sorting_is_by_item_name_ascending(pool: PgPool) {
     assert!(position(&html, 5002) < position(&html, 5001));
 }
 
-#[sqlx::test]
-async fn sorting_by_price_can_be_reversed_and_is_kept_in_the_header_links(pool: PgPool) {
-    let (app, browser) = with_polled_fixture(pool).await;
+#[tokio::test]
+async fn sorting_by_price_can_be_reversed_and_is_kept_in_the_header_links() {
+    let (app, browser) = with_polled_fixture().await;
 
     let asc = get(&app, &browser, "/orders?sort=price&dir=asc").await;
     assert!(position(&asc, 5002) < position(&asc, 5001));
@@ -290,9 +287,9 @@ async fn sorting_by_price_can_be_reversed_and_is_kept_in_the_header_links(pool: 
     assert!(unescaped(&desc).contains("sort=price&dir=asc"));
 }
 
-#[sqlx::test]
-async fn the_buy_table_is_sorted_independently(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn the_buy_table_is_sorted_independently() {
+    let app = app().await;
     let browser = signed_in(&app, ALICE).await;
     app.stub_control(
         "orders",
@@ -319,9 +316,9 @@ async fn the_buy_table_is_sorted_independently(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn unknown_sort_values_never_reach_sql_and_fall_back_to_the_default(pool: PgPool) {
-    let (app, browser) = with_polled_fixture(pool).await;
+#[tokio::test]
+async fn unknown_sort_values_never_reach_sql_and_fall_back_to_the_default() {
+    let (app, browser) = with_polled_fixture().await;
 
     for query in [
         "sort=price;DROP TABLE current_orders&dir=desc",
@@ -334,9 +331,9 @@ async fn unknown_sort_values_never_reach_sql_and_fall_back_to_the_default(pool: 
     }
 }
 
-#[sqlx::test]
-async fn the_details_columns_are_no_longer_sortable_and_fall_back_to_the_default(pool: PgPool) {
-    let (app, browser) = with_polled_fixture(pool).await;
+#[tokio::test]
+async fn the_details_columns_are_no_longer_sortable_and_fall_back_to_the_default() {
+    let (app, browser) = with_polled_fixture().await;
 
     for name in ["character", "location", "region", "issued"] {
         for dir in ["asc", "desc"] {
@@ -358,9 +355,9 @@ async fn the_details_columns_are_no_longer_sortable_and_fall_back_to_the_default
     }
 }
 
-#[sqlx::test]
-async fn the_content_fragments_have_no_page_around_them_and_follow_the_query(pool: PgPool) {
-    let (app, browser) = with_polled_fixture(pool).await;
+#[tokio::test]
+async fn the_content_fragments_have_no_page_around_them_and_follow_the_query() {
+    let (app, browser) = with_polled_fixture().await;
 
     let sell = get_one(&app, &browser, "/orders/sell/content?sort=price&dir=desc").await;
     let buy = get_one(&app, &browser, "/orders/buy/content").await;
@@ -379,9 +376,9 @@ async fn the_content_fragments_have_no_page_around_them_and_follow_the_query(poo
     assert!(position(&sell, 5001) < position(&sell, 5002));
 }
 
-#[sqlx::test]
-async fn a_foreign_character_id_in_the_url_shows_the_own_characters(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn a_foreign_character_id_in_the_url_shows_the_own_characters() {
+    let app = app().await;
     let alice = signed_in(&app, ALICE).await;
     let _carol = signed_in(&app, CAROL).await;
     app.state.poller.poll_character(ALICE).await;
@@ -436,9 +433,9 @@ fn details_text(html: &str, order_id: i64) -> String {
     cell_texts(details).remove(0)
 }
 
-#[sqlx::test]
-async fn each_order_has_a_details_line_with_issued_character_location_and_region(pool: PgPool) {
-    let (app, browser) = with_polled_fixture(pool).await;
+#[tokio::test]
+async fn each_order_has_a_details_line_with_issued_character_location_and_region() {
+    let (app, browser) = with_polled_fixture().await;
 
     let html = get(&app, &browser, "/orders").await;
 
@@ -496,17 +493,22 @@ async fn with_market(app: &TestApp, market: Vec<Value>) {
     )
     .await;
     app.state.market.tick().await;
-    let pairs: Vec<(i64, i64)> = sqlx::query_as("SELECT region_id, type_id FROM market_sync")
-        .fetch_all(&app.state.pool)
+    let account = app
+        .state
+        .repo
+        .find_character(90000001)
         .await
-        .unwrap();
+        .unwrap()
+        .unwrap()
+        .account_id;
+    let pairs = app.stores.market.account_pairs(account).await.unwrap();
     for (region, type_id) in pairs {
         app.state.market.refresh_pair(region, type_id).await;
     }
 }
 
-async fn alice_sells(pool: PgPool, orders: Vec<Value>) -> (TestApp, Browser) {
-    let app = app(pool).await;
+async fn alice_sells(orders: Vec<Value>) -> (TestApp, Browser) {
+    let app = app().await;
     let browser = signed_in(&app, ALICE).await;
     app.stub_control("orders", json!({"character_id": ALICE, "orders": orders}))
         .await;
@@ -514,9 +516,9 @@ async fn alice_sells(pool: PgPool, orders: Vec<Value>) -> (TestApp, Browser) {
     (app, browser)
 }
 
-#[sqlx::test]
-async fn a_top_order_reads_top_in_the_success_style_and_has_no_gap(pool: PgPool) {
-    let (app, browser) = alice_sells(pool, vec![order(1, 34, STATION, false, 1_500_000.0)]).await;
+#[tokio::test]
+async fn a_top_order_reads_top_in_the_success_style_and_has_no_gap() {
+    let (app, browser) = alice_sells(vec![order(1, 34, STATION, false, 1_500_000.0)]).await;
     with_market(
         &app,
         vec![
@@ -535,9 +537,9 @@ async fn a_top_order_reads_top_in_the_success_style_and_has_no_gap(pool: PgPool)
     assert_eq!(cells[3], "", "no gap for a top order");
 }
 
-#[sqlx::test]
-async fn an_undercut_order_shows_the_count_and_the_gap_with_the_exact_value_on_hover(pool: PgPool) {
-    let (app, browser) = alice_sells(pool, vec![order(1, 34, STATION, false, 1_012_500.0)]).await;
+#[tokio::test]
+async fn an_undercut_order_shows_the_count_and_the_gap_with_the_exact_value_on_hover() {
+    let (app, browser) = alice_sells(vec![order(1, 34, STATION, false, 1_012_500.0)]).await;
     with_market(
         &app,
         vec![
@@ -559,9 +561,9 @@ async fn an_undercut_order_shows_the_count_and_the_gap_with_the_exact_value_on_h
     assert!(r.contains(r#"title="12,500.00 ISK">12.5k (1.3%)<"#), "{r}");
 }
 
-#[sqlx::test]
-async fn an_order_without_market_data_shows_a_dash_for_standing_and_gap(pool: PgPool) {
-    let (app, browser) = with_polled_fixture(pool).await;
+#[tokio::test]
+async fn an_order_without_market_data_shows_a_dash_for_standing_and_gap() {
+    let (app, browser) = with_polled_fixture().await;
 
     let html = get(&app, &browser, "/orders").await;
     let cells = cell_texts(row(&html, 5001));
@@ -571,9 +573,9 @@ async fn an_order_without_market_data_shows_a_dash_for_standing_and_gap(pool: Pg
     assert!(!row(&html, 5001).contains("badge top"));
 }
 
-#[sqlx::test]
-async fn the_standing_and_gap_columns_follow_the_price_in_both_tables(pool: PgPool) {
-    let (app, browser) = with_polled_fixture(pool).await;
+#[tokio::test]
+async fn the_standing_and_gap_columns_follow_the_price_in_both_tables() {
+    let (app, browser) = with_polled_fixture().await;
 
     let html = get(&app, &browser, "/orders").await;
 
@@ -603,17 +605,12 @@ fn with_remaining(mut order: Value, units: i64) -> Value {
     order
 }
 
-#[sqlx::test]
-async fn the_undercut_volume_is_a_whole_number_with_separators_and_empty_for_a_top_order(
-    pool: PgPool,
-) {
-    let (app, browser) = alice_sells(
-        pool,
-        vec![
-            order(1, 34, STATION, false, 1_012_500.0),
-            order(2, 35, STATION, false, 100.0),
-        ],
-    )
+#[tokio::test]
+async fn the_undercut_volume_is_a_whole_number_with_separators_and_empty_for_a_top_order() {
+    let (app, browser) = alice_sells(vec![
+        order(1, 34, STATION, false, 1_012_500.0),
+        order(2, 35, STATION, false, 100.0),
+    ])
     .await;
     with_market(
         &app,
@@ -634,9 +631,9 @@ async fn the_undercut_volume_is_a_whole_number_with_separators_and_empty_for_a_t
     assert_eq!(cell_texts(row(&html, 2))[4], "", "a top order has none");
 }
 
-#[sqlx::test]
-async fn a_buy_orders_undercut_volume_sums_the_reaching_orders(pool: PgPool) {
-    let (app, browser) = alice_sells(pool, vec![order(1, 34, STATION, true, 50.0)]).await;
+#[tokio::test]
+async fn a_buy_orders_undercut_volume_sums_the_reaching_orders() {
+    let (app, browser) = alice_sells(vec![order(1, 34, STATION, true, 50.0)]).await;
     let buy = |id: i64, price: f64, range: &str, remaining: i64| {
         let mut o = with_remaining(public_sell(id, 34, price), remaining);
         o["is_buy_order"] = json!(true);
@@ -658,26 +655,23 @@ async fn a_buy_orders_undercut_volume_sums_the_reaching_orders(pool: PgPool) {
     assert_eq!(cell_texts(row(buy_table(&html), 1))[4], "1,300");
 }
 
-#[sqlx::test]
-async fn an_order_without_market_data_shows_a_dash_for_the_undercut_volume(pool: PgPool) {
-    let (app, browser) = with_polled_fixture(pool).await;
+#[tokio::test]
+async fn an_order_without_market_data_shows_a_dash_for_the_undercut_volume() {
+    let (app, browser) = with_polled_fixture().await;
 
     let html = get(&app, &browser, "/orders").await;
 
     assert_eq!(cell_texts(row(&html, 5001))[4], "\u{2014}");
 }
 
-#[sqlx::test]
-async fn sorting_by_undercut_volume_counts_a_top_order_as_zero_and_puts_no_data_last(pool: PgPool) {
-    let (app, browser) = alice_sells(
-        pool,
-        vec![
-            order(1, 34, STATION, false, 100.0),
-            order(2, 35, STATION, false, 100.0),
-            order(3, 36, STATION, false, 100.0),
-            order(4, 37, STRUCTURE, false, 100.0),
-        ],
-    )
+#[tokio::test]
+async fn sorting_by_undercut_volume_counts_a_top_order_as_zero_and_puts_no_data_last() {
+    let (app, browser) = alice_sells(vec![
+        order(1, 34, STATION, false, 100.0),
+        order(2, 35, STATION, false, 100.0),
+        order(3, 36, STATION, false, 100.0),
+        order(4, 37, STRUCTURE, false, 100.0),
+    ])
     .await;
     with_market(
         &app,
@@ -701,17 +695,14 @@ async fn sorting_by_undercut_volume_counts_a_top_order_as_zero_and_puts_no_data_
 
 /// Five sell orders: ids 1 to 5 are top, undercut 3 times, 12 times, once, and without market
 /// data (in a structure).
-async fn standing_mix(pool: PgPool) -> (TestApp, Browser) {
-    let (app, browser) = alice_sells(
-        pool,
-        vec![
-            order(1, 34, STATION, false, 100.0),
-            order(2, 35, STATION, false, 100.0),
-            order(3, 36, STATION, false, 100.0),
-            order(4, 37, STATION, false, 100.0),
-            order(5, 38, STRUCTURE, false, 100.0),
-        ],
-    )
+async fn standing_mix() -> (TestApp, Browser) {
+    let (app, browser) = alice_sells(vec![
+        order(1, 34, STATION, false, 100.0),
+        order(2, 35, STATION, false, 100.0),
+        order(3, 36, STATION, false, 100.0),
+        order(4, 37, STATION, false, 100.0),
+        order(5, 38, STRUCTURE, false, 100.0),
+    ])
     .await;
     let mut market = vec![public_sell(100, 34, 120.0)];
     for (item, count) in [(35, 3), (36, 12), (37, 1)] {
@@ -729,9 +720,9 @@ fn order_of_rows(html: &str, ids: &[i64]) -> Vec<i64> {
     found.into_iter().map(|(_, id)| id).collect()
 }
 
-#[sqlx::test]
-async fn sorting_by_standing_reads_the_number_and_puts_no_data_last(pool: PgPool) {
-    let (app, browser) = standing_mix(pool).await;
+#[tokio::test]
+async fn sorting_by_standing_reads_the_number_and_puts_no_data_last() {
+    let (app, browser) = standing_mix().await;
 
     let asc = get(&app, &browser, "/orders?sort=standing&dir=asc").await;
     assert_eq!(order_of_rows(&asc, &[1, 2, 3, 4, 5]), [1, 4, 2, 3, 5]);
@@ -740,9 +731,9 @@ async fn sorting_by_standing_reads_the_number_and_puts_no_data_last(pool: PgPool
     assert_eq!(order_of_rows(&desc, &[1, 2, 3, 4, 5]), [3, 2, 4, 1, 5]);
 }
 
-#[sqlx::test]
-async fn the_standing_header_links_to_its_own_sorting_and_reverses_it(pool: PgPool) {
-    let (app, browser) = standing_mix(pool).await;
+#[tokio::test]
+async fn the_standing_header_links_to_its_own_sorting_and_reverses_it() {
+    let (app, browser) = standing_mix().await;
 
     let default = unescaped(&get(&app, &browser, "/orders").await);
     assert!(default.contains("sort=standing&dir=asc"), "{default}");
@@ -751,17 +742,14 @@ async fn the_standing_header_links_to_its_own_sorting_and_reverses_it(pool: PgPo
     assert!(sorted.contains(r#"aria-sort="ascending""#));
 }
 
-#[sqlx::test]
-async fn sorting_by_gap_counts_a_top_order_as_no_difference_and_puts_no_data_last(pool: PgPool) {
-    let (app, browser) = alice_sells(
-        pool,
-        vec![
-            order(1, 34, STATION, false, 100.0),
-            order(2, 35, STATION, false, 105.0),
-            order(3, 36, STATION, false, 180.0),
-            order(4, 37, STRUCTURE, false, 100.0),
-        ],
-    )
+#[tokio::test]
+async fn sorting_by_gap_counts_a_top_order_as_no_difference_and_puts_no_data_last() {
+    let (app, browser) = alice_sells(vec![
+        order(1, 34, STATION, false, 100.0),
+        order(2, 35, STATION, false, 105.0),
+        order(3, 36, STATION, false, 180.0),
+        order(4, 37, STRUCTURE, false, 100.0),
+    ])
     .await;
     with_market(
         &app,
@@ -780,9 +768,9 @@ async fn sorting_by_gap_counts_a_top_order_as_no_difference_and_puts_no_data_las
     assert_eq!(order_of_rows(&desc, &[1, 2, 3, 4]), [3, 2, 1, 4]);
 }
 
-#[sqlx::test]
-async fn an_unknown_sort_name_still_falls_back_to_the_default(pool: PgPool) {
-    let (app, browser) = standing_mix(pool).await;
+#[tokio::test]
+async fn an_unknown_sort_name_still_falls_back_to_the_default() {
+    let (app, browser) = standing_mix().await;
 
     let html = get(&app, &browser, "/orders?sort=standing%3B%20DROP&dir=desc").await;
 
@@ -796,21 +784,31 @@ async fn an_unknown_sort_name_still_falls_back_to_the_default(pool: PgPool) {
 /// Alice has fee data for Jita 4-4 (Accounting 5, Broker Relations 5, faction standing 2.0 and
 /// corporation standing 1.5: a sales tax of 3.375% and a broker fee of 1.41%).
 async fn alice_with_fees(app: &TestApp) {
-    for statement in [
-        "INSERT INTO fee_sync (character_id, kind, next_poll_at, last_success_at) \
-         VALUES (90000001, 'skills', now(), now()), (90000001, 'standings', now(), now())",
-        "INSERT INTO character_skills (character_id, skill_id, active_level) \
-         VALUES (90000001, 16622, 5), (90000001, 3446, 5)",
-        "INSERT INTO character_standings (character_id, from_id, from_type, standing) \
-         VALUES (90000001, 500001, 'faction', 2.0), (90000001, 1000035, 'npc_corp', 1.5)",
-        "INSERT INTO station_owners (station_id, owner_id, resolved_at) \
-         VALUES (60003760, 1000035, now())",
-    ] {
-        sqlx::query(statement)
-            .execute(&app.state.pool)
-            .await
-            .unwrap();
-    }
+    let now = app.state.clock.now();
+    let fees = &app.stores.fees;
+    fees.store_skills(90000001, &[16622, 3446], &[5, 5], now, now, None)
+        .await
+        .unwrap();
+    let standing = |from_id: i64, from_type: &str, standing: &str| sekondo::store::StandingInput {
+        from_id,
+        from_type: from_type.to_owned(),
+        standing: standing.to_owned(),
+    };
+    fees.store_standings(
+        90000001,
+        &[
+            standing(500001, "faction", "2.0"),
+            standing(1000035, "npc_corp", "1.5"),
+        ],
+        now,
+        now,
+        None,
+    )
+    .await
+    .unwrap();
+    fees.insert_station_owner(60003760, 1000035, now)
+        .await
+        .unwrap();
 }
 
 /// Alice bought `quantity` of `type_id` at 100.00 before her orders were issued.
@@ -838,26 +836,21 @@ async fn alice_bought(app: &TestApp, bought: &[(i64, i64, i64)]) {
 
 /// Sell orders 1 (earns 171.29), 2 (loses 19.14) and 3 (cost known for 3 of 8 units), all
 /// 4 remaining of 8.
-async fn margin_mix(pool: PgPool) -> (TestApp, Browser) {
-    let (app, browser) = alice_sells(
-        pool,
-        vec![
-            order(1, 34, STATION, false, 150.0),
-            order(2, 36, STATION, false, 100.0),
-            order(3, 35, STATION, false, 120.0),
-        ],
-    )
+async fn margin_mix() -> (TestApp, Browser) {
+    let (app, browser) = alice_sells(vec![
+        order(1, 34, STATION, false, 150.0),
+        order(2, 36, STATION, false, 100.0),
+        order(3, 35, STATION, false, 120.0),
+    ])
     .await;
     alice_with_fees(&app).await;
     alice_bought(&app, &[(1, 34, 8), (2, 36, 8), (3, 35, 3)]).await;
     (app, browser)
 }
 
-#[sqlx::test]
-async fn the_sell_table_has_a_margin_column_after_the_value_and_the_buy_table_has_none(
-    pool: PgPool,
-) {
-    let (app, browser) = with_polled_fixture(pool).await;
+#[tokio::test]
+async fn the_sell_table_has_a_margin_column_after_the_value_and_the_buy_table_has_none() {
+    let (app, browser) = with_polled_fixture().await;
 
     let html = get(&app, &browser, "/orders").await;
 
@@ -874,9 +867,9 @@ async fn the_sell_table_has_a_margin_column_after_the_value_and_the_buy_table_ha
     );
 }
 
-#[sqlx::test]
-async fn a_margin_shows_short_with_the_exact_value_and_the_cost_per_unit_on_hover(pool: PgPool) {
-    let (app, browser) = margin_mix(pool).await;
+#[tokio::test]
+async fn a_margin_shows_short_with_the_exact_value_and_the_cost_per_unit_on_hover() {
+    let (app, browser) = margin_mix().await;
 
     let html = get(&app, &browser, "/orders").await;
     let r = row(&html, 1);
@@ -888,9 +881,9 @@ async fn a_margin_shows_short_with_the_exact_value_and_the_cost_per_unit_on_hove
     assert!(!r.contains("badge loss"), "{r}");
 }
 
-#[sqlx::test]
-async fn a_negative_margin_is_in_the_error_style(pool: PgPool) {
-    let (app, browser) = margin_mix(pool).await;
+#[tokio::test]
+async fn a_negative_margin_is_in_the_error_style() {
+    let (app, browser) = margin_mix().await;
 
     let html = get(&app, &browser, "/orders").await;
     let r = row(&html, 2);
@@ -902,9 +895,9 @@ async fn a_negative_margin_is_in_the_error_style(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn a_partly_known_cost_shows_a_dash_and_how_many_units_are_known_on_hover(pool: PgPool) {
-    let (app, browser) = margin_mix(pool).await;
+#[tokio::test]
+async fn a_partly_known_cost_shows_a_dash_and_how_many_units_are_known_on_hover() {
+    let (app, browser) = margin_mix().await;
 
     let html = get(&app, &browser, "/orders").await;
     let r = row(&html, 3);
@@ -913,9 +906,9 @@ async fn a_partly_known_cost_shows_a_dash_and_how_many_units_are_known_on_hover(
     assert!(r.contains(">\u{2014}<"), "{r}");
 }
 
-#[sqlx::test]
-async fn sorting_by_margin_puts_orders_without_one_last_in_both_directions(pool: PgPool) {
-    let (app, browser) = margin_mix(pool).await;
+#[tokio::test]
+async fn sorting_by_margin_puts_orders_without_one_last_in_both_directions() {
+    let (app, browser) = margin_mix().await;
 
     let desc = get(&app, &browser, "/orders?sort=margin&dir=desc").await;
     assert_eq!(order_of_rows(&desc, &[1, 2, 3]), [1, 2, 3]);
@@ -927,9 +920,9 @@ async fn sorting_by_margin_puts_orders_without_one_last_in_both_directions(pool:
 
 // ---- the two pages ----
 
-#[sqlx::test]
-async fn the_orders_entry_redirects_to_the_sell_page_and_keeps_the_query(pool: PgPool) {
-    let (app, browser) = with_polled_fixture(pool).await;
+#[tokio::test]
+async fn the_orders_entry_redirects_to_the_sell_page_and_keeps_the_query() {
+    let (app, browser) = with_polled_fixture().await;
 
     let plain = browser.get(&app.url("/orders")).await;
     assert_eq!(plain.status(), 303);
@@ -944,9 +937,9 @@ async fn the_orders_entry_redirects_to_the_sell_page_and_keeps_the_query(pool: P
     );
 }
 
-#[sqlx::test]
-async fn an_unauthenticated_orders_entry_ends_at_the_landing_page(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn an_unauthenticated_orders_entry_ends_at_the_landing_page() {
+    let app = app().await;
     let browser = app.browser();
 
     let entry = browser.get(&app.url("/orders")).await;
@@ -955,9 +948,9 @@ async fn an_unauthenticated_orders_entry_ends_at_the_landing_page(pool: PgPool) 
     assert_eq!(Browser::location(&page), "/");
 }
 
-#[sqlx::test]
-async fn each_side_lists_only_its_orders(pool: PgPool) {
-    let (app, browser) = with_polled_fixture(pool).await;
+#[tokio::test]
+async fn each_side_lists_only_its_orders() {
+    let (app, browser) = with_polled_fixture().await;
 
     let sell = get_one(&app, &browser, "/orders/sell").await;
     let buy = get_one(&app, &browser, "/orders/buy").await;
@@ -991,9 +984,9 @@ fn sub_menu(html: &str) -> Vec<(String, String, bool)> {
         .collect()
 }
 
-#[sqlx::test]
-async fn the_sub_menu_has_sell_and_buy_as_text_and_marks_the_current_page(pool: PgPool) {
-    let (app, browser) = with_polled_fixture(pool).await;
+#[tokio::test]
+async fn the_sub_menu_has_sell_and_buy_as_text_and_marks_the_current_page() {
+    let (app, browser) = with_polled_fixture().await;
 
     let sell = sub_menu(&get_one(&app, &browser, "/orders/sell").await);
     let buy = sub_menu(&get_one(&app, &browser, "/orders/buy").await);
@@ -1014,9 +1007,9 @@ async fn the_sub_menu_has_sell_and_buy_as_text_and_marks_the_current_page(pool: 
     );
 }
 
-#[sqlx::test]
-async fn the_sub_menu_carries_the_selection_and_both_sortings_but_no_paging(pool: PgPool) {
-    let (app, browser) = with_polled_fixture(pool).await;
+#[tokio::test]
+async fn the_sub_menu_carries_the_selection_and_both_sortings_but_no_paging() {
+    let (app, browser) = with_polled_fixture().await;
     browser.sso_round_trip(&app, "/auth/add", BOB).await;
 
     let html = get_one(
@@ -1032,9 +1025,9 @@ async fn the_sub_menu_carries_the_selection_and_both_sortings_but_no_paging(pool
     assert_eq!(links[1].1, format!("/orders/buy{query}"));
 }
 
-#[sqlx::test]
-async fn sorting_the_buy_table_survives_a_round_trip_through_the_sub_menu(pool: PgPool) {
-    let (app, browser) = with_polled_fixture(pool).await;
+#[tokio::test]
+async fn sorting_the_buy_table_survives_a_round_trip_through_the_sub_menu() {
+    let (app, browser) = with_polled_fixture().await;
 
     let buy = get_one(&app, &browser, "/orders/buy?bsort=price&bdir=desc").await;
     let sell_link = sub_menu(&buy)[0].1.clone();
@@ -1048,9 +1041,9 @@ async fn sorting_the_buy_table_survives_a_round_trip_through_the_sub_menu(pool: 
 
 // ---- KPI cards ----
 
-#[sqlx::test]
-async fn the_sell_kpis_cover_every_order_with_the_net_margin_on_its_known_cost(pool: PgPool) {
-    let (app, browser) = margin_mix(pool).await;
+#[tokio::test]
+async fn the_sell_kpis_cover_every_order_with_the_net_margin_on_its_known_cost() {
+    let (app, browser) = margin_mix().await;
 
     let html = get_one(&app, &browser, "/orders/sell").await;
 
@@ -1069,9 +1062,9 @@ async fn the_sell_kpis_cover_every_order_with_the_net_margin_on_its_known_cost(p
     assert!(!net.class.starts_with("kpi error"), "{}", net.class);
 }
 
-#[sqlx::test]
-async fn a_negative_net_margin_is_in_the_error_style(pool: PgPool) {
-    let (app, browser) = alice_sells(pool, vec![order(2, 36, STATION, false, 100.0)]).await;
+#[tokio::test]
+async fn a_negative_net_margin_is_in_the_error_style() {
+    let (app, browser) = alice_sells(vec![order(2, 36, STATION, false, 100.0)]).await;
     alice_with_fees(&app).await;
     alice_bought(&app, &[(2, 36, 8)]).await;
 
@@ -1084,9 +1077,9 @@ async fn a_negative_net_margin_is_in_the_error_style(pool: PgPool) {
     assert_eq!(net.title, "-19.14 ISK");
 }
 
-#[sqlx::test]
-async fn without_a_margin_the_net_margin_reads_a_dash(pool: PgPool) {
-    let (app, browser) = with_polled_fixture(pool).await;
+#[tokio::test]
+async fn without_a_margin_the_net_margin_reads_a_dash() {
+    let (app, browser) = with_polled_fixture().await;
 
     let html = get_one(&app, &browser, "/orders/sell").await;
 
@@ -1095,9 +1088,9 @@ async fn without_a_margin_the_net_margin_reads_a_dash(pool: PgPool) {
     assert_eq!(net.detail, None);
 }
 
-#[sqlx::test]
-async fn the_buy_kpis_are_the_count_and_the_escrow_and_there_is_no_net_margin(pool: PgPool) {
-    let (app, browser) = with_polled_fixture(pool).await;
+#[tokio::test]
+async fn the_buy_kpis_are_the_count_and_the_escrow_and_there_is_no_net_margin() {
+    let (app, browser) = with_polled_fixture().await;
 
     let html = get_one(&app, &browser, "/orders/buy").await;
 
@@ -1110,9 +1103,9 @@ async fn the_buy_kpis_are_the_count_and_the_escrow_and_there_is_no_net_margin(po
     assert!(!html.contains("kpi-net-margin") && !html.contains("kpi-sell-count"));
 }
 
-#[sqlx::test]
-async fn the_corporation_share_is_the_detail_line_of_the_value(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn the_corporation_share_is_the_detail_line_of_the_value() {
+    let app = app().await;
     let browser = signed_in(&app, ALICE).await;
     let mut corp = order(1, 34, STATION, false, 100.0);
     corp["is_corporation"] = json!(true);
@@ -1130,9 +1123,9 @@ async fn the_corporation_share_is_the_detail_line_of_the_value(pool: PgPool) {
     assert_eq!(value.detail.as_deref(), Some("of which 400.00 corp"));
 }
 
-#[sqlx::test]
-async fn the_sell_and_buy_kpis_equal_the_dashboard_totals_for_the_same_selection(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn the_sell_and_buy_kpis_equal_the_dashboard_totals_for_the_same_selection() {
+    let app = app().await;
     let browser = signed_in(&app, ALICE).await;
     browser.sso_round_trip(&app, "/auth/add", BOB).await;
     let mut corp = order(3, 36, STATION, false, 77.0);
@@ -1207,12 +1200,12 @@ async fn the_sell_and_buy_kpis_equal_the_dashboard_totals_for_the_same_selection
 // ---- pagination ----
 
 /// Alice with `count` sell orders (ids 1..=count, price 10 + id), and one buy order.
-async fn many_sells(pool: PgPool, count: i64) -> (TestApp, Browser) {
+async fn many_sells(count: i64) -> (TestApp, Browser) {
     let mut orders: Vec<Value> = (1..=count)
         .map(|id| order(id, 34, STATION, false, 10.0 + id as f64))
         .collect();
     orders.push(order(9001, 35, STATION, true, 5.0));
-    alice_sells(pool, orders).await
+    alice_sells(orders).await
 }
 
 fn ids_in_page(html: &str) -> Vec<i64> {
@@ -1222,9 +1215,9 @@ fn ids_in_page(html: &str) -> Vec<i64> {
         .collect()
 }
 
-#[sqlx::test]
-async fn the_second_page_shows_the_51st_to_the_70th_order_by_price(pool: PgPool) {
-    let (app, browser) = many_sells(pool, 70).await;
+#[tokio::test]
+async fn the_second_page_shows_the_51st_to_the_70th_order_by_price() {
+    let (app, browser) = many_sells(70).await;
 
     let first = get_one(&app, &browser, "/orders/sell?sort=price&dir=asc").await;
     let second = get_one(&app, &browser, "/orders/sell?sort=price&dir=asc&page=2").await;
@@ -1234,18 +1227,18 @@ async fn the_second_page_shows_the_51st_to_the_70th_order_by_price(pool: PgPool)
     assert!(first.contains("Page 1 of 2") && second.contains("Page 2 of 2"));
 }
 
-#[sqlx::test]
-async fn the_kpis_cover_every_page(pool: PgPool) {
-    let (app, browser) = many_sells(pool, 70).await;
+#[tokio::test]
+async fn the_kpis_cover_every_page() {
+    let (app, browser) = many_sells(70).await;
 
     let second = get_one(&app, &browser, "/orders/sell?page=2").await;
 
     assert_eq!(kpi(&second, "kpi-sell-count").value, "70");
 }
 
-#[sqlx::test]
-async fn a_page_past_the_end_shows_the_last_page_and_keeps_it_in_the_refresh_url(pool: PgPool) {
-    let (app, browser) = many_sells(pool, 120).await;
+#[tokio::test]
+async fn a_page_past_the_end_shows_the_last_page_and_keeps_it_in_the_refresh_url() {
+    let (app, browser) = many_sells(120).await;
 
     let html = get_one(&app, &browser, "/orders/sell?page=9").await;
 
@@ -1258,9 +1251,9 @@ async fn a_page_past_the_end_shows_the_last_page_and_keeps_it_in_the_refresh_url
     );
 }
 
-#[sqlx::test]
-async fn the_page_size_is_taken_from_the_url_and_unknown_sizes_fall_back_to_fifty(pool: PgPool) {
-    let (app, browser) = many_sells(pool, 120).await;
+#[tokio::test]
+async fn the_page_size_is_taken_from_the_url_and_unknown_sizes_fall_back_to_fifty() {
+    let (app, browser) = many_sells(120).await;
 
     let all = get_one(&app, &browser, "/orders/sell?per_page=200").await;
     assert_eq!(ids_in_page(&all).len(), 120);
@@ -1272,9 +1265,9 @@ async fn the_page_size_is_taken_from_the_url_and_unknown_sizes_fall_back_to_fift
     assert_eq!(ids_in_page(&odd).len(), 50);
 }
 
-#[sqlx::test]
-async fn sorting_goes_back_to_the_first_page_and_keeps_the_page_size(pool: PgPool) {
-    let (app, browser) = many_sells(pool, 120).await;
+#[tokio::test]
+async fn sorting_goes_back_to_the_first_page_and_keeps_the_page_size() {
+    let (app, browser) = many_sells(120).await;
 
     let html = unescaped(&get_one(&app, &browser, "/orders/sell?page=2&per_page=25").await);
 
@@ -1289,9 +1282,9 @@ async fn sorting_goes_back_to_the_first_page_and_keeps_the_page_size(pool: PgPoo
     );
 }
 
-#[sqlx::test]
-async fn the_pagination_bar_is_not_shown_without_orders(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn the_pagination_bar_is_not_shown_without_orders() {
+    let app = app().await;
     let browser = signed_in(&app, CAROL).await;
 
     let html = get_one(&app, &browser, "/orders/sell").await;
@@ -1300,11 +1293,9 @@ async fn the_pagination_bar_is_not_shown_without_orders(pool: PgPool) {
     assert!(!html.contains(r#"class="pagination""#));
 }
 
-#[sqlx::test]
-async fn the_next_link_goes_through_the_content_fragment_with_the_page_url_for_the_address_bar(
-    pool: PgPool,
-) {
-    let (app, browser) = many_sells(pool, 120).await;
+#[tokio::test]
+async fn the_next_link_goes_through_the_content_fragment_with_the_page_url_for_the_address_bar() {
+    let (app, browser) = many_sells(120).await;
 
     let html = unescaped(&get_one(&app, &browser, "/orders/sell?sort=price&dir=desc").await);
 
@@ -1326,9 +1317,9 @@ async fn the_next_link_goes_through_the_content_fragment_with_the_page_url_for_t
     );
 }
 
-#[sqlx::test]
-async fn the_buy_page_has_its_own_paging(pool: PgPool) {
-    let (app, browser) = many_sells(pool, 70).await;
+#[tokio::test]
+async fn the_buy_page_has_its_own_paging() {
+    let (app, browser) = many_sells(70).await;
 
     let sell = get_one(&app, &browser, "/orders/sell?page=2").await;
     let buy = get_one(&app, &browser, "/orders/buy?page=2").await;

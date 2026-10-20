@@ -1,10 +1,8 @@
 //! How fresh a character's orders are, shared by the orders page and the dashboard.
 
-use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
-use uuid::Uuid;
 
-use crate::{format, selection::CharacterSelection};
+use crate::format;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct FreshnessRecord {
@@ -13,43 +11,6 @@ pub struct FreshnessRecord {
     pub needs_relogin: bool,
     pub last_success_at: Option<OffsetDateTime>,
     pub next_poll_at: Option<OffsetDateTime>,
-}
-
-pub async fn list_freshness(
-    pool: &PgPool,
-    account_id: Uuid,
-    selection: &CharacterSelection,
-) -> Result<Vec<FreshnessRecord>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT c.character_id, c.name, c.needs_relogin, s.last_success_at, s.next_poll_at
-         FROM characters c
-         LEFT JOIN order_sync s ON s.character_id = c.character_id
-         WHERE c.account_id = $1 AND c.character_id = ANY($2)
-         ORDER BY c.created_at, c.character_id",
-    )
-    .bind(account_id)
-    .bind(selection.ids())
-    .fetch_all(pool)
-    .await
-}
-
-/// How fresh the wallet transactions of each selected character are, for the trades page.
-pub async fn list_transactions_freshness(
-    pool: &PgPool,
-    account_id: Uuid,
-    selection: &CharacterSelection,
-) -> Result<Vec<FreshnessRecord>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT c.character_id, c.name, c.needs_relogin, s.last_success_at, s.next_poll_at
-         FROM characters c
-         LEFT JOIN wealth_sync s ON s.character_id = c.character_id AND s.kind = 'transactions'
-         WHERE c.account_id = $1 AND c.character_id = ANY($2)
-         ORDER BY c.created_at, c.character_id",
-    )
-    .bind(account_id)
-    .bind(selection.ids())
-    .fetch_all(pool)
-    .await
 }
 
 /// Stale: needs a re-login, never polled successfully, or the last success is older than twice
@@ -71,27 +32,6 @@ pub struct WealthFreshnessRecord {
     pub wallet_next_poll_at: Option<OffsetDateTime>,
     pub assets_last_success_at: Option<OffsetDateTime>,
     pub assets_next_poll_at: Option<OffsetDateTime>,
-}
-
-pub async fn list_wealth_freshness(
-    pool: &PgPool,
-    account_id: Uuid,
-    selection: &CharacterSelection,
-) -> Result<Vec<WealthFreshnessRecord>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT c.character_id, c.name, c.needs_relogin,
-                w.last_success_at AS wallet_last_success_at, w.next_poll_at AS wallet_next_poll_at,
-                a.last_success_at AS assets_last_success_at, a.next_poll_at AS assets_next_poll_at
-         FROM characters c
-         LEFT JOIN wealth_sync w ON w.character_id = c.character_id AND w.kind = 'wallet'
-         LEFT JOIN wealth_sync a ON a.character_id = c.character_id AND a.kind = 'assets'
-         WHERE c.account_id = $1 AND c.character_id = ANY($2)
-         ORDER BY c.created_at, c.character_id",
-    )
-    .bind(account_id)
-    .bind(selection.ids())
-    .fetch_all(pool)
-    .await
 }
 
 pub struct WealthFreshnessView {

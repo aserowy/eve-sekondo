@@ -6,10 +6,8 @@ use axum::{
     extract::State,
     response::{IntoResponse, Redirect, Response},
 };
-use sqlx::{PgPool, Row, postgres::PgRow};
 use time::{Duration, OffsetDateTime};
 use tower_sessions::Session;
-use uuid::Uuid;
 
 use crate::{
     account::CurrentAccount,
@@ -19,7 +17,7 @@ use crate::{
     kpi::{Kpi, KpiLink},
     orders::{FilterEntry, Side},
     pages::{self, Nav, Page},
-    range::{BUCKET_CTES, Range},
+    range::Range,
     selection::{CharacterSelection, ViewQuery},
     wealth,
 };
@@ -34,20 +32,6 @@ pub struct CharacterFigures {
     pub escrow_corp_cents: i64,
     pub sell_count: i64,
     pub buy_count: i64,
-}
-
-impl sqlx::FromRow<'_, PgRow> for CharacterFigures {
-    fn from_row(row: &PgRow) -> Result<Self, sqlx::Error> {
-        Ok(Self {
-            freshness: FreshnessRecord::from_row(row)?,
-            sell_cents: row.try_get("sell_cents")?,
-            escrow_cents: row.try_get("escrow_cents")?,
-            sell_corp_cents: row.try_get("sell_corp_cents")?,
-            escrow_corp_cents: row.try_get("escrow_corp_cents")?,
-            sell_count: row.try_get("sell_count")?,
-            buy_count: row.try_get("buy_count")?,
-        })
-    }
 }
 
 /// The sums of the rows, so the rows add up to the totals by construction.
@@ -74,40 +58,8 @@ impl Totals {
     }
 }
 
-/// One row per selected character of the account, in link order, including characters without
-/// orders. Sums are converted to cents once, after summing.
-pub async fn character_figures(
-    pool: &PgPool,
-    account_id: Uuid,
-    selection: &CharacterSelection,
-) -> Result<Vec<CharacterFigures>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT c.character_id, c.name, c.needs_relogin, s.last_success_at, s.next_poll_at,
-                (COALESCE(SUM(o.price * o.volume_remain) FILTER (WHERE NOT o.is_buy_order), 0) * 100)::bigint
-                    AS sell_cents,
-                (COALESCE(SUM(COALESCE(o.escrow, 0)) FILTER (WHERE o.is_buy_order), 0) * 100)::bigint
-                    AS escrow_cents,
-                (COALESCE(SUM(o.price * o.volume_remain) FILTER (WHERE NOT o.is_buy_order AND o.is_corporation), 0) * 100)::bigint
-                    AS sell_corp_cents,
-                (COALESCE(SUM(COALESCE(o.escrow, 0)) FILTER (WHERE o.is_buy_order AND o.is_corporation), 0) * 100)::bigint
-                    AS escrow_corp_cents,
-                COUNT(o.order_id) FILTER (WHERE NOT o.is_buy_order) AS sell_count,
-                COUNT(o.order_id) FILTER (WHERE o.is_buy_order) AS buy_count
-         FROM characters c
-         LEFT JOIN order_sync s ON s.character_id = c.character_id
-         LEFT JOIN current_orders o ON o.character_id = c.character_id
-         WHERE c.account_id = $1 AND c.character_id = ANY($2)
-         GROUP BY c.character_id, c.name, c.needs_relogin, s.last_success_at, s.next_poll_at, c.created_at
-         ORDER BY c.created_at, c.character_id",
-    )
-    .bind(account_id)
-    .bind(selection.ids())
-    .fetch_all(pool)
-    .await
-}
-
 /// How many items the top-items graphs show.
-const TOP_ITEMS: i64 = 10;
+pub const TOP_ITEMS: i64 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct TopItem {
@@ -115,38 +67,6 @@ pub struct TopItem {
     /// The item's name, or `#<type id>` while it is not resolved.
     pub label: String,
     pub cents: i64,
-}
-
-/// The items with the most ISK in the selected characters' sell orders (their value) or buy
-/// orders (their escrow), summed over characters and locations. Highest first, ties by name.
-pub async fn top_items(
-    pool: &PgPool,
-    account_id: Uuid,
-    selection: &CharacterSelection,
-    side: Side,
-) -> Result<Vec<TopItem>, sqlx::Error> {
-    let amount = match side {
-        Side::Sell => "o.price * o.volume_remain",
-        Side::Buy => "COALESCE(o.escrow, 0)",
-    };
-    let sql = format!(
-        "SELECT o.type_id,
-                COALESCE(n.name, '#' || o.type_id) AS label,
-                (SUM({amount}) * 100)::bigint AS cents
-         FROM current_orders o
-         JOIN characters c ON c.character_id = o.character_id
-         LEFT JOIN names n ON n.id = o.type_id
-         WHERE c.account_id = $1 AND o.character_id = ANY($2) AND o.is_buy_order = $3
-         GROUP BY o.type_id, n.name
-         ORDER BY SUM({amount}) DESC, lower(COALESCE(n.name, '#' || o.type_id)), o.type_id
-         LIMIT {TOP_ITEMS}"
-    );
-    sqlx::query_as(sqlx::AssertSqlSafe(sql))
-        .bind(account_id)
-        .bind(selection.ids())
-        .bind(side == Side::Buy)
-        .fetch_all(pool)
-        .await
 }
 
 /// One point of the over-time graphs: the figures in force at `at`, summed over the selection.
@@ -164,47 +84,6 @@ pub struct HistoryPoint {
 /// Whether any selected character has been polled by the end of the series.
 pub fn has_history(points: &[HistoryPoint]) -> bool {
     points.last().is_some_and(|point| point.contributors > 0)
-}
-
-/// The series over `range` ending at `now`, one point per bucket: its timestamp is the bucket's
-/// end (the last one clamped to `now`), its figures are those of each selected character's most
-/// recent poll at or before that time, summed. A character's last poll before the range carries
-/// in, and one that has not been polled yet contributes nothing.
-pub async fn history(
-    pool: &PgPool,
-    account_id: Uuid,
-    selection: &CharacterSelection,
-    range: Range,
-    now: OffsetDateTime,
-) -> Result<Vec<HistoryPoint>, sqlx::Error> {
-    let seconds = |d: Duration| d.as_seconds_f64();
-    sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "{BUCKET_CTES}
-         SELECT e.at,
-                (COALESCE(SUM(t.sell_value), 0) * 100)::bigint AS sell_cents,
-                (COALESCE(SUM(t.escrow), 0) * 100)::bigint AS escrow_cents,
-                COALESCE(SUM(t.sell_count), 0)::bigint AS sell_count,
-                COALESCE(SUM(t.buy_count), 0)::bigint AS buy_count,
-                COUNT(t.character_id) AS contributors
-         FROM ends e
-         CROSS JOIN chars c
-         LEFT JOIN LATERAL (
-             SELECT p.character_id, p.sell_value, p.escrow, p.sell_count, p.buy_count
-             FROM order_poll_totals p
-             WHERE p.character_id = c.character_id AND p.polled_at <= e.at
-             ORDER BY p.polled_at DESC
-             LIMIT 1
-         ) t ON true
-         GROUP BY e.at
-         ORDER BY e.at"
-    )))
-    .bind(account_id)
-    .bind(selection.ids())
-    .bind(now)
-    .bind(seconds(range.bucket()))
-    .bind(seconds(range.span()))
-    .fetch_all(pool)
-    .await
 }
 
 // ---- view model ----
@@ -561,24 +440,42 @@ async fn load(
     }
     let ids: Vec<i64> = characters.iter().map(|c| c.character_id).collect();
     let selection = query.selection(&ids);
-    let figures = character_figures(&state.pool, account.id, &selection)
+    let figures = state
+        .stores
+        .orders
+        .character_figures(account.id, selection.ids())
         .await
         .map_err(|e| Box::new(pages::internal_error(e)))?;
-    let top_sell = top_items(&state.pool, account.id, &selection, Side::Sell)
+    let top_sell = state
+        .stores
+        .orders
+        .top_items(account.id, selection.ids(), Side::Sell, TOP_ITEMS)
         .await
         .map_err(|e| Box::new(pages::internal_error(e)))?;
-    let top_buy = top_items(&state.pool, account.id, &selection, Side::Buy)
+    let top_buy = state
+        .stores
+        .orders
+        .top_items(account.id, selection.ids(), Side::Buy, TOP_ITEMS)
         .await
         .map_err(|e| Box::new(pages::internal_error(e)))?;
     let now = state.clock.now();
     let range = Range::parse(query.range.as_deref());
-    let history = history(&state.pool, account.id, &selection, range, now)
+    let history = state
+        .stores
+        .orders
+        .history(account.id, selection.ids(), range, now)
         .await
         .map_err(|e| Box::new(pages::internal_error(e)))?;
-    let wealth_points = wealth::history(&state.pool, account.id, &selection, range, now)
+    let wealth_points = state
+        .stores
+        .wealth
+        .history(account.id, selection.ids(), range, now)
         .await
         .map_err(|e| Box::new(pages::internal_error(e)))?;
-    let wealth = wealth::current(&state.pool, account.id, &selection)
+    let wealth = state
+        .stores
+        .wealth
+        .current(account.id, selection.ids())
         .await
         .map_err(|e| Box::new(pages::internal_error(e)))?;
     let view = summary_view(

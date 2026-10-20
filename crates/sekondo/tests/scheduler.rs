@@ -2,15 +2,14 @@ mod common;
 
 use common::PollEnv;
 use serde_json::json;
-use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 
 const ALICE: i64 = 90000001;
 const BOB: i64 = 90000002;
 const CAROL: i64 = 90000003;
 
-async fn linked(pool: PgPool, interval: Duration, characters: &[i64]) -> PollEnv {
-    let env = PollEnv::with_interval(pool, interval).await;
+async fn linked(interval: Duration, characters: &[i64]) -> PollEnv {
+    let env = PollEnv::with_interval(interval).await;
     let account = env.new_account().await;
     for id in characters {
         env.link(account, *id).await;
@@ -18,23 +17,25 @@ async fn linked(pool: PgPool, interval: Duration, characters: &[i64]) -> PollEnv
     env
 }
 
-async fn next_poll_at(pool: &PgPool, id: i64) -> OffsetDateTime {
-    sqlx::query_scalar("SELECT next_poll_at FROM order_sync WHERE character_id = $1")
-        .bind(id)
-        .fetch_one(pool)
+async fn next_poll_at(env: &PollEnv, id: i64) -> OffsetDateTime {
+    env.stores
+        .orders
+        .order_sync(id)
         .await
         .unwrap()
+        .unwrap()
+        .next_poll_at
 }
 
-#[sqlx::test]
-async fn a_new_character_is_scheduled_within_the_interval_not_polled_at_once(pool: PgPool) {
+#[tokio::test]
+async fn a_new_character_is_scheduled_within_the_interval_not_polled_at_once() {
     use sekondo::clock::Clock;
-    let env = linked(pool, Duration::minutes(20), &[ALICE]).await;
+    let env = linked(Duration::minutes(20), &[ALICE]).await;
     let linked_at = env.clock.now();
 
     env.poller.tick().await;
 
-    let next = next_poll_at(&env.pool, ALICE).await;
+    let next = next_poll_at(&env, ALICE).await;
     assert!(
         next >= linked_at && next < linked_at + Duration::minutes(20),
         "{next}"
@@ -46,9 +47,9 @@ async fn a_new_character_is_scheduled_within_the_interval_not_polled_at_once(poo
     assert_eq!(env.stub.esi_calls("orders"), 1);
 }
 
-#[sqlx::test]
-async fn the_next_poll_waits_for_the_interval(pool: PgPool) {
-    let env = linked(pool, Duration::minutes(20), &[ALICE]).await;
+#[tokio::test]
+async fn the_next_poll_waits_for_the_interval() {
+    let env = linked(Duration::minutes(20), &[ALICE]).await;
     // ESI would allow a poll after 5 minutes.
     env.control("esi-expires", json!({"seconds": 300})).await;
     env.poller.tick().await;
@@ -67,9 +68,9 @@ async fn the_next_poll_waits_for_the_interval(pool: PgPool) {
     assert_eq!(env.stub.esi_calls("orders"), 2);
 }
 
-#[sqlx::test]
-async fn the_next_poll_waits_for_esis_cache_expiry(pool: PgPool) {
-    let env = linked(pool, Duration::minutes(5), &[ALICE]).await;
+#[tokio::test]
+async fn the_next_poll_waits_for_esis_cache_expiry() {
+    let env = linked(Duration::minutes(5), &[ALICE]).await;
     env.control("esi-expires", json!({"seconds": 1200})).await;
     env.poller.tick().await;
     env.clock.advance(Duration::minutes(5));
@@ -90,24 +91,24 @@ async fn the_next_poll_waits_for_esis_cache_expiry(pool: PgPool) {
     assert_eq!(env.stub.esi_calls("orders"), 2);
 }
 
-#[sqlx::test]
-async fn characters_linked_together_are_scheduled_at_different_times(pool: PgPool) {
-    let env = linked(pool, Duration::minutes(20), &[ALICE, BOB, CAROL]).await;
+#[tokio::test]
+async fn characters_linked_together_are_scheduled_at_different_times() {
+    let env = linked(Duration::minutes(20), &[ALICE, BOB, CAROL]).await;
 
     env.poller.tick().await;
 
     let mut seconds = Vec::new();
     for id in [ALICE, BOB, CAROL] {
-        seconds.push(next_poll_at(&env.pool, id).await.unix_timestamp());
+        seconds.push(next_poll_at(&env, id).await.unix_timestamp());
     }
     seconds.sort_unstable();
     seconds.dedup();
     assert_eq!(seconds.len(), 3, "all three scheduled in different seconds");
 }
 
-#[sqlx::test]
-async fn a_character_needing_relogin_is_skipped_and_picked_up_again_after_login(pool: PgPool) {
-    let env = linked(pool, Duration::minutes(20), &[ALICE]).await;
+#[tokio::test]
+async fn a_character_needing_relogin_is_skipped_and_picked_up_again_after_login() {
+    let env = linked(Duration::minutes(20), &[ALICE]).await;
     env.poller.tick().await;
     env.clock.advance(Duration::minutes(20));
     env.poller.tick().await;
@@ -133,23 +134,19 @@ async fn a_character_needing_relogin_is_skipped_and_picked_up_again_after_login(
     assert_eq!(env.stub.esi_calls("orders"), 2);
 }
 
-#[sqlx::test]
-async fn a_character_that_needs_relogin_gets_no_schedule(pool: PgPool) {
-    let env = linked(pool, Duration::minutes(20), &[ALICE]).await;
+#[tokio::test]
+async fn a_character_that_needs_relogin_gets_no_schedule() {
+    let env = linked(Duration::minutes(20), &[ALICE]).await;
     env.repo.mark_needs_relogin(ALICE).await.unwrap();
 
     env.poller.tick().await;
 
-    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM order_sync")
-        .fetch_one(&env.pool)
-        .await
-        .unwrap();
-    assert_eq!(rows, 0);
+    assert!(env.stores.orders.order_sync(ALICE).await.unwrap().is_none());
 }
 
-#[sqlx::test]
-async fn a_character_is_not_polled_twice_while_its_poll_is_running(pool: PgPool) {
-    let env = linked(pool, Duration::minutes(20), &[ALICE]).await;
+#[tokio::test]
+async fn a_character_is_not_polled_twice_while_its_poll_is_running() {
+    let env = linked(Duration::minutes(20), &[ALICE]).await;
     env.poller.tick().await;
     env.clock.advance(Duration::minutes(20));
     env.control("esi-delay", json!({"millis": 300})).await;

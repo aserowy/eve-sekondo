@@ -8,194 +8,18 @@
 
 use std::collections::HashMap;
 
-use sqlx::{PgConnection, PgExecutor, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
     esi::{EsiClient, EsiError},
-    oauth::LOCATION_SCOPE,
     opportunities::{STATION_ID, STATION_NAME},
+    store::{FeeStore, StoreError, Stores},
 };
 
 /// ESI's skill IDs of the two skills that matter.
 pub const ACCOUNTING: i64 = 16622;
 pub const BROKER_RELATIONS: i64 = 3446;
-
-/// The locations of the current orders, one row per (character, location). `$1` is the character
-/// IDs and `$2` the account the characters must belong to (`NULL`: any).
-macro_rules! order_locations_sql {
-    () => {
-        "SELECT DISTINCT o.character_id, o.location_id
-            FROM current_orders o
-            JOIN characters c ON c.character_id = o.character_id
-            WHERE o.character_id = ANY($1) AND ($2::uuid IS NULL OR c.account_id = $2)"
-    };
-}
-
-/// The locations of the stored sales, one row per (character, location). `$1` is the character IDs
-/// and `$2` the account the characters must belong to (`NULL`: any).
-macro_rules! sale_locations_sql {
-    () => {
-        "SELECT DISTINCT s.character_id, s.location_id
-            FROM sales s
-            JOIN characters c ON c.character_id = s.character_id
-            WHERE s.character_id = ANY($1) AND ($2::uuid IS NULL OR c.account_id = $2)"
-    };
-}
-
-/// One fixed location (`$3`) for every character of `$1` that belongs to the account `$2`.
-macro_rules! fixed_location_sql {
-    () => {
-        "SELECT c.character_id, $3::bigint AS location_id
-            FROM characters c
-            WHERE c.character_id = ANY($1) AND ($2::uuid IS NULL OR c.account_id = $2)"
-    };
-}
-
-/// The fee location of every character of `$1` that belongs to the account `$2` (`NULL`: any): the
-/// station or structure it is docked in when it has granted the location scope (`$3`) and has been
-/// reported docked, otherwise Jita 4-4 (`$4`).
-macro_rules! fee_location_sql {
-    () => {
-        "SELECT c.character_id,
-                CASE WHEN $3::text = ANY(c.scopes) THEN COALESCE(cl.location_id, $4::bigint)
-                     ELSE $4::bigint END AS location_id
-            FROM characters c
-            LEFT JOIN character_locations cl ON cl.character_id = c.character_id
-            WHERE c.character_id = ANY($1) AND ($2::uuid IS NULL OR c.account_id = $2)"
-    };
-}
-
-/// The rates query as one literal, so that [`FEES_SQL`] can be built from it with `concat!`. It
-/// works out the rates for the (character, location) rows of `$locations`.
-macro_rules! fee_rates_sql {
-    ($locations:expr) => {
-        concat!(
-            "
-        SELECT l.character_id, l.location_id, l.is_structure,
-               l.accounting, l.broker_relations, l.faction_standing, l.corp_standing,
-               CASE WHEN l.accounting IS NOT NULL THEN 7.5 * (1 - 0.11 * l.accounting) END AS sales_tax,
-               CASE WHEN NOT l.is_structure
-                         AND l.broker_relations IS NOT NULL
-                         AND l.faction_standing IS NOT NULL
-                         AND l.corp_standing IS NOT NULL
-                    THEN 3 - 0.3 * l.broker_relations - 0.03 * l.faction_standing
-                           - 0.02 * l.corp_standing
-               END AS broker_fee
-        FROM (
-            SELECT loc.character_id, loc.location_id,
-                   (loc.location_id >= 100000000) AS is_structure,
-                   CASE WHEN skills_sync.last_success_at IS NOT NULL
-                        THEN COALESCE(acc.active_level, 0)::integer END AS accounting,
-                   CASE WHEN skills_sync.last_success_at IS NOT NULL
-                        THEN COALESCE(br.active_level, 0)::integer END AS broker_relations,
-                   CASE WHEN loc.location_id < 100000000
-                             AND standings_sync.last_success_at IS NOT NULL
-                             AND so.owner_id IS NOT NULL
-                        THEN CASE WHEN nf.faction_id IS NULL THEN 0
-                                  ELSE COALESCE(fs.standing, 0) END
-                   END AS faction_standing,
-                   CASE WHEN loc.location_id < 100000000
-                             AND standings_sync.last_success_at IS NOT NULL
-                             AND so.owner_id IS NOT NULL
-                        THEN COALESCE(cs.standing, 0)
-                   END AS corp_standing
-            FROM (",
-            $locations,
-            ") loc
-            LEFT JOIN fee_sync skills_sync
-                   ON skills_sync.character_id = loc.character_id AND skills_sync.kind = 'skills'
-            LEFT JOIN fee_sync standings_sync
-                   ON standings_sync.character_id = loc.character_id AND standings_sync.kind = 'standings'
-            LEFT JOIN character_skills acc
-                   ON acc.character_id = loc.character_id AND acc.skill_id = 16622
-            LEFT JOIN character_skills br
-                   ON br.character_id = loc.character_id AND br.skill_id = 3446
-            LEFT JOIN station_owners so ON so.station_id = loc.location_id
-            LEFT JOIN npc_corporation_factions nf ON nf.corporation_id = so.owner_id
-            LEFT JOIN character_standings fs
-                   ON fs.character_id = loc.character_id AND fs.from_type = 'faction'
-                  AND fs.from_id = nf.faction_id
-            LEFT JOIN character_standings cs
-                   ON cs.character_id = loc.character_id AND cs.from_type = 'npc_corp'
-                  AND cs.from_id = so.owner_id
-        ) l
-"
-        )
-    };
-}
-
-/// One row per (character, location) of the current orders. `$1` is the character IDs and `$2`
-/// the account the characters must belong to (`NULL`: any).
-///
-/// - `accounting` and `broker_relations` are `NULL` until the skills were polled once, and 0 when
-///   polled but not trained.
-/// - `faction_standing` and `corp_standing` are `NULL` for a structure, until the standings were
-///   polled once and until the station's owner is known. They are 0 when polled and absent, and
-///   the faction standing is 0 when the owner is in no faction.
-/// - `sales_tax`: 7.5 × (1 − 0.11 × accounting). `broker_fee` (NPC station only):
-///   3 − 0.3·broker relations − 0.03·faction standing − 0.02·corporation standing.
-///   `min_margin`: ((1 + b) / (1 − b − t) − 1) × 100 for a known broker fee b and sales tax t.
-///   All in percent, and not clamped: the formula cannot fall below 1.0%.
-pub const FEES_SQL: &str = concat!(
-    "
-    SELECT f.character_id, f.location_id, f.is_structure,
-           f.accounting, f.broker_relations,
-           f.faction_standing::text AS faction_standing, f.corp_standing::text AS corp_standing,
-           f.sales_tax::text AS sales_tax, f.broker_fee::text AS broker_fee,
-           CASE WHEN f.broker_fee IS NOT NULL AND f.sales_tax IS NOT NULL THEN
-               (((1 + f.broker_fee / 100) / (1 - f.broker_fee / 100 - f.sales_tax / 100) - 1) * 100)::text
-           END AS min_margin
-    FROM (",
-    fee_rates_sql!(order_locations_sql!()),
-    ") f
-    ORDER BY f.character_id, f.location_id"
-);
-
-/// Like [`FEES_SQL`], for one fixed location (`$3`) instead of the locations of the current
-/// orders: what the characters pay there whether or not they have an order there.
-const LOCATION_FEES_SQL: &str = concat!(
-    "
-    SELECT f.character_id, f.location_id, f.is_structure,
-           f.accounting, f.broker_relations,
-           f.faction_standing::text AS faction_standing, f.corp_standing::text AS corp_standing,
-           f.sales_tax::text AS sales_tax, f.broker_fee::text AS broker_fee,
-           CASE WHEN f.broker_fee IS NOT NULL AND f.sales_tax IS NOT NULL THEN
-               (((1 + f.broker_fee / 100) / (1 - f.broker_fee / 100 - f.sales_tax / 100) - 1) * 100)::text
-           END AS min_margin
-    FROM (",
-    fee_rates_sql!(fixed_location_sql!()),
-    ") f
-    ORDER BY f.character_id"
-);
-
-/// Like [`LOCATION_FEES_SQL`], at the fee location of each character (see [`fee_location_sql`]).
-const FEE_LOCATION_FEES_SQL: &str = concat!(
-    "
-    SELECT f.character_id, f.location_id, f.is_structure,
-           f.accounting, f.broker_relations,
-           f.faction_standing::text AS faction_standing, f.corp_standing::text AS corp_standing,
-           f.sales_tax::text AS sales_tax, f.broker_fee::text AS broker_fee,
-           CASE WHEN f.broker_fee IS NOT NULL AND f.sales_tax IS NOT NULL THEN
-               (((1 + f.broker_fee / 100) / (1 - f.broker_fee / 100 - f.sales_tax / 100) - 1) * 100)::text
-           END AS min_margin,
-           NOT ($3::text = ANY(ch.scopes)) AS needs_location_scope
-    FROM (",
-    fee_rates_sql!(fee_location_sql!()),
-    ") f
-    JOIN characters ch ON ch.character_id = f.character_id
-    ORDER BY f.character_id"
-);
-
-/// The rates part of [`FEES_SQL`], with its `$1` and `$2`: one row per (character, location) of the
-/// current orders with `sales_tax` and `broker_fee` as `numeric` percent (and the inputs they are
-/// worked out from). The orders listing joins it to work out the margin.
-pub const FEE_RATES_SQL: &str = fee_rates_sql!(order_locations_sql!());
-
-/// Like [`FEE_RATES_SQL`], for the locations of the stored sales. The trades listing joins it to
-/// work out the margin of a sale.
-pub const SALE_FEE_RATES_SQL: &str = fee_rates_sql!(sale_locations_sql!());
 
 /// The fee figures of one character at one location, as decimal text in percent.
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
@@ -220,43 +44,6 @@ pub struct CharacterFee {
     pub needs_location_scope: bool,
 }
 
-#[derive(sqlx::FromRow)]
-struct CharacterFeeRow {
-    #[sqlx(flatten)]
-    row: FeeRow,
-    needs_location_scope: bool,
-}
-
-/// The rows of these characters, whoever owns them. For the pollers, which work per character.
-pub async fn for_characters<'e>(
-    executor: impl PgExecutor<'e>,
-    character_ids: &[i64],
-) -> Result<Vec<FeeRow>, sqlx::Error> {
-    sqlx::query_as(FEES_SQL)
-        .bind(character_ids)
-        .bind(None::<Uuid>)
-        .fetch_all(executor)
-        .await
-}
-
-/// The rates these characters have at the locations of their sales, as decimal text in percent:
-/// `(character, location, sales tax, broker fee)`. For the change detection of what the trades
-/// page shows.
-pub async fn sale_rates_for_characters<'e>(
-    executor: impl PgExecutor<'e>,
-    character_ids: &[i64],
-) -> Result<Vec<(i64, i64, Option<String>, Option<String>)>, sqlx::Error> {
-    sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT f.character_id, f.location_id, f.sales_tax::text, f.broker_fee::text
-         FROM ({SALE_FEE_RATES_SQL}) f
-         ORDER BY f.character_id, f.location_id"
-    )))
-    .bind(character_ids)
-    .bind(None::<Uuid>)
-    .fetch_all(executor)
-    .await
-}
-
 /// What the pages show of the fees of these characters: the rates at the locations of their orders
 /// and of their sales, and at their fee location. Two snapshots differ exactly when a signal is
 /// due.
@@ -268,14 +55,6 @@ pub struct FeeSnapshot {
 }
 
 impl FeeSnapshot {
-    pub async fn of(conn: &mut PgConnection, character_ids: &[i64]) -> Result<Self, sqlx::Error> {
-        Ok(Self {
-            orders: for_characters(&mut *conn, character_ids).await?,
-            fee_location: fee_locations(&mut *conn, None, character_ids).await?,
-            sales: sale_rates_for_characters(&mut *conn, character_ids).await?,
-        })
-    }
-
     /// The part of one character.
     pub fn of_character(&self, character_id: i64) -> Self {
         Self {
@@ -301,96 +80,27 @@ impl FeeSnapshot {
     }
 }
 
-/// The rows of these characters that belong to the account, so a selection can never reach
-/// another account's data.
-pub async fn for_account(
-    pool: &PgPool,
-    account_id: Uuid,
-    character_ids: &[i64],
-) -> Result<Vec<FeeRow>, sqlx::Error> {
-    sqlx::query_as(FEES_SQL)
-        .bind(character_ids)
-        .bind(account_id)
-        .fetch_all(pool)
-        .await
-}
-
-/// The fees of these characters at one location, whether or not they have an order there. Only
-/// characters of the account count, so a selection can never reach another account's data.
-pub async fn at_location(
-    pool: &PgPool,
-    account_id: Uuid,
-    character_ids: &[i64],
-    location_id: i64,
-) -> Result<Vec<FeeRow>, sqlx::Error> {
-    sqlx::query_as(LOCATION_FEES_SQL)
-        .bind(character_ids)
-        .bind(account_id)
-        .bind(location_id)
-        .fetch_all(pool)
-        .await
-}
-
-/// The fees of these characters at their fee location, whether or not they have an order there.
-/// Only characters of the account count, so a selection can never reach another account's data.
-pub async fn at_fee_location(
-    pool: &PgPool,
-    account_id: Uuid,
-    character_ids: &[i64],
-) -> Result<Vec<CharacterFee>, sqlx::Error> {
-    fee_locations(pool, Some(account_id), character_ids).await
-}
-
-async fn fee_locations<'e>(
-    executor: impl PgExecutor<'e>,
-    account_id: Option<Uuid>,
-    character_ids: &[i64],
-) -> Result<Vec<CharacterFee>, sqlx::Error> {
-    let rows: Vec<CharacterFeeRow> = sqlx::query_as(FEE_LOCATION_FEES_SQL)
-        .bind(character_ids)
-        .bind(account_id)
-        .bind(LOCATION_SCOPE)
-        .bind(STATION_ID)
-        .fetch_all(executor)
-        .await?;
-    Ok(rows
-        .into_iter()
-        .map(|r| CharacterFee {
-            row: r.row,
-            needs_location_scope: r.needs_location_scope,
-        })
-        .collect())
-}
-
 /// Makes sure the owner of an NPC station is known: asks ESI once when it is not, and stores it
 /// for every account. Answers whether the owner was learned just now.
 pub async fn ensure_station_owner(
-    pool: &PgPool,
+    store: &dyn FeeStore,
     esi: &EsiClient,
     station_id: i64,
     now: OffsetDateTime,
 ) -> Result<bool, EsiError> {
-    let database = |e: sqlx::Error| EsiError::Temporary(format!("database error: {e}"));
-    let known: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM station_owners WHERE station_id = $1)")
-            .bind(station_id)
-            .fetch_one(pool)
-            .await
-            .map_err(database)?;
-    if known {
+    let database = |e: StoreError| EsiError::Temporary(format!("database error: {e}"));
+    if store
+        .station_owner_known(station_id)
+        .await
+        .map_err(database)?
+    {
         return Ok(false);
     }
     let station = esi.station(station_id).await?;
-    sqlx::query(
-        "INSERT INTO station_owners (station_id, owner_id, resolved_at) VALUES ($1, $2, $3)
-         ON CONFLICT (station_id) DO NOTHING",
-    )
-    .bind(station_id)
-    .bind(station.owner)
-    .bind(now)
-    .execute(pool)
-    .await
-    .map_err(database)?;
+    store
+        .insert_station_owner(station_id, station.owner, now)
+        .await
+        .map_err(database)?;
     Ok(true)
 }
 
@@ -556,28 +266,29 @@ fn location_name(
 /// One card set per selected character of the account, in the order the characters were linked:
 /// its fees at its fee location.
 pub async fn fee_cards(
-    pool: &PgPool,
+    stores: &Stores,
     account_id: Uuid,
     character_ids: &[i64],
-) -> Result<Vec<FeeCard>, sqlx::Error> {
-    let fees = at_fee_location(pool, account_id, character_ids).await?;
+) -> Result<Vec<FeeCard>, StoreError> {
+    let fees = stores
+        .fees
+        .at_fee_location(account_id, character_ids)
+        .await?;
     let location_ids: Vec<i64> = fees.iter().map(|f| f.row.location_id).collect();
-    let names: HashMap<i64, Option<String>> =
-        sqlx::query_as::<_, (i64, Option<String>)>("SELECT id, name FROM names WHERE id = ANY($1)")
-            .bind(&location_ids)
-            .fetch_all(pool)
-            .await?
-            .into_iter()
-            .collect();
-    let characters: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT character_id, name FROM characters
-         WHERE account_id = $1 AND character_id = ANY($2)
-         ORDER BY created_at, character_id",
-    )
-    .bind(account_id)
-    .bind(character_ids)
-    .fetch_all(pool)
-    .await?;
+    let names: HashMap<i64, Option<String>> = stores
+        .market
+        .names_of(&location_ids)
+        .await?
+        .into_iter()
+        .collect();
+    let characters: Vec<(i64, String)> = stores
+        .accounts
+        .list_characters(account_id)
+        .await?
+        .into_iter()
+        .filter(|c| character_ids.contains(&c.character_id))
+        .map(|c| (c.character_id, c.name))
+        .collect();
     Ok(characters
         .into_iter()
         .filter_map(|(character_id, character)| {

@@ -9,33 +9,28 @@ use sekondo::{
     poller::PollOutcome,
 };
 use serde_json::json;
-use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 
 const ALICE: i64 = 90000001;
 const BOB: i64 = 90000002;
 const JITA: i64 = 60003760;
 
-async fn linked(pool: PgPool) -> PollEnv {
-    let env = PollEnv::new(pool).await;
+async fn linked() -> PollEnv {
+    let env = PollEnv::new().await;
     let account = env.new_account().await;
     env.link(account, ALICE).await;
     env
 }
 
 /// Alice's order poll has run: she sells in Jita 4-4 and buys in a structure.
-async fn with_orders(pool: PgPool) -> PollEnv {
-    let env = linked(pool).await;
+async fn with_orders() -> PollEnv {
+    let env = linked().await;
     env.poller.poll_character(ALICE).await;
     env
 }
 
 async fn account_of(env: &PollEnv, character: i64) -> uuid::Uuid {
-    sqlx::query_scalar("SELECT account_id FROM characters WHERE character_id = $1")
-        .bind(character)
-        .fetch_one(&env.pool)
-        .await
-        .unwrap()
+    env.account_of(character).await
 }
 
 async fn signals(stream: &mut BoxStream<'static, Event>) -> Vec<Event> {
@@ -49,24 +44,19 @@ async fn signals(stream: &mut BoxStream<'static, Event>) -> Vec<Event> {
 }
 
 async fn skills(env: &PollEnv, character: i64) -> Vec<(i64, i16)> {
-    sqlx::query_as(
-        "SELECT skill_id, active_level FROM character_skills WHERE character_id = $1 ORDER BY skill_id",
-    )
-    .bind(character)
-    .fetch_all(&env.pool)
-    .await
-    .unwrap()
+    env.stores.fees.skills_of(character).await.unwrap()
 }
 
 async fn standings(env: &PollEnv, character: i64) -> Vec<(i64, String, String)> {
-    sqlx::query_as(
-        "SELECT from_id, from_type, standing::text FROM character_standings \
-         WHERE character_id = $1 ORDER BY from_id",
-    )
-    .bind(character)
-    .fetch_all(&env.pool)
-    .await
-    .unwrap()
+    env.stores.fees.standings_of(character).await.unwrap()
+}
+
+fn kind_named(kind: &str) -> Kind {
+    match kind {
+        "skills" => Kind::Skills,
+        "standings" => Kind::Standings,
+        _ => Kind::Location,
+    }
 }
 
 async fn sync_row(
@@ -74,23 +64,43 @@ async fn sync_row(
     character: i64,
     kind: &str,
 ) -> (Option<OffsetDateTime>, OffsetDateTime, Option<String>, i32) {
-    sqlx::query_as(
-        "SELECT last_success_at, next_poll_at, last_error, failures FROM fee_sync \
-         WHERE character_id = $1 AND kind = $2",
+    let state = env
+        .stores
+        .fees
+        .fee_sync(character, kind_named(kind))
+        .await
+        .unwrap()
+        .expect("a sync row");
+    (
+        state.last_success_at,
+        state.next_poll_at,
+        state.last_error,
+        state.failures,
     )
-    .bind(character)
-    .bind(kind)
-    .fetch_one(&env.pool)
-    .await
-    .unwrap()
 }
 
 async fn location(env: &PollEnv, character: i64) -> Option<(i64, String)> {
-    sqlx::query_as("SELECT location_id, kind FROM character_locations WHERE character_id = $1")
-        .bind(character)
-        .fetch_optional(&env.pool)
+    env.stores.fees.location_of(character).await.unwrap()
+}
+
+/// Alice sold 10 of 34 at Jita 4-4 for 150 ISK each.
+async fn alice_sold_in_jita(env: &PollEnv) {
+    env.stores
+        .trades
+        .seed_trade(
+            ALICE,
+            &sekondo::store::TradeSeed {
+                transaction_id: 7,
+                is_sale: true,
+                type_id: 34,
+                location_id: JITA,
+                quantity: 10,
+                unit_price_cents: 15_000,
+                at: OffsetDateTime::now_utc(),
+            },
+        )
         .await
-        .unwrap()
+        .unwrap();
 }
 
 async fn move_to(env: &PollEnv, character: i64, where_to: serde_json::Value) {
@@ -103,9 +113,9 @@ async fn move_to(env: &PollEnv, character: i64, where_to: serde_json::Value) {
 
 // ---- polling the location ----
 
-#[sqlx::test]
-async fn a_character_docked_in_a_station_is_stored_with_that_station(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_character_docked_in_a_station_is_stored_with_that_station() {
+    let env = linked().await;
     let polled_at = env.clock.now();
 
     assert_eq!(
@@ -121,9 +131,9 @@ async fn a_character_docked_in_a_station_is_stored_with_that_station(pool: PgPoo
     assert_eq!(success, Some(polled_at));
 }
 
-#[sqlx::test]
-async fn a_character_docked_in_a_structure_is_stored_with_that_structure(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_character_docked_in_a_structure_is_stored_with_that_structure() {
+    let env = linked().await;
     move_to(
         &env,
         ALICE,
@@ -139,9 +149,9 @@ async fn a_character_docked_in_a_structure_is_stored_with_that_structure(pool: P
     );
 }
 
-#[sqlx::test]
-async fn a_character_in_space_keeps_the_last_location(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_character_in_space_keeps_the_last_location() {
+    let env = linked().await;
     env.fees.poll(ALICE, Kind::Location).await;
     move_to(&env, ALICE, json!({"solar_system_id": 30000144})).await;
 
@@ -156,9 +166,9 @@ async fn a_character_in_space_keeps_the_last_location(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn the_next_location_poll_waits_for_the_hour(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn the_next_location_poll_waits_for_the_hour() {
+    let env = linked().await;
     let polled_at = env.clock.now();
 
     env.fees.poll(ALICE, Kind::Location).await;
@@ -167,9 +177,9 @@ async fn the_next_location_poll_waits_for_the_hour(pool: PgPool) {
     assert!(next >= polled_at + Duration::hours(1), "{next}");
 }
 
-#[sqlx::test]
-async fn a_failed_location_poll_keeps_the_last_location(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_failed_location_poll_keeps_the_last_location() {
+    let env = linked().await;
     env.fees.poll(ALICE, Kind::Location).await;
     move_to(
         &env,
@@ -195,9 +205,9 @@ async fn a_failed_location_poll_keeps_the_last_location(pool: PgPool) {
     assert!(error.unwrap().contains("503"));
 }
 
-#[sqlx::test]
-async fn a_character_without_the_location_scope_is_never_polled_for_it(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn a_character_without_the_location_scope_is_never_polled_for_it() {
+    let env = PollEnv::new().await;
     let account = env.new_account().await;
     env.control(
         "scopes",
@@ -216,18 +226,22 @@ async fn a_character_without_the_location_scope_is_never_polled_for_it(pool: PgP
 
     assert_eq!(env.stub.esi_calls("location"), 0);
     assert_eq!(location(&env, ALICE).await, None);
-    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM fee_sync WHERE kind = 'location'")
-        .fetch_one(&env.pool)
+    let rows = env
+        .stores
+        .fees
+        .fee_sync(ALICE, Kind::Location)
         .await
-        .unwrap();
+        .unwrap()
+        .into_iter()
+        .count();
     assert_eq!(rows, 0, "not even scheduled");
 }
 
 // ---- polling skills and standings ----
 
-#[sqlx::test]
-async fn the_active_level_is_stored_and_only_the_two_skills_that_matter(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn the_active_level_is_stored_and_only_the_two_skills_that_matter() {
+    let env = linked().await;
     let polled_at = env.clock.now();
 
     let outcome = env.fees.poll(ALICE, Kind::Skills).await;
@@ -241,9 +255,9 @@ async fn the_active_level_is_stored_and_only_the_two_skills_that_matter(pool: Pg
     assert_eq!((error, failures), (None, 0));
 }
 
-#[sqlx::test]
-async fn standings_drop_agents_and_keep_what_esi_reported(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn standings_drop_agents_and_keep_what_esi_reported() {
+    let env = linked().await;
     env.control(
         "standings",
         json!({"character_id": ALICE, "standings": [
@@ -272,9 +286,9 @@ async fn standings_drop_agents_and_keep_what_esi_reported(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn a_poll_replaces_what_was_stored(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_poll_replaces_what_was_stored() {
+    let env = linked().await;
     env.fees.poll(ALICE, Kind::Skills).await;
     env.control(
         "skills",
@@ -293,9 +307,9 @@ async fn a_poll_replaces_what_was_stored(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn the_next_poll_waits_for_the_hour_and_for_esis_expiry(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn the_next_poll_waits_for_the_hour_and_for_esis_expiry() {
+    let env = linked().await;
     let polled_at = env.clock.now();
     env.fees.poll(ALICE, Kind::Standings).await;
     let (_, next, ..) = sync_row(&env, ALICE, "standings").await;
@@ -308,16 +322,21 @@ async fn the_next_poll_waits_for_the_hour_and_for_esis_expiry(pool: PgPool) {
     assert!(next >= polled_at + Duration::hours(3), "{next}");
 }
 
-#[sqlx::test]
-async fn the_scheduler_polls_a_new_character_within_one_hour_and_not_again_before_the_next(
-    pool: PgPool,
-) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn the_scheduler_polls_a_new_character_within_one_hour_and_not_again_before_the_next() {
+    let env = linked().await;
     assert_eq!(env.fees.tick().await, 0, "first polls lie ahead");
-    let scheduled: i64 = sqlx::query_scalar("SELECT count(*) FROM fee_sync")
-        .fetch_one(&env.pool)
-        .await
-        .unwrap();
+    let mut scheduled = 0;
+    for kind in [Kind::Skills, Kind::Standings, Kind::Location] {
+        scheduled += env
+            .stores
+            .fees
+            .fee_sync(ALICE, kind)
+            .await
+            .unwrap()
+            .into_iter()
+            .count();
+    }
     assert_eq!(scheduled, 3, "skills, standings and location");
 
     env.clock.advance(Duration::hours(1) + Duration::minutes(1));
@@ -336,9 +355,9 @@ async fn the_scheduler_polls_a_new_character_within_one_hour_and_not_again_befor
     assert_eq!(env.stub.esi_calls("location"), 1);
 }
 
-#[sqlx::test]
-async fn a_character_needing_relogin_is_not_requested_and_keeps_its_values(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_character_needing_relogin_is_not_requested_and_keeps_its_values() {
+    let env = linked().await;
     env.fees.poll(ALICE, Kind::Skills).await;
     env.repo.mark_needs_relogin(ALICE).await.unwrap();
     let calls = env.stub.esi_calls("skills");
@@ -352,9 +371,9 @@ async fn a_character_needing_relogin_is_not_requested_and_keeps_its_values(pool:
     assert_eq!(skills(&env, ALICE).await.len(), 2);
 }
 
-#[sqlx::test]
-async fn the_scheduler_skips_characters_needing_relogin(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn the_scheduler_skips_characters_needing_relogin() {
+    let env = linked().await;
     env.repo.mark_needs_relogin(ALICE).await.unwrap();
     env.fees.tick().await;
     env.clock.advance(Duration::hours(3));
@@ -364,9 +383,9 @@ async fn the_scheduler_skips_characters_needing_relogin(pool: PgPool) {
     assert_eq!(env.stub.esi_calls("standings"), 0);
 }
 
-#[sqlx::test]
-async fn a_failed_poll_keeps_the_last_values_and_is_retried_later(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_failed_poll_keeps_the_last_values_and_is_retried_later() {
+    let env = linked().await;
     env.fees.poll(ALICE, Kind::Standings).await;
     let before = standings(&env, ALICE).await;
     assert!(!before.is_empty());
@@ -397,9 +416,9 @@ async fn a_failed_poll_keeps_the_last_values_and_is_retried_later(pool: PgPool) 
     );
 }
 
-#[sqlx::test]
-async fn an_esi_pause_defers_the_poll_without_counting_a_failure(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn an_esi_pause_defers_the_poll_without_counting_a_failure() {
+    let env = linked().await;
     env.fees.poll(ALICE, Kind::Skills).await;
     env.control(
         "esi-fail-next",
@@ -420,11 +439,9 @@ async fn an_esi_pause_defers_the_poll_without_counting_a_failure(pool: PgPool) {
     assert!(next >= at + Duration::seconds(120));
 }
 
-#[sqlx::test]
-async fn a_fee_failure_does_not_touch_the_order_or_the_wealth_poll_and_the_other_way_round(
-    pool: PgPool,
-) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_fee_failure_does_not_touch_the_order_or_the_wealth_poll_and_the_other_way_round() {
+    let env = linked().await;
     env.poller.poll_character(ALICE).await;
     env.wealth
         .poll(ALICE, sekondo::wealth_poller::Kind::Wallet)
@@ -445,14 +462,24 @@ async fn a_fee_failure_does_not_touch_the_order_or_the_wealth_poll_and_the_other
             .await,
         PollOutcome::Updated
     );
-    let failures: Vec<i32> = sqlx::query_scalar(
-        "SELECT failures FROM order_sync WHERE character_id = $1 UNION ALL \
-         SELECT failures FROM wealth_sync WHERE character_id = $1",
-    )
-    .bind(ALICE)
-    .fetch_all(&env.pool)
-    .await
-    .unwrap();
+    let mut failures = vec![
+        env.stores
+            .orders
+            .order_sync(ALICE)
+            .await
+            .unwrap()
+            .unwrap()
+            .failures,
+    ];
+    for kind in [
+        sekondo::wealth_poller::Kind::Wallet,
+        sekondo::wealth_poller::Kind::Assets,
+        sekondo::wealth_poller::Kind::Transactions,
+    ] {
+        if let Some(state) = env.stores.wealth.wealth_sync(ALICE, kind).await.unwrap() {
+            failures.push(state.failures);
+        }
+    }
     assert!(failures.iter().all(|f| *f == 0), "{failures:?}");
 
     env.control("esi-fail-next", json!({"route": "orders", "status": 500}))
@@ -467,9 +494,9 @@ async fn a_fee_failure_does_not_touch_the_order_or_the_wealth_poll_and_the_other
     assert_eq!(skill_failures, 0);
 }
 
-#[sqlx::test]
-async fn a_character_unlinked_during_its_poll_is_dropped(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn a_character_unlinked_during_its_poll_is_dropped() {
+    let env = PollEnv::new().await;
     // Never linked: the token service does not know it.
     assert_eq!(
         env.fees.poll(ALICE, Kind::Skills).await,
@@ -479,9 +506,9 @@ async fn a_character_unlinked_during_its_poll_is_dropped(pool: PgPool) {
 
 // ---- station owners ----
 
-#[sqlx::test]
-async fn a_station_shared_by_two_accounts_is_requested_once(pool: PgPool) {
-    let env = with_orders(pool).await;
+#[tokio::test]
+async fn a_station_shared_by_two_accounts_is_requested_once() {
+    let env = with_orders().await;
     let other = env.new_account().await;
     env.link(other, BOB).await;
     env.poller.poll_character(BOB).await;
@@ -494,12 +521,7 @@ async fn a_station_shared_by_two_accounts_is_requested_once(pool: PgPool) {
         [JITA],
         "once, and not the structure"
     );
-    let owner: i64 =
-        sqlx::query_scalar("SELECT owner_id FROM station_owners WHERE station_id = $1")
-            .bind(JITA)
-            .fetch_one(&env.pool)
-            .await
-            .unwrap();
+    let owner = env.stores.fees.station_owner(JITA).await.unwrap().unwrap();
     assert_eq!(owner, 1000035);
 
     assert_eq!(env.fees.resolve_stations().await, 0);
@@ -510,17 +532,17 @@ async fn a_station_shared_by_two_accounts_is_requested_once(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn a_station_without_orders_is_not_looked_up(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_station_without_orders_is_not_looked_up() {
+    let env = linked().await;
 
     assert_eq!(env.fees.resolve_stations().await, 0);
     assert!(env.stub.station_requests().is_empty());
 }
 
-#[sqlx::test]
-async fn a_failed_station_lookup_is_retried_on_a_later_tick(pool: PgPool) {
-    let env = with_orders(pool).await;
+#[tokio::test]
+async fn a_failed_station_lookup_is_retried_on_a_later_tick() {
+    let env = with_orders().await;
     env.control("esi-fail-next", json!({"route": "stations", "status": 503}))
         .await;
 
@@ -533,9 +555,9 @@ async fn a_failed_station_lookup_is_retried_on_a_later_tick(pool: PgPool) {
     assert_eq!(env.stub.esi_calls("stations"), 2);
 }
 
-#[sqlx::test]
-async fn the_scheduler_tick_resolves_station_owners(pool: PgPool) {
-    let env = with_orders(pool).await;
+#[tokio::test]
+async fn the_scheduler_tick_resolves_station_owners() {
+    let env = with_orders().await;
 
     env.fees.tick().await;
 
@@ -544,9 +566,9 @@ async fn the_scheduler_tick_resolves_station_owners(pool: PgPool) {
 
 // ---- the fees-updated signal ----
 
-#[sqlx::test]
-async fn a_poll_that_changes_a_fee_signals_the_owner(pool: PgPool) {
-    let env = with_orders(pool).await;
+#[tokio::test]
+async fn a_poll_that_changes_a_fee_signals_the_owner() {
+    let env = with_orders().await;
     let mut stream = env.events.subscribe(account_of(&env, ALICE).await);
 
     env.fees.poll(ALICE, Kind::Skills).await;
@@ -554,9 +576,9 @@ async fn a_poll_that_changes_a_fee_signals_the_owner(pool: PgPool) {
     assert_eq!(signals(&mut stream).await, [Event::FeesUpdated]);
 }
 
-#[sqlx::test]
-async fn a_poll_that_changes_nothing_signals_nobody(pool: PgPool) {
-    let env = with_orders(pool).await;
+#[tokio::test]
+async fn a_poll_that_changes_nothing_signals_nobody() {
+    let env = with_orders().await;
     env.fees.poll(ALICE, Kind::Skills).await;
     let mut stream = env.events.subscribe(account_of(&env, ALICE).await);
     env.clock.advance(Duration::hours(1) + Duration::minutes(1));
@@ -569,9 +591,9 @@ async fn a_poll_that_changes_nothing_signals_nobody(pool: PgPool) {
     assert_eq!(signals(&mut stream).await, Vec::<Event>::new());
 }
 
-#[sqlx::test]
-async fn a_changed_skill_signals_again(pool: PgPool) {
-    let env = with_orders(pool).await;
+#[tokio::test]
+async fn a_changed_skill_signals_again() {
+    let env = with_orders().await;
     env.fees.poll(ALICE, Kind::Skills).await;
     let mut stream = env.events.subscribe(account_of(&env, ALICE).await);
     env.control(
@@ -588,9 +610,9 @@ async fn a_changed_skill_signals_again(pool: PgPool) {
     assert_eq!(signals(&mut stream).await, [Event::FeesUpdated]);
 }
 
-#[sqlx::test]
-async fn a_skill_the_page_does_not_use_signals_nobody(pool: PgPool) {
-    let env = with_orders(pool).await;
+#[tokio::test]
+async fn a_skill_the_page_does_not_use_signals_nobody() {
+    let env = with_orders().await;
     env.fees.poll(ALICE, Kind::Skills).await;
     let mut stream = env.events.subscribe(account_of(&env, ALICE).await);
     env.control(
@@ -609,9 +631,9 @@ async fn a_skill_the_page_does_not_use_signals_nobody(pool: PgPool) {
     assert_eq!(signals(&mut stream).await, Vec::<Event>::new());
 }
 
-#[sqlx::test]
-async fn a_standing_that_changes_a_fee_signals_and_a_signal_stays_within_the_account(pool: PgPool) {
-    let env = with_orders(pool).await;
+#[tokio::test]
+async fn a_standing_that_changes_a_fee_signals_and_a_signal_stays_within_the_account() {
+    let env = with_orders().await;
     let other = env.new_account().await;
     env.link(other, BOB).await;
     env.fees.poll(ALICE, Kind::Skills).await;
@@ -634,9 +656,9 @@ async fn a_standing_that_changes_a_fee_signals_and_a_signal_stays_within_the_acc
     assert_eq!(signals(&mut theirs).await, Vec::<Event>::new());
 }
 
-#[sqlx::test]
-async fn a_station_owner_that_completes_a_fee_signals_only_the_affected_accounts(pool: PgPool) {
-    let env = with_orders(pool).await;
+#[tokio::test]
+async fn a_station_owner_that_completes_a_fee_signals_only_the_affected_accounts() {
+    let env = with_orders().await;
     let other = env.new_account().await;
     env.link(other, BOB).await;
     env.poller.poll_character(BOB).await;
@@ -652,23 +674,13 @@ async fn a_station_owner_that_completes_a_fee_signals_only_the_affected_accounts
     assert_eq!(signals(&mut theirs).await, Vec::<Event>::new());
 }
 
-#[sqlx::test]
-async fn a_sale_at_a_new_npc_station_gets_its_owner_looked_up_and_signals_the_account(
-    pool: PgPool,
-) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_sale_at_a_new_npc_station_gets_its_owner_looked_up_and_signals_the_account() {
+    let env = linked().await;
     env.fees.poll(ALICE, Kind::Skills).await;
     env.fees.poll(ALICE, Kind::Standings).await;
     // No order anywhere: the only reason to look at Jita 4-4 is Alice's sale there.
-    sqlx::query(
-        "INSERT INTO sales (transaction_id, character_id, type_id, location_id, quantity, \
-         unit_price, sold_at) VALUES (7, $1, 34, $2, 10, 150, now())",
-    )
-    .bind(ALICE)
-    .bind(JITA)
-    .execute(&env.pool)
-    .await
-    .unwrap();
+    alice_sold_in_jita(&env).await;
     let mut mine = env.events.subscribe(account_of(&env, ALICE).await);
 
     let learned = env.fees.resolve_stations().await;
@@ -678,20 +690,10 @@ async fn a_sale_at_a_new_npc_station_gets_its_owner_looked_up_and_signals_the_ac
     assert_eq!(signals(&mut mine).await, [Event::FeesUpdated]);
 }
 
-#[sqlx::test]
-async fn a_skills_poll_that_changes_the_fees_of_a_sale_signals_the_account_without_any_order(
-    pool: PgPool,
-) {
-    let env = linked(pool).await;
-    sqlx::query(
-        "INSERT INTO sales (transaction_id, character_id, type_id, location_id, quantity, \
-         unit_price, sold_at) VALUES (7, $1, 34, $2, 10, 150, now())",
-    )
-    .bind(ALICE)
-    .bind(JITA)
-    .execute(&env.pool)
-    .await
-    .unwrap();
+#[tokio::test]
+async fn a_skills_poll_that_changes_the_fees_of_a_sale_signals_the_account_without_any_order() {
+    let env = linked().await;
+    alice_sold_in_jita(&env).await;
     let mut stream = env.events.subscribe(account_of(&env, ALICE).await);
 
     env.fees.poll(ALICE, Kind::Skills).await;
@@ -699,9 +701,9 @@ async fn a_skills_poll_that_changes_the_fees_of_a_sale_signals_the_account_witho
     assert_eq!(signals(&mut stream).await, [Event::FeesUpdated]);
 }
 
-#[sqlx::test]
-async fn a_skills_poll_changes_the_fee_card_of_a_character_without_orders_or_sales(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_skills_poll_changes_the_fee_card_of_a_character_without_orders_or_sales() {
+    let env = linked().await;
     let mut stream = env.events.subscribe(account_of(&env, ALICE).await);
 
     env.fees.poll(ALICE, Kind::Skills).await;
@@ -712,19 +714,14 @@ async fn a_skills_poll_changes_the_fee_card_of_a_character_without_orders_or_sal
 
 // ---- the built-in station ----
 
-#[sqlx::test]
-async fn the_owner_of_jita_44_is_looked_up_once_without_any_order_there(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn the_owner_of_jita_44_is_looked_up_once_without_any_order_there() {
+    let env = linked().await;
 
     env.fees.tick().await;
 
     assert_eq!(env.stub.station_requests(), [JITA]);
-    let owner: i64 =
-        sqlx::query_scalar("SELECT owner_id FROM station_owners WHERE station_id = $1")
-            .bind(JITA)
-            .fetch_one(&env.pool)
-            .await
-            .unwrap();
+    let owner = env.stores.fees.station_owner(JITA).await.unwrap().unwrap();
     assert_eq!(owner, 1000035);
 
     env.clock.advance(Duration::hours(3));
@@ -736,9 +733,9 @@ async fn the_owner_of_jita_44_is_looked_up_once_without_any_order_there(pool: Pg
     );
 }
 
-#[sqlx::test]
-async fn an_owner_learned_from_orders_is_not_asked_for_again_as_the_built_in_station(pool: PgPool) {
-    let env = with_orders(pool).await;
+#[tokio::test]
+async fn an_owner_learned_from_orders_is_not_asked_for_again_as_the_built_in_station() {
+    let env = with_orders().await;
 
     env.fees.tick().await;
 
@@ -749,9 +746,9 @@ async fn an_owner_learned_from_orders_is_not_asked_for_again_as_the_built_in_sta
     );
 }
 
-#[sqlx::test]
-async fn a_failed_built_in_lookup_is_retried_on_a_later_tick(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_failed_built_in_lookup_is_retried_on_a_later_tick() {
+    let env = linked().await;
     env.control("esi-fail-next", json!({"route": "stations", "status": 503}))
         .await;
 
@@ -762,16 +759,13 @@ async fn a_failed_built_in_lookup_is_retried_on_a_later_tick(pool: PgPool) {
     env.clock.advance(Duration::minutes(2));
     env.fees.tick().await;
     assert_eq!(env.stub.esi_calls("stations"), 2);
-    let known: i64 = sqlx::query_scalar("SELECT count(*) FROM station_owners")
-        .fetch_one(&env.pool)
-        .await
-        .unwrap();
+    let known = env.stores.fees.station_owner_count().await.unwrap();
     assert_eq!(known, 1);
 }
 
-#[sqlx::test]
-async fn learning_the_built_in_owner_signals_every_account(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn learning_the_built_in_owner_signals_every_account() {
+    let env = linked().await;
     let other = env.new_account().await;
     env.link(other, BOB).await;
     let mut alice = env.events.subscribe(account_of(&env, ALICE).await);
@@ -788,8 +782,8 @@ async fn learning_the_built_in_owner_signals_every_account(pool: PgPool) {
 const AMARR: i64 = 60008494;
 
 /// Alice with skills and standings polled, docked in Jita 4-4, and both owners known.
-async fn alice_docked_in_jita(pool: PgPool) -> PollEnv {
-    let env = linked(pool).await;
+async fn alice_docked_in_jita() -> PollEnv {
+    let env = linked().await;
     env.fees.poll(ALICE, Kind::Skills).await;
     env.fees.poll(ALICE, Kind::Standings).await;
     env.fees.poll(ALICE, Kind::Location).await;
@@ -799,13 +793,13 @@ async fn alice_docked_in_jita(pool: PgPool) -> PollEnv {
     env
 }
 
-#[sqlx::test]
-async fn moving_to_a_station_with_other_fees_signals_the_account(pool: PgPool) {
-    let env = alice_docked_in_jita(pool).await;
+#[tokio::test]
+async fn moving_to_a_station_with_other_fees_signals_the_account() {
+    let env = alice_docked_in_jita().await;
     // Amarr's owner is known already, so the move changes the fees right away.
-    sqlx::query("INSERT INTO station_owners (station_id, owner_id, resolved_at) VALUES ($1, 1000086, now())")
-        .bind(AMARR)
-        .execute(&env.pool)
+    env.stores
+        .fees
+        .insert_station_owner(AMARR, 1000086, OffsetDateTime::now_utc())
         .await
         .unwrap();
     let mut stream = env.events.subscribe(account_of(&env, ALICE).await);
@@ -826,9 +820,9 @@ async fn moving_to_a_station_with_other_fees_signals_the_account(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn the_same_station_signals_nobody(pool: PgPool) {
-    let env = alice_docked_in_jita(pool).await;
+#[tokio::test]
+async fn the_same_station_signals_nobody() {
+    let env = alice_docked_in_jita().await;
     let mut stream = env.events.subscribe(account_of(&env, ALICE).await);
     env.clock.advance(Duration::hours(1) + Duration::minutes(1));
 
@@ -837,9 +831,9 @@ async fn the_same_station_signals_nobody(pool: PgPool) {
     assert_eq!(signals(&mut stream).await, Vec::<Event>::new());
 }
 
-#[sqlx::test]
-async fn the_owner_of_a_docked_station_is_looked_up_and_completes_the_fee(pool: PgPool) {
-    let env = alice_docked_in_jita(pool).await;
+#[tokio::test]
+async fn the_owner_of_a_docked_station_is_looked_up_and_completes_the_fee() {
+    let env = alice_docked_in_jita().await;
     move_to(
         &env,
         ALICE,
@@ -860,19 +854,12 @@ async fn the_owner_of_a_docked_station_is_looked_up_and_completes_the_fee(pool: 
     );
 }
 
-#[sqlx::test]
-async fn a_docked_station_and_a_docked_structure_are_named_like_order_locations(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_docked_station_and_a_docked_structure_are_named_like_order_locations() {
+    let env = linked().await;
     let name = |id: i64| {
-        let pool = env.pool.clone();
-        async move {
-            sqlx::query_scalar::<_, Option<String>>("SELECT name FROM names WHERE id = $1")
-                .bind(id)
-                .fetch_optional(&pool)
-                .await
-                .unwrap()
-                .flatten()
-        }
+        let market = env.stores.market.clone();
+        async move { market.name_of(id).await.unwrap() }
     };
 
     move_to(

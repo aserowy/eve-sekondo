@@ -1,34 +1,90 @@
 mod common;
 
 use common::{AppBuilder, Browser, TestApp};
-use sqlx::PgPool;
+use sekondo::store::{SeedHistoryRow, SeedSnapshotRow};
+use time::{Duration, OffsetDateTime};
 
 const ALICE: i64 = 90000001;
 
-async fn setup(pool: PgPool) -> (TestApp, Browser) {
-    let app = AppBuilder::new(pool).with_stub().spawn().await;
+async fn setup() -> (TestApp, Browser) {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let browser = app.browser();
     browser.sso_round_trip(&app, "/auth/login", ALICE).await;
     (app, browser)
 }
 
-async fn item(pool: &PgPool, type_id: i64, name: &str, best_sell: &str, volume: f64) {
-    sqlx::query(
-        "INSERT INTO station_item_stats
-             (region_id, station_id, type_id, book_at, best_buy, best_sell, buy_near_orders,
-              sell_near_orders, rho, indicators_at, volume_7d, volume_30d, sigma, returns)
-         VALUES (10000002, 60003760, $1, now(), 100, $2::numeric, 1, 1, 0.5, now(), $3, $3, 0.02, 29)",
-    )
-    .bind(type_id)
-    .bind(best_sell)
-    .bind(volume)
-    .execute(pool)
-    .await
-    .unwrap();
-    sqlx::query("INSERT INTO names (id, category, name, resolved_at) VALUES ($1, 'inventory_type', $2, now())")
-        .bind(type_id)
-        .bind(name)
-        .execute(pool)
+async fn item(app: &TestApp, type_id: i64, name: &str, best_sell: &str, volume: f64) {
+    let now = OffsetDateTime::now_utc();
+    app.stores
+        .station
+        .seed_item_stats(
+            10000002,
+            60003760,
+            type_id,
+            &sekondo::store::ItemStatsRecord {
+                book_at: Some(now),
+                best_buy: Some("100".to_owned()),
+                best_sell: Some(best_sell.to_owned()),
+                buy_near_orders: Some(1),
+                sell_near_orders: Some(1),
+                rho: Some(0.5),
+                indicators_at: Some(now),
+                volume_7d: Some(volume),
+                volume_30d: Some(volume),
+                sigma: Some(0.02),
+                returns: Some(29),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    name_of(app, type_id, name).await;
+}
+
+async fn name_of(app: &TestApp, type_id: i64, name: &str) {
+    app.stores
+        .market
+        .store_names(
+            &[sekondo::store::NameRow {
+                id: type_id,
+                category: "inventory_type".to_owned(),
+                name: Some(name.to_owned()),
+            }],
+            OffsetDateTime::now_utc(),
+            None,
+        )
+        .await
+        .unwrap();
+}
+
+/// A snapshot of item 34 with the best sell at `sell` and the depth the charts read.
+fn snapshot(
+    recorded_at: OffsetDateTime,
+    sell: f64,
+    depth: (i64, i32, i64, i32, i64, i64),
+) -> SeedSnapshotRow {
+    SeedSnapshotRow {
+        recorded_at,
+        type_id: 34,
+        best_buy: 100.0,
+        best_sell: sell,
+        buy_near_units: depth.0,
+        buy_near_orders: depth.1,
+        sell_near_units: depth.2,
+        sell_near_orders: depth.3,
+        buy_units: depth.4,
+        sell_units: depth.5,
+        buy_taken: 0,
+        sell_taken: 0,
+    }
+}
+
+/// The hourly and daily rollups over everything seeded so far.
+async fn roll_up(app: &TestApp) {
+    let now = OffsetDateTime::now_utc();
+    app.stores
+        .station
+        .refresh_rollups(now - Duration::days(40), now + Duration::hours(2))
         .await
         .unwrap();
 }
@@ -52,9 +108,9 @@ fn figure(html: &str, key: &str) -> String {
     value.split("</td>").next().unwrap().trim().to_owned()
 }
 
-#[sqlx::test]
-async fn an_unauthenticated_request_is_redirected_to_the_landing_page(pool: PgPool) {
-    let app = AppBuilder::new(pool).with_stub().spawn().await;
+#[tokio::test]
+async fn an_unauthenticated_request_is_redirected_to_the_landing_page() {
+    let app = AppBuilder::new().with_stub().spawn().await;
 
     let res = app
         .browser()
@@ -65,19 +121,19 @@ async fn an_unauthenticated_request_is_redirected_to_the_landing_page(pool: PgPo
     assert_eq!(Browser::location(&res), "/");
 }
 
-#[sqlx::test]
-async fn an_unknown_table_is_not_found(pool: PgPool) {
-    let (app, browser) = setup(pool).await;
+#[tokio::test]
+async fn an_unknown_table_is_not_found() {
+    let (app, browser) = setup().await;
 
     let res = detail(&app, &browser, "/opportunities/detail/bogus/34").await;
 
     assert_eq!(res.status(), 404);
 }
 
-#[sqlx::test]
-async fn the_page_shows_the_fees_the_prices_and_how_the_figures_follow(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
-    item(&pool, 34, "Tritanium", "130.00", 100_000_000.0).await;
+#[tokio::test]
+async fn the_page_shows_the_fees_the_prices_and_how_the_figures_follow() {
+    let (app, browser) = setup().await;
+    item(&app, 34, "Tritanium", "130.00", 100_000_000.0).await;
 
     let res = detail(&app, &browser, "/opportunities/detail/classic/34").await;
 
@@ -111,28 +167,19 @@ async fn the_page_shows_the_fees_the_prices_and_how_the_figures_follow(pool: PgP
     );
 }
 
-#[sqlx::test]
-async fn the_page_names_the_character_whose_fees_are_used(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
-    item(&pool, 34, "Tritanium", "130.00", 100_000_000.0).await;
-    for kind in ["skills", "standings"] {
-        sqlx::query("INSERT INTO fee_sync (character_id, kind, next_poll_at, last_success_at) VALUES ($1, $2, now(), now())")
-            .bind(ALICE)
-            .bind(kind)
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
-    for skill in [16622_i64, 3446] {
-        sqlx::query("INSERT INTO character_skills (character_id, skill_id, active_level) VALUES ($1, $2, 5)")
-            .bind(ALICE)
-            .bind(skill)
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
-    sqlx::query("INSERT INTO station_owners (station_id, owner_id, resolved_at) VALUES (60003760, 1000035, now())")
-        .execute(&pool)
+#[tokio::test]
+async fn the_page_names_the_character_whose_fees_are_used() {
+    let (app, browser) = setup().await;
+    item(&app, 34, "Tritanium", "130.00", 100_000_000.0).await;
+    let now = OffsetDateTime::now_utc();
+    let fees = &app.stores.fees;
+    fees.store_skills(ALICE, &[16622, 3446], &[5, 5], now, now, None)
+        .await
+        .unwrap();
+    fees.store_standings(ALICE, &[], now, now, None)
+        .await
+        .unwrap();
+    fees.insert_station_owner(60003760, 1000035, now)
         .await
         .unwrap();
 
@@ -149,11 +196,11 @@ async fn the_page_names_the_character_whose_fees_are_used(pool: PgPool) {
     assert_eq!(figure(&html, "cost"), "101.50");
 }
 
-#[sqlx::test]
-async fn an_item_that_dropped_out_is_still_shown_and_the_page_says_so(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
+#[tokio::test]
+async fn an_item_that_dropped_out_is_still_shown_and_the_page_says_so() {
+    let (app, browser) = setup().await;
     // Nothing trades any more: the item is in no table, but its figures are known.
-    item(&pool, 34, "Tritanium", "130.00", 0.0).await;
+    item(&app, 34, "Tritanium", "130.00", 0.0).await;
 
     let html = detail(&app, &browser, "/opportunities/detail/classic/34")
         .await
@@ -167,13 +214,10 @@ async fn an_item_that_dropped_out_is_still_shown_and_the_page_says_so(pool: PgPo
     assert_eq!(figure(&html, "sigma"), "2.00%");
 }
 
-#[sqlx::test]
-async fn an_item_the_station_no_longer_trades_gets_a_page_that_says_so(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
-    sqlx::query("INSERT INTO names (id, category, name, resolved_at) VALUES (34, 'inventory_type', 'Tritanium', now())")
-        .execute(&pool)
-        .await
-        .unwrap();
+#[tokio::test]
+async fn an_item_the_station_no_longer_trades_gets_a_page_that_says_so() {
+    let (app, browser) = setup().await;
+    name_of(&app, 34, "Tritanium").await;
 
     let res = detail(&app, &browser, "/opportunities/detail/trend/34").await;
 
@@ -185,12 +229,12 @@ async fn an_item_the_station_no_longer_trades_gets_a_page_that_says_so(pool: PgP
     );
 }
 
-#[sqlx::test]
-async fn with_many_matches_every_item_is_listed_and_none_is_cut_off_by_a_row_limit(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
+#[tokio::test]
+async fn with_many_matches_every_item_is_listed_and_none_is_cut_off_by_a_row_limit() {
+    let (app, browser) = setup().await;
     for i in 1..=60i64 {
         item(
-            &pool,
+            &app,
             1000 + i,
             &format!("Item {i}"),
             "130.00",
@@ -215,10 +259,10 @@ async fn with_many_matches_every_item_is_listed_and_none_is_cut_off_by_a_row_lim
     assert!(!strong.contains("No longer listed"));
 }
 
-#[sqlx::test]
-async fn the_opportunities_page_has_no_floating_window_and_its_rows_open_pages(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
-    item(&pool, 34, "Tritanium", "130.00", 100_000_000.0).await;
+#[tokio::test]
+async fn the_opportunities_page_has_no_floating_window_and_its_rows_open_pages() {
+    let (app, browser) = setup().await;
+    item(&app, 34, "Tritanium", "130.00", 100_000_000.0).await;
 
     let page = browser
         .get(&app.url("/opportunities/classic"))
@@ -241,11 +285,11 @@ async fn the_opportunities_page_has_no_floating_window_and_its_rows_open_pages(p
     );
 }
 
-#[sqlx::test]
-async fn rows_carry_the_selection_and_sorting_to_the_detail_page(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
+#[tokio::test]
+async fn rows_carry_the_selection_and_sorting_to_the_detail_page() {
+    let (app, browser) = setup().await;
     browser.sso_round_trip(&app, "/auth/add", 90000002).await;
-    item(&pool, 34, "Tritanium", "130.00", 100_000_000.0).await;
+    item(&app, 34, "Tritanium", "130.00", 100_000_000.0).await;
 
     let page = browser
         .get(&app.url("/opportunities/classic?chars=90000002&cs=item&cd=asc"))
@@ -264,9 +308,9 @@ async fn rows_carry_the_selection_and_sorting_to_the_detail_page(pool: PgPool) {
 
 // ---- the detail page ----
 
-#[sqlx::test]
-async fn the_detail_page_redirects_a_signed_out_request_to_the_landing_page(pool: PgPool) {
-    let app = AppBuilder::new(pool).with_stub().spawn().await;
+#[tokio::test]
+async fn the_detail_page_redirects_a_signed_out_request_to_the_landing_page() {
+    let app = AppBuilder::new().with_stub().spawn().await;
 
     let res = app
         .browser()
@@ -277,22 +321,20 @@ async fn the_detail_page_redirects_a_signed_out_request_to_the_landing_page(pool
     assert_eq!(Browser::location(&res), "/");
 }
 
-#[sqlx::test]
-async fn the_detail_page_of_an_unknown_table_is_not_found(pool: PgPool) {
-    let (app, browser) = setup(pool).await;
+#[tokio::test]
+async fn the_detail_page_of_an_unknown_table_is_not_found() {
+    let (app, browser) = setup().await;
 
     let res = detail(&app, &browser, "/opportunities/bogus/34").await;
 
     assert_eq!(res.status(), 404);
 }
 
-#[sqlx::test]
-async fn the_detail_page_is_a_full_page_with_the_filter_box_the_sub_menu_and_the_figures(
-    pool: PgPool,
-) {
-    let (app, browser) = setup(pool.clone()).await;
+#[tokio::test]
+async fn the_detail_page_is_a_full_page_with_the_filter_box_the_sub_menu_and_the_figures() {
+    let (app, browser) = setup().await;
     browser.sso_round_trip(&app, "/auth/add", 90000002).await;
-    item(&pool, 34, "Tritanium", "130.00", 100_000_000.0).await;
+    item(&app, 34, "Tritanium", "130.00", 100_000_000.0).await;
 
     let html = detail(
         &app,
@@ -338,10 +380,10 @@ async fn the_detail_page_is_a_full_page_with_the_filter_box_the_sub_menu_and_the
     assert_eq!(figure(&html, "sell"), "129.90");
 }
 
-#[sqlx::test]
-async fn the_detail_fragment_brings_the_sub_menu_and_the_context_text_out_of_band(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
-    item(&pool, 34, "Tritanium", "130.00", 100_000_000.0).await;
+#[tokio::test]
+async fn the_detail_fragment_brings_the_sub_menu_and_the_context_text_out_of_band() {
+    let (app, browser) = setup().await;
+    item(&app, 34, "Tritanium", "130.00", 100_000_000.0).await;
 
     let html = detail(&app, &browser, "/opportunities/detail/classic/34")
         .await
@@ -393,28 +435,34 @@ fn series_values(chart: &serde_json::Value, series: usize) -> Vec<serde_json::Va
 }
 
 /// 25 days of history for an item: 19 days at 152 and a last day at 119.40, the volume rising.
-async fn history(pool: &PgPool, type_id: i64) {
-    for back in 1..=25i32 {
-        let average = if back == 1 { 119.4 } else { 152.0 };
-        sqlx::query(
-            "INSERT INTO market_history (region_id, type_id, day, average, highest, lowest, volume, order_count)
-             VALUES (10000002, $1, current_date - $2, $3::float8::numeric, $3::float8::numeric + 1, $3::float8::numeric - 1, $4, 10)",
-        )
-        .bind(type_id)
-        .bind(back)
-        .bind(average)
-        .bind(1000 + i64::from(back))
-        .execute(pool)
+async fn history(app: &TestApp, type_id: i64) {
+    let today = OffsetDateTime::now_utc().date();
+    let rows: Vec<_> = (1..=25i64)
+        .map(|back| {
+            let average = if back == 1 { 119.4 } else { 152.0 };
+            SeedHistoryRow {
+                type_id,
+                day: today - Duration::days(back),
+                average,
+                highest: average + 1.0,
+                lowest: average - 1.0,
+                volume: 1000 + back,
+                order_count: 10,
+            }
+        })
+        .collect();
+    app.stores
+        .station
+        .seed_history(10000002, &rows)
         .await
         .unwrap();
-    }
 }
 
-#[sqlx::test]
-async fn the_mean_reversion_window_draws_the_average_with_its_bands_and_the_rsi(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
-    item(&pool, 34, "Tritanium", "130.00", 100_000_000.0).await;
-    history(&pool, 34).await;
+#[tokio::test]
+async fn the_mean_reversion_window_draws_the_average_with_its_bands_and_the_rsi() {
+    let (app, browser) = setup().await;
+    item(&app, 34, "Tritanium", "130.00", 100_000_000.0).await;
+    history(&app, 34).await;
 
     let html = detail(&app, &browser, "/opportunities/detail/reversion/34")
         .await
@@ -438,11 +486,11 @@ async fn the_mean_reversion_window_draws_the_average_with_its_bands_and_the_rsi(
     );
 }
 
-#[sqlx::test]
-async fn the_trend_window_draws_the_averages_and_the_daily_volume(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
-    item(&pool, 34, "Tritanium", "130.00", 100_000_000.0).await;
-    history(&pool, 34).await;
+#[tokio::test]
+async fn the_trend_window_draws_the_averages_and_the_daily_volume() {
+    let (app, browser) = setup().await;
+    item(&app, 34, "Tritanium", "130.00", 100_000_000.0).await;
+    history(&app, 34).await;
 
     let html = detail(&app, &browser, "/opportunities/detail/trend/34")
         .await
@@ -467,33 +515,33 @@ async fn the_trend_window_draws_the_averages_and_the_daily_volume(pool: PgPool) 
     assert!(!has_chart(&html, "rsi") && !has_chart(&html, "classic-prices"));
 }
 
-#[sqlx::test]
-async fn the_classic_window_draws_prices_the_spread_and_the_depth_of_the_book(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
-    item(&pool, 34, "Tritanium", "130.00", 100_000_000.0).await;
-    for (hours_back, sell) in [(5, 110.0_f64), (4, 120.0), (3, 130.0)] {
-        sqlx::query(
-            "INSERT INTO station_snapshots (recorded_at, region_id, station_id, type_id, best_buy,
-                 best_sell, spread, buy_near_units, buy_near_orders, sell_near_units,
-                 sell_near_orders, buy_units, sell_units, buy_taken, sell_taken)
-             VALUES (date_trunc('hour', now()) - make_interval(hours => $1) + interval '5 minutes',
-                     10000002, 60003760, 34, 100, $2::float8::numeric,
-                     ($2::float8::numeric - 100) / 100, 800, 2, 200, 1, 900, 300, 0, 0)",
-        )
-        .bind(hours_back)
-        .bind(sell)
-        .execute(&pool)
+#[tokio::test]
+async fn the_classic_window_draws_prices_the_spread_and_the_depth_of_the_book() {
+    let (app, browser) = setup().await;
+    item(&app, 34, "Tritanium", "130.00", 100_000_000.0).await;
+    let hour = OffsetDateTime::now_utc()
+        .replace_minute(0)
+        .unwrap()
+        .replace_second(0)
+        .unwrap()
+        .replace_nanosecond(0)
+        .unwrap();
+    let rows: Vec<_> = [(5, 110.0_f64), (4, 120.0), (3, 130.0)]
+        .into_iter()
+        .map(|(back, sell)| {
+            snapshot(
+                hour - Duration::hours(back) + Duration::minutes(5),
+                sell,
+                (800, 2, 200, 1, 900, 300),
+            )
+        })
+        .collect();
+    app.stores
+        .station
+        .seed_snapshots(10000002, 60003760, &rows)
         .await
         .unwrap();
-    }
-    for view in ["station_hourly", "station_daily"] {
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "CALL refresh_continuous_aggregate('{view}', now() - interval '40 days', now() + interval '2 hours')"
-        )))
-        .execute(&pool)
-        .await
-        .unwrap();
-    }
+    roll_up(&app).await;
 
     let html = detail(&app, &browser, "/opportunities/detail/classic/34")
         .await
@@ -515,52 +563,49 @@ async fn the_classic_window_draws_prices_the_spread_and_the_depth_of_the_book(po
     assert_eq!(series_values(&depth, 0), [800.0, 200.0]);
 }
 
-#[sqlx::test]
-async fn the_expansion_window_draws_the_spreads_the_past_peaks_and_the_next_occurrences(
-    pool: PgPool,
-) {
-    let (app, browser) = setup(pool.clone()).await;
-    item(&pool, 34, "Tritanium", "110.00", 100_000_000.0).await;
-    // A daily window at 18:00 UTC, as the statistics hold it.
-    sqlx::query(
-        "UPDATE station_item_stats SET expansion_kind = 'hour', expansion_hour = 18, expansion_sell = 125.20",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
+#[tokio::test]
+async fn the_expansion_window_draws_the_spreads_the_past_peaks_and_the_next_occurrences() {
+    let (app, browser) = setup().await;
+    item(&app, 34, "Tritanium", "110.00", 100_000_000.0).await;
+    let mut stats = app
+        .stores
+        .station
+        .item_stats_row(10000002, 60003760, 34)
+        .await
+        .unwrap()
+        .unwrap();
+    stats.expansion_kind = Some("hour".to_owned());
+    stats.expansion_hour = Some(18);
+    stats.expansion_sell = Some("125.20".to_owned());
+    app.stores
+        .station
+        .seed_item_stats(10000002, 60003760, 34, &stats)
+        .await
+        .unwrap();
     // Ten of the last fourteen days, the best sell peaked at 18:30 at 134 + the days back.
-    for back in 1..=14i32 {
-        for hour in 0..24i32 {
+    let midnight = OffsetDateTime::now_utc().replace_time(time::Time::MIDNIGHT);
+    let mut rows = Vec::new();
+    for back in 1..=14i64 {
+        for hour in 0..24i64 {
             let sell: f64 = if hour == 18 && back <= 10 {
-                134.0 + f64::from(back)
+                134.0 + back as f64
             } else {
                 105.0
             };
-            sqlx::query(
-                "INSERT INTO station_snapshots (recorded_at, region_id, station_id, type_id, best_buy,
-                     best_sell, spread, buy_near_units, buy_near_orders, sell_near_units,
-                     sell_near_orders, buy_units, sell_units, buy_taken, sell_taken)
-                 VALUES (date_trunc('day', now()) - make_interval(days => $1) + make_interval(hours => $2, mins => 30),
-                         10000002, 60003760, 34, 100, $3::float8::numeric,
-                         ($3::float8::numeric - 100) / 100, 1, 1, 1, 1, 1, 1, 0, 0)",
-            )
-            .bind(back)
-            .bind(hour)
-            .bind(sell)
-            .execute(&pool)
-            .await
-            .unwrap();
+            rows.push(snapshot(
+                midnight - Duration::days(back) + Duration::hours(hour) + Duration::minutes(30),
+                sell,
+                (1, 1, 1, 1, 1, 1),
+            ));
         }
     }
-    for view in ["station_hourly", "station_daily"] {
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "CALL refresh_continuous_aggregate('{view}', now() - interval '40 days', now() + interval '2 hours')"
-        )))
-        .execute(&pool)
+    app.stores
+        .station
+        .seed_snapshots(10000002, 60003760, &rows)
         .await
         .unwrap();
-    }
-    history(&pool, 34).await;
+    roll_up(&app).await;
+    history(&app, 34).await;
 
     let html = detail(&app, &browser, "/opportunities/detail/expansion/34")
         .await
@@ -600,10 +645,10 @@ async fn the_expansion_window_draws_the_spreads_the_past_peaks_and_the_next_occu
     assert!(html.contains(" 18:00"), "{html}");
 }
 
-#[sqlx::test]
-async fn a_window_without_chart_data_draws_no_charts_and_does_not_fail(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
-    item(&pool, 34, "Tritanium", "130.00", 100_000_000.0).await;
+#[tokio::test]
+async fn a_window_without_chart_data_draws_no_charts_and_does_not_fail() {
+    let (app, browser) = setup().await;
+    item(&app, 34, "Tritanium", "130.00", 100_000_000.0).await;
 
     for table in ["expansion", "classic", "reversion", "trend"] {
         let res = detail(&app, &browser, &format!("/opportunities/detail/{table}/34")).await;

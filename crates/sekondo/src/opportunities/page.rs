@@ -6,7 +6,6 @@ use axum::{
     http::{StatusCode, Uri},
     response::{IntoResponse, Redirect, Response},
 };
-use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 use tower_sessions::Session;
 use uuid::Uuid;
@@ -18,7 +17,6 @@ use super::{
     settings::{Form, Settings},
     tables::{
         self, Context, Extra, Row, Sort, SortKey, Table, choose_station_fees, load_own_orders,
-        load_stats,
     },
 };
 use crate::{
@@ -30,6 +28,7 @@ use crate::{
     pagination::{Link, PageView, Paging, paginate},
     selection::{CharacterSelection, ViewQuery},
     station_book::BOOK_INTERVAL,
+    store::{OpportunityStore, StoreError},
 };
 
 /// The book is stale when its last success is older than this: twice the refresh interval.
@@ -52,42 +51,15 @@ pub struct FreshnessView {
     pub own_days_text: String,
 }
 
-#[derive(sqlx::FromRow)]
-struct SyncRow {
-    kind: String,
-    last_success_at: Option<OffsetDateTime>,
-    last_error: Option<String>,
-}
-
-/// Days with an own snapshot, counted on the item with the oldest snapshot: one item's rows are
-/// few enough to count on every request, and it spans every day the others do.
-async fn own_snapshot_days(pool: &PgPool) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT count(DISTINCT date_trunc('day', recorded_at)) FROM station_snapshots
-         WHERE region_id = $1 AND station_id = $2
-           AND type_id = (SELECT type_id FROM station_snapshots
-                          WHERE region_id = $1 AND station_id = $2
-                          ORDER BY recorded_at LIMIT 1)",
-    )
-    .bind(REGION_ID)
-    .bind(STATION_ID)
-    .fetch_one(pool)
-    .await
-}
-
-pub async fn freshness(pool: &PgPool, now: OffsetDateTime) -> Result<FreshnessView, sqlx::Error> {
-    let rows: Vec<SyncRow> = sqlx::query_as(
-        "SELECT kind, last_success_at, last_error FROM station_sync
-         WHERE region_id = $1 AND station_id = $2",
-    )
-    .bind(REGION_ID)
-    .bind(STATION_ID)
-    .fetch_all(pool)
-    .await?;
+pub async fn freshness(
+    store: &dyn OpportunityStore,
+    now: OffsetDateTime,
+) -> Result<FreshnessView, StoreError> {
+    let rows = store.station_sync(REGION_ID, STATION_ID).await?;
     let row = |kind: &str| rows.iter().find(|r| r.kind == kind);
     let book = row("book");
     let book_last = book.and_then(|r| r.last_success_at);
-    let days = own_snapshot_days(pool).await?;
+    let days = store.own_snapshot_days(REGION_ID, STATION_ID).await?;
     Ok(FreshnessView {
         book_last: book_last.map(format::eve_time),
         book_stale: book_last.is_none_or(|last| now - last > book_stale_after()),
@@ -330,14 +302,14 @@ async fn environment(
     state: &AppState,
     account_id: Uuid,
     query: &ViewQuery,
-) -> Result<Option<Environment>, sqlx::Error> {
+) -> Result<Option<Environment>, StoreError> {
     let characters = state
         .repo
         .list_characters(account_id)
         .await
         .map_err(|e| match e {
             crate::repo::RepoError::Db(e) => e,
-            other => sqlx::Error::Protocol(other.to_string()),
+            other => StoreError::Backend(other.to_string()),
         })?;
     if characters.is_empty() {
         return Ok(None);
@@ -346,10 +318,14 @@ async fn environment(
     let selection = query.selection(&ids);
     let view_state = ViewState::from_query(&selection, query);
     Ok(Some(Environment {
-        settings: Settings::load(&state.pool, account_id).await?,
-        fee_choice: choose_station_fees(&state.pool, account_id, selection.ids()).await?,
-        own: load_own_orders(&state.pool, account_id, selection.ids()).await?,
-        stats: load_stats(&state.pool).await?,
+        settings: Settings::load(&*state.stores.opportunities, account_id).await?,
+        fee_choice: choose_station_fees(&*state.stores.fees, account_id, selection.ids()).await?,
+        own: load_own_orders(&*state.stores.opportunities, account_id, selection.ids()).await?,
+        stats: state
+            .stores
+            .opportunities
+            .load_stats(REGION_ID, STATION_ID)
+            .await?,
         now: state.clock.now(),
         characters: characters
             .iter()
@@ -366,7 +342,7 @@ async fn build_view(
     table: Table,
     query: &ViewQuery,
     rejected: Option<Rejected>,
-) -> Result<Option<(OpportunitiesView, CharacterSelection)>, sqlx::Error> {
+) -> Result<Option<(OpportunitiesView, CharacterSelection)>, StoreError> {
     let Some(mut env) = environment(state, account_id, query).await? else {
         return Ok(None);
     };
@@ -430,7 +406,7 @@ async fn build_view(
                 current: link == table,
             })
             .into(),
-        freshness: freshness(&state.pool, env.now).await?,
+        freshness: freshness(&*state.stores.opportunities, env.now).await?,
         fees_note: fees_note(&env.fee_choice, |id| env.character_name(id)),
         table: table_view,
         pager,
@@ -748,7 +724,10 @@ pub async fn save_settings(
         .unwrap_or(Table::Expansion);
     match form.validate() {
         Ok(settings) => {
-            if let Err(e) = settings.save(&state.pool, account.id).await {
+            if let Err(e) = settings
+                .save(&*state.stores.opportunities, account.id)
+                .await
+            {
                 return pages::internal_error(e);
             }
             match load(&state, account, &session, table, &query).await {
@@ -1001,19 +980,17 @@ fn chart_view(kind: &'static str, title: &'static str, chart: &charts::Chart) ->
 }
 
 async fn history_days(
-    pool: &PgPool,
+    store: &dyn OpportunityStore,
     type_id: i64,
     now: OffsetDateTime,
-) -> Result<Vec<charts::Day>, sqlx::Error> {
-    let rows: Vec<(time::Date, f64, f64)> = sqlx::query_as(
-        "SELECT day, average::float8, volume::float8 FROM market_history
-         WHERE region_id = $1 AND type_id = $2 AND day >= $3 ORDER BY day",
-    )
-    .bind(REGION_ID)
-    .bind(type_id)
-    .bind((now - time::Duration::days(CHART_DAYS)).date())
-    .fetch_all(pool)
-    .await?;
+) -> Result<Vec<charts::Day>, StoreError> {
+    let rows = store
+        .history_days(
+            REGION_ID,
+            type_id,
+            (now - time::Duration::days(CHART_DAYS)).date(),
+        )
+        .await?;
     Ok(rows
         .into_iter()
         .map(|(date, average, volume)| charts::Day {
@@ -1025,22 +1002,18 @@ async fn history_days(
 }
 
 async fn price_points(
-    pool: &PgPool,
+    store: &dyn OpportunityStore,
     type_id: i64,
     now: OffsetDateTime,
-) -> Result<Vec<charts::PricePoint>, sqlx::Error> {
-    let rows: Vec<(OffsetDateTime, f64, f64, f64)> = sqlx::query_as(
-        "SELECT bucket, best_buy_avg::float8, best_sell_avg::float8, spread_avg::float8
-         FROM station_hourly
-         WHERE region_id = $1 AND station_id = $2 AND type_id = $3 AND bucket >= $4
-         ORDER BY bucket",
-    )
-    .bind(REGION_ID)
-    .bind(STATION_ID)
-    .bind(type_id)
-    .bind(now - time::Duration::days(CHART_DAYS))
-    .fetch_all(pool)
-    .await?;
+) -> Result<Vec<charts::PricePoint>, StoreError> {
+    let rows = store
+        .price_points(
+            REGION_ID,
+            STATION_ID,
+            type_id,
+            now - time::Duration::days(CHART_DAYS),
+        )
+        .await?;
     Ok(rows
         .into_iter()
         .map(|(at, best_buy, best_sell, spread)| charts::PricePoint {
@@ -1052,18 +1025,11 @@ async fn price_points(
         .collect())
 }
 
-async fn latest_depth(pool: &PgPool, type_id: i64) -> Result<Option<charts::Depth>, sqlx::Error> {
-    let row: Option<(i64, i32, i64, i32)> = sqlx::query_as(
-        "SELECT buy_near_units, buy_near_orders, sell_near_units, sell_near_orders
-         FROM station_snapshots
-         WHERE region_id = $1 AND station_id = $2 AND type_id = $3
-         ORDER BY recorded_at DESC LIMIT 1",
-    )
-    .bind(REGION_ID)
-    .bind(STATION_ID)
-    .bind(type_id)
-    .fetch_optional(pool)
-    .await?;
+async fn latest_depth(
+    store: &dyn OpportunityStore,
+    type_id: i64,
+) -> Result<Option<charts::Depth>, StoreError> {
+    let row = store.latest_depth(REGION_ID, STATION_ID, type_id).await?;
     Ok(row.map(
         |(buy_units, buy_orders, sell_units, sell_orders)| charts::Depth {
             buy_units,
@@ -1075,22 +1041,18 @@ async fn latest_depth(pool: &PgPool, type_id: i64) -> Result<Option<charts::Dept
 }
 
 async fn hour_points(
-    pool: &PgPool,
+    store: &dyn OpportunityStore,
     type_id: i64,
     now: OffsetDateTime,
-) -> Result<Vec<analysis::HourPoint>, sqlx::Error> {
-    let rows: Vec<(OffsetDateTime, f64, f64, i64)> = sqlx::query_as(
-        "SELECT bucket, spread_avg::float8, spread_max::float8, round(best_sell_max * 100)::bigint
-         FROM station_hourly
-         WHERE region_id = $1 AND station_id = $2 AND type_id = $3 AND bucket >= $4
-         ORDER BY bucket",
-    )
-    .bind(REGION_ID)
-    .bind(STATION_ID)
-    .bind(type_id)
-    .bind(now - time::Duration::days(CHART_DAYS))
-    .fetch_all(pool)
-    .await?;
+) -> Result<Vec<analysis::HourPoint>, StoreError> {
+    let rows = store
+        .item_hour_points(
+            REGION_ID,
+            STATION_ID,
+            type_id,
+            now - time::Duration::days(CHART_DAYS),
+        )
+        .await?;
     Ok(rows
         .into_iter()
         .map(
@@ -1105,19 +1067,17 @@ async fn hour_points(
 }
 
 async fn day_points(
-    pool: &PgPool,
+    store: &dyn OpportunityStore,
     type_id: i64,
     now: OffsetDateTime,
-) -> Result<Vec<analysis::DayPoint>, sqlx::Error> {
-    let rows: Vec<(time::Date, f64, i64)> = sqlx::query_as(
-        "SELECT day, spread::float8, round(high * 100)::bigint FROM station_daily_figures
-         WHERE region_id = $1 AND type_id = $2 AND day >= $3 ORDER BY day",
-    )
-    .bind(REGION_ID)
-    .bind(type_id)
-    .bind((now - time::Duration::days(CHART_DAYS)).date())
-    .fetch_all(pool)
-    .await?;
+) -> Result<Vec<analysis::DayPoint>, StoreError> {
+    let rows = store
+        .item_day_points(
+            REGION_ID,
+            type_id,
+            (now - time::Duration::days(CHART_DAYS)).date(),
+        )
+        .await?;
     Ok(rows
         .into_iter()
         .map(|(day, spread, high_cents)| analysis::DayPoint {
@@ -1131,17 +1091,17 @@ async fn day_points(
 /// The charts of the window of one item in one table, from what is stored of it. A chart
 /// without data is left out.
 async fn detail_charts(
-    pool: &PgPool,
+    store: &dyn OpportunityStore,
     table: Table,
     stats: &tables::Stats,
     now: OffsetDateTime,
-) -> Result<(Vec<ChartView>, Vec<String>), sqlx::Error> {
+) -> Result<(Vec<ChartView>, Vec<String>), StoreError> {
     let type_id = stats.type_id;
     let mut views = Vec::new();
     let mut next_occurrences = Vec::new();
     match table {
         Table::Trend => {
-            let days = history_days(pool, type_id, now).await?;
+            let days = history_days(store, type_id, now).await?;
             if !days.is_empty() {
                 views.extend(chart_view(
                     "trend-price",
@@ -1156,7 +1116,7 @@ async fn detail_charts(
             }
         }
         Table::Reversion => {
-            let days = history_days(pool, type_id, now).await?;
+            let days = history_days(store, type_id, now).await?;
             if !days.is_empty() {
                 views.extend(chart_view(
                     "reversion-price",
@@ -1167,7 +1127,7 @@ async fn detail_charts(
             }
         }
         Table::Classic => {
-            let points = price_points(pool, type_id, now).await?;
+            let points = price_points(store, type_id, now).await?;
             if !points.is_empty() {
                 views.extend(chart_view(
                     "classic-prices",
@@ -1180,7 +1140,7 @@ async fn detail_charts(
                     &charts::classic_spread(&points),
                 ));
             }
-            if let Some(depth) = latest_depth(pool, type_id).await? {
+            if let Some(depth) = latest_depth(store, type_id).await? {
                 views.extend(chart_view(
                     "depth",
                     "Units within 1% of the best price",
@@ -1189,8 +1149,8 @@ async fn detail_charts(
             }
         }
         Table::Expansion => {
-            let hours = hour_points(pool, type_id, now).await?;
-            let days = day_points(pool, type_id, now).await?;
+            let hours = hour_points(store, type_id, now).await?;
+            let days = day_points(store, type_id, now).await?;
             if !hours.is_empty() {
                 views.extend(chart_view(
                     "spread-hours",
@@ -1270,7 +1230,9 @@ async fn build_detail(
         match tables::detail(table, type_id, &env.stats, &context, sort) {
             Some(detail) => {
                 let (charts, next_occurrences) =
-                    match detail_charts(&state.pool, table, detail.stats, env.now).await {
+                    match detail_charts(&*state.stores.opportunities, table, detail.stats, env.now)
+                        .await
+                    {
                         Ok(drawn) => drawn,
                         Err(e) => return Err(Box::new(pages::internal_error(e))),
                     };
@@ -1283,15 +1245,10 @@ async fn build_detail(
                 )
             }
             None => {
-                let name: Option<String> =
-                    match sqlx::query_scalar("SELECT name FROM names WHERE id = $1")
-                        .bind(type_id)
-                        .fetch_optional(&state.pool)
-                        .await
-                    {
-                        Ok(name) => name.flatten(),
-                        Err(e) => return Err(Box::new(pages::internal_error(e))),
-                    };
+                let name: Option<String> = match state.stores.market.name_of(type_id).await {
+                    Ok(name) => name,
+                    Err(e) => return Err(Box::new(pages::internal_error(e))),
+                };
                 (
                     name.unwrap_or_else(|| format!("Type {type_id}")),
                     Vec::new(),

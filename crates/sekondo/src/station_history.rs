@@ -4,7 +4,6 @@
 use std::sync::Arc;
 
 use futures_util::StreamExt;
-use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 
 use crate::{
@@ -13,6 +12,7 @@ use crate::{
     events::{Event, EventBus},
     opportunities::{REGION_ID, STATION_ID, stats},
     poller::{BACKOFF_START, CLAIM_LEASE, SCHEDULER_TICK, jitter},
+    store::{StationStore, StoreError, Stores},
 };
 
 /// How many items are asked at the same time, through the shared gate.
@@ -24,11 +24,6 @@ const MAX_BACKOFF: Duration = Duration::hours(1);
 /// What an item without history waits before it is asked again.
 const NO_HISTORY_WAIT: Duration = Duration::days(1);
 
-/// Items whose book at the station holds both a buy and a sell order.
-const TRADABLE: &str = "SELECT type_id FROM station_orders
-    WHERE region_id = $1 AND station_id = $2
-    GROUP BY type_id HAVING bool_or(is_buy_order) AND bool_or(NOT is_buy_order)";
-
 /// How one item's request ended.
 enum Outcome {
     Stored(usize),
@@ -39,7 +34,7 @@ enum Outcome {
 }
 
 pub struct StationHistoryPoller {
-    pool: PgPool,
+    station: Arc<dyn StationStore>,
     esi: Arc<EsiClient>,
     events: Arc<dyn EventBus>,
     clock: Arc<dyn Clock>,
@@ -47,13 +42,13 @@ pub struct StationHistoryPoller {
 
 impl StationHistoryPoller {
     pub fn new(
-        pool: PgPool,
+        stores: &Stores,
         esi: Arc<EsiClient>,
         events: Arc<dyn EventBus>,
         clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
-            pool,
+            station: stores.station.clone(),
             esi,
             events,
             clock,
@@ -116,7 +111,7 @@ impl StationHistoryPoller {
                 tracing::error!("cannot record the station history pass: {e}");
             }
             if stored > 0 {
-                if let Err(e) = stats::refresh_indicators(&self.pool, now).await {
+                if let Err(e) = stats::refresh_indicators(&*self.station, now).await {
                     tracing::error!("cannot update the station indicator fields: {e}");
                 }
                 // Public data: every open Opportunities page re-fetches, once per pass.
@@ -128,41 +123,22 @@ impl StationHistoryPoller {
     }
 
     /// Gives every tradable item without a schedule a first request at once.
-    async fn track(&self, now: OffsetDateTime) -> Result<(), sqlx::Error> {
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "INSERT INTO history_sync (region_id, type_id, next_poll_at)
-             SELECT $1, t.type_id, $3 FROM ({TRADABLE}) t
-             ON CONFLICT (region_id, type_id) DO NOTHING"
-        )))
-        .bind(REGION_ID)
-        .bind(STATION_ID)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+    async fn track(&self, now: OffsetDateTime) -> Result<(), StoreError> {
+        self.station.track_history(REGION_ID, STATION_ID, now).await
     }
 
     /// Takes the due tradable items. They are pushed back by a lease, so another tick leaves
     /// them alone while their request runs.
-    async fn claim_due(&self, now: OffsetDateTime) -> Result<Vec<i64>, sqlx::Error> {
-        sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-            "UPDATE history_sync SET next_poll_at = $3 + $4::float8 * interval '1 second'
-             WHERE region_id = $1 AND type_id IN (
-                 SELECT s.type_id FROM history_sync s
-                 WHERE s.region_id = $1 AND s.next_poll_at <= $3
-                   AND s.type_id IN ({TRADABLE})
-                 ORDER BY s.next_poll_at, s.type_id
-                 LIMIT $5
-                 FOR UPDATE OF s SKIP LOCKED)
-             RETURNING type_id"
-        )))
-        .bind(REGION_ID)
-        .bind(STATION_ID)
-        .bind(now)
-        .bind(CLAIM_LEASE.as_seconds_f64())
-        .bind((CONCURRENCY * 8) as i64)
-        .fetch_all(&self.pool)
-        .await
+    async fn claim_due(&self, now: OffsetDateTime) -> Result<Vec<i64>, StoreError> {
+        self.station
+            .claim_due_history(
+                REGION_ID,
+                STATION_ID,
+                now,
+                CLAIM_LEASE,
+                (CONCURRENCY * 8) as i64,
+            )
+            .await
     }
 
     async fn fetch(&self, type_id: i64, now: OffsetDateTime) -> Outcome {
@@ -201,9 +177,9 @@ impl StationHistoryPoller {
         now: OffsetDateTime,
         next_poll_at: OffsetDateTime,
         days: &[EsiHistoryDay],
-    ) -> Result<usize, sqlx::Error> {
+    ) -> Result<usize, StoreError> {
         let keep_from = (now - Duration::days(KEEP_DAYS)).date();
-        let kept: Vec<&EsiHistoryDay> = days
+        let kept: Vec<EsiHistoryDay> = days
             .iter()
             .filter(|d| {
                 time::Date::parse(
@@ -212,70 +188,20 @@ impl StationHistoryPoller {
                 )
                 .is_ok_and(|date| date >= keep_from)
             })
+            .cloned()
             .collect();
-        let dates: Vec<&str> = kept.iter().map(|d| d.date.as_str()).collect();
-        let average: Vec<i64> = kept.iter().map(|d| d.average_cents).collect();
-        let highest: Vec<i64> = kept.iter().map(|d| d.highest_cents).collect();
-        let lowest: Vec<i64> = kept.iter().map(|d| d.lowest_cents).collect();
-        let volume: Vec<i64> = kept.iter().map(|d| d.volume).collect();
-        let orders: Vec<i64> = kept.iter().map(|d| d.order_count).collect();
-
-        let mut tx = self.pool.begin().await?;
-        sqlx::query(
-            "INSERT INTO market_history
-                 (region_id, type_id, day, average, highest, lowest, volume, order_count)
-             SELECT $1, $2, h.day::date, h.average / 100.0, h.highest / 100.0, h.lowest / 100.0,
-                    h.volume, h.order_count
-             FROM unnest($3::text[], $4::bigint[], $5::bigint[], $6::bigint[], $7::bigint[], $8::bigint[])
-                  AS h(day, average, highest, lowest, volume, order_count)
-             ON CONFLICT (region_id, type_id, day) DO UPDATE SET
-                 average = excluded.average, highest = excluded.highest, lowest = excluded.lowest,
-                 volume = excluded.volume, order_count = excluded.order_count",
-        )
-        .bind(REGION_ID)
-        .bind(type_id)
-        .bind(&dates)
-        .bind(&average)
-        .bind(&highest)
-        .bind(&lowest)
-        .bind(&volume)
-        .bind(&orders)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "UPDATE history_sync SET next_poll_at = $3, last_success_at = $4, last_attempt_at = $4,
-                 last_error = NULL, esi_expires_at = $3, failures = 0
-             WHERE region_id = $1 AND type_id = $2",
-        )
-        .bind(REGION_ID)
-        .bind(type_id)
-        .bind(next_poll_at)
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
-        // Older days go with the daily pass.
-        sqlx::query("DELETE FROM market_history WHERE region_id = $1 AND day < $2")
-            .bind(REGION_ID)
-            .bind(keep_from)
-            .execute(&mut *tx)
+        self.station
+            .replace_history_days(REGION_ID, type_id, now, next_poll_at, keep_from, &kept)
             .await?;
-        tx.commit().await?;
         Ok(kept.len())
     }
 
     /// Records when an item is asked next, without counting a failure.
     async fn schedule(&self, type_id: i64, now: OffsetDateTime, next_poll_at: OffsetDateTime) {
-        let result = sqlx::query(
-            "UPDATE history_sync SET next_poll_at = $3, last_attempt_at = $4, last_error = NULL,
-                 failures = 0
-             WHERE region_id = $1 AND type_id = $2",
-        )
-        .bind(REGION_ID)
-        .bind(type_id)
-        .bind(next_poll_at)
-        .bind(now)
-        .execute(&self.pool)
-        .await;
+        let result = self
+            .station
+            .schedule_history(REGION_ID, type_id, now, next_poll_at)
+            .await;
         if let Err(e) = result {
             tracing::error!(type_id, "cannot schedule station history: {e}");
         }
@@ -284,22 +210,10 @@ impl StationHistoryPoller {
     /// Records the failure with the other polls' backoff; what is stored for the item stays.
     async fn record_failure(&self, type_id: i64, now: OffsetDateTime, reason: &str) -> Outcome {
         tracing::warn!(type_id, "station history failed: {reason}");
-        let result = sqlx::query(
-            "UPDATE history_sync SET
-                 next_poll_at = $3 + LEAST(
-                     $5::float8 * power(2, LEAST(failures, 20)) * interval '1 second',
-                     $6::float8 * interval '1 second'),
-                 last_attempt_at = $3, last_error = $4, failures = failures + 1
-             WHERE region_id = $1 AND type_id = $2",
-        )
-        .bind(REGION_ID)
-        .bind(type_id)
-        .bind(now)
-        .bind(reason)
-        .bind(BACKOFF_START.as_seconds_f64())
-        .bind(MAX_BACKOFF.as_seconds_f64())
-        .execute(&self.pool)
-        .await;
+        let result = self
+            .station
+            .record_history_failure(REGION_ID, type_id, now, reason, BACKOFF_START, MAX_BACKOFF)
+            .await;
         if let Err(e) = result {
             tracing::error!(type_id, "cannot record a station history failure: {e}");
         }
@@ -312,22 +226,9 @@ impl StationHistoryPoller {
         now: OffsetDateTime,
         any_ok: bool,
         last_error: Option<&str>,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            "INSERT INTO station_sync
-                 (region_id, station_id, kind, next_poll_at, last_success_at, last_attempt_at, last_error)
-             VALUES ($1, $2, 'history', $3, CASE WHEN $4 THEN $3 END, $3, $5)
-             ON CONFLICT (region_id, station_id, kind) DO UPDATE SET
-                 last_success_at = CASE WHEN $4 THEN $3 ELSE station_sync.last_success_at END,
-                 last_attempt_at = $3, last_error = $5",
-        )
-        .bind(REGION_ID)
-        .bind(STATION_ID)
-        .bind(now)
-        .bind(any_ok)
-        .bind(last_error)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+    ) -> Result<(), StoreError> {
+        self.station
+            .finish_history_pass(REGION_ID, STATION_ID, now, any_ok, last_error)
+            .await
     }
 }

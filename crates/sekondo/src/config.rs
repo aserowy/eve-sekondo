@@ -187,7 +187,7 @@ fn parse_key(value: &str) -> Result<SecretKey, ConfigError> {
     Ok(SecretKey(key))
 }
 
-fn check_database_url(value: &str) -> Result<(), ConfigError> {
+pub fn check_database_url(value: &str) -> Result<(), ConfigError> {
     let url = Url::parse(value).map_err(|_| invalid("DATABASE_URL", "not a valid URL"))?;
     if !matches!(url.scheme(), "postgres" | "postgresql") {
         return Err(invalid("DATABASE_URL", "must be a postgres:// URL"));

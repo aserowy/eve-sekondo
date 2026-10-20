@@ -1,14 +1,14 @@
 mod common;
 
 use common::{AppBuilder, Browser, TestApp, kpi};
-use sqlx::PgPool;
+use sekondo::wealth_poller::Kind;
 use time::{Duration, OffsetDateTime};
 
 const ALICE: i64 = 90000001;
 const BOB: i64 = 90000002;
 
-async fn app(pool: PgPool) -> TestApp {
-    AppBuilder::new(pool).with_stub().spawn().await
+async fn app() -> TestApp {
+    AppBuilder::new().with_stub().spawn().await
 }
 
 async fn signed_in(app: &TestApp) -> Browser {
@@ -33,21 +33,37 @@ fn kind<'a>(html: &'a str, kind: &str) -> &'a str {
     &rest[..rest.find("</div>").unwrap()]
 }
 
-async fn sync(pool: &PgPool, character: i64, kind: &str, last: Option<OffsetDateTime>) {
-    sqlx::query(
-        "INSERT INTO wealth_sync (character_id, kind, next_poll_at, last_success_at) VALUES ($1, $2, now(), $3)",
-    )
-    .bind(character)
-    .bind(kind)
-    .bind(last)
-    .execute(pool)
-    .await
-    .unwrap();
+async fn sync(app: &TestApp, character: i64, kind: &str, last: Option<OffsetDateTime>) {
+    let wealth = &app.stores.wealth;
+    let next = OffsetDateTime::now_utc();
+    match (kind, last) {
+        ("wallet", Some(at)) => wealth
+            .store_wallet(character, at, 0, next, None)
+            .await
+            .unwrap(),
+        ("assets", Some(at)) => wealth
+            .store_assets(character, at, &[], &[], next, None)
+            .await
+            .unwrap(),
+        (_, None) => wealth
+            .insert_schedule(
+                if kind == "wallet" {
+                    Kind::Wallet
+                } else {
+                    Kind::Assets
+                },
+                &[character],
+                &[next],
+            )
+            .await
+            .unwrap(),
+        _ => unreachable!("{kind}"),
+    }
 }
 
-#[sqlx::test]
-async fn unauthenticated_requests_are_redirected_to_the_landing_page(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn unauthenticated_requests_are_redirected_to_the_landing_page() {
+    let app = app().await;
     for path in ["/wealth", "/wealth/content", "/wealth/freshness"] {
         let res = app.browser().get(&app.url(path)).await;
         assert!(res.status().is_redirection(), "{path}");
@@ -55,9 +71,9 @@ async fn unauthenticated_requests_are_redirected_to_the_landing_page(pool: PgPoo
     }
 }
 
-#[sqlx::test]
-async fn the_page_shows_the_filter_and_the_wealth_link_as_current(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn the_page_shows_the_filter_and_the_wealth_link_as_current() {
+    let app = app().await;
     let browser = signed_in(&app).await;
 
     let html = get(&app, &browser, "/wealth").await;
@@ -96,9 +112,9 @@ async fn the_page_shows_the_filter_and_the_wealth_link_as_current(pool: PgPool) 
     assert_eq!(current, ["Wealth"]);
 }
 
-#[sqlx::test]
-async fn the_filter_keeps_the_sorting_and_range_unless_they_are_the_defaults(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn the_filter_keeps_the_sorting_and_range_unless_they_are_the_defaults() {
+    let app = app().await;
     let browser = signed_in(&app).await;
 
     let plain = get(&app, &browser, "/wealth").await;
@@ -115,9 +131,9 @@ async fn the_filter_keeps_the_sorting_and_range_unless_they_are_the_defaults(poo
     assert!(custom.contains(r#"hx-get="/wealth/freshness""#));
 }
 
-#[sqlx::test]
-async fn the_wealth_link_carries_the_selection_and_never_the_range(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn the_wealth_link_carries_the_selection_and_never_the_range() {
+    let app = app().await;
     let browser = signed_in(&app).await;
     browser.sso_round_trip(&app, "/auth/add", BOB).await;
 
@@ -137,15 +153,15 @@ async fn the_wealth_link_carries_the_selection_and_never_the_range(pool: PgPool)
     assert!(all.contains(r#"<a href="/wealth""#));
 }
 
-#[sqlx::test]
-async fn the_freshness_strip_shows_wallet_and_assets_times_per_character(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn the_freshness_strip_shows_wallet_and_assets_times_per_character() {
+    let app = app().await;
     let browser = signed_in(&app).await;
     let now = OffsetDateTime::now_utc();
     let wallet = now - Duration::minutes(5);
     let assets = now - Duration::minutes(30);
-    sync(&pool, ALICE, "wallet", Some(wallet)).await;
-    sync(&pool, ALICE, "assets", Some(assets)).await;
+    sync(&app, ALICE, "wallet", Some(wallet)).await;
+    sync(&app, ALICE, "assets", Some(assets)).await;
 
     let html = get(&app, &browser, "/wealth/freshness").await;
 
@@ -155,13 +171,13 @@ async fn the_freshness_strip_shows_wallet_and_assets_times_per_character(pool: P
     assert!(!html.contains("Stale"), "{html}");
 }
 
-#[sqlx::test]
-async fn assets_that_are_three_hours_old_are_stale_but_a_fresh_wallet_is_not(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn assets_that_are_three_hours_old_are_stale_but_a_fresh_wallet_is_not() {
+    let app = app().await;
     let browser = signed_in(&app).await;
     let now = OffsetDateTime::now_utc();
-    sync(&pool, ALICE, "wallet", Some(now - Duration::minutes(5))).await;
-    sync(&pool, ALICE, "assets", Some(now - Duration::hours(3))).await;
+    sync(&app, ALICE, "wallet", Some(now - Duration::minutes(5))).await;
+    sync(&app, ALICE, "assets", Some(now - Duration::hours(3))).await;
 
     let html = get(&app, &browser, "/wealth/freshness").await;
 
@@ -169,26 +185,26 @@ async fn assets_that_are_three_hours_old_are_stale_but_a_fresh_wallet_is_not(poo
     assert!(!kind(&html, "wallet").contains("Stale"));
 }
 
-#[sqlx::test]
-async fn assets_under_two_hours_old_are_not_stale(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn assets_under_two_hours_old_are_not_stale() {
+    let app = app().await;
     let browser = signed_in(&app).await;
     let now = OffsetDateTime::now_utc();
-    sync(&pool, ALICE, "wallet", Some(now)).await;
-    sync(&pool, ALICE, "assets", Some(now - Duration::minutes(110))).await;
+    sync(&app, ALICE, "wallet", Some(now)).await;
+    sync(&app, ALICE, "assets", Some(now - Duration::minutes(110))).await;
 
     let html = get(&app, &browser, "/wealth/freshness").await;
 
     assert!(!kind(&html, "assets").contains("Stale"));
 }
 
-#[sqlx::test]
-async fn a_character_needing_relogin_is_stale_in_both_and_links_to_login(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn a_character_needing_relogin_is_stale_in_both_and_links_to_login() {
+    let app = app().await;
     let browser = signed_in(&app).await;
     let now = OffsetDateTime::now_utc();
-    sync(&pool, ALICE, "wallet", Some(now)).await;
-    sync(&pool, ALICE, "assets", Some(now)).await;
+    sync(&app, ALICE, "wallet", Some(now)).await;
+    sync(&app, ALICE, "assets", Some(now)).await;
     app.state.repo.mark_needs_relogin(ALICE).await.unwrap();
 
     let html = get(&app, &browser, "/wealth/freshness").await;
@@ -198,9 +214,9 @@ async fn a_character_needing_relogin_is_stale_in_both_and_links_to_login(pool: P
     assert!(html.contains(r#"href="/auth/add""#) && html.contains("Log in again"));
 }
 
-#[sqlx::test]
-async fn a_character_never_polled_waits_for_its_first_update(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn a_character_never_polled_waits_for_its_first_update() {
+    let app = app().await;
     let browser = signed_in(&app).await;
 
     let html = get(&app, &browser, "/wealth/freshness").await;
@@ -209,9 +225,9 @@ async fn a_character_never_polled_waits_for_its_first_update(pool: PgPool) {
     assert!(kind(&html, "wallet").contains("never"));
 }
 
-#[sqlx::test]
-async fn only_the_selected_characters_of_the_account_are_shown(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn only_the_selected_characters_of_the_account_are_shown() {
+    let app = app().await;
     let alice = signed_in(&app).await;
     alice.sso_round_trip(&app, "/auth/add", BOB).await;
     let stranger = app.browser();
@@ -230,45 +246,53 @@ async fn only_the_selected_characters_of_the_account_are_shown(pool: PgPool) {
 
 // ---- the inventory list ----
 
-async fn price(pool: &PgPool, type_id: i64, price: Option<&str>) {
-    sqlx::query("INSERT INTO item_prices (type_id, average_price) VALUES ($1, $2::numeric)")
-        .bind(type_id)
-        .bind(price)
-        .execute(pool)
-        .await
-        .unwrap();
+async fn price(app: &TestApp, type_id: i64, price: Option<&str>) {
+    let cents = price.map(|p| (p.parse::<f64>().unwrap() * 100.0).round() as i64);
+    app.stores.market.seed_price(type_id, cents).await.unwrap();
 }
 
-async fn name(pool: &PgPool, id: i64, name: &str) {
-    sqlx::query("INSERT INTO names (id, category, name, resolved_at) VALUES ($1, 'x', $2, now())")
-        .bind(id)
-        .bind(name)
-        .execute(pool)
+async fn name(app: &TestApp, id: i64, name: &str) {
+    app.stores
+        .market
+        .store_names(
+            &[sekondo::store::NameRow {
+                id,
+                category: "x".to_owned(),
+                name: Some(name.to_owned()),
+            }],
+            OffsetDateTime::now_utc(),
+            None,
+        )
         .await
         .unwrap();
 }
 
 async fn holds(
-    pool: &PgPool,
+    app: &TestApp,
     item_id: i64,
     character: i64,
     type_id: i64,
     quantity: i64,
     copy: bool,
 ) {
-    sqlx::query(
-        "INSERT INTO current_assets (item_id, character_id, type_id, location_id, location_type, \
-         location_flag, quantity, is_singleton, is_blueprint_copy, top_location_id) \
-         VALUES ($1, $2, $3, 60003760, 'station', 'Hangar', $4, false, $5, 60003760)",
-    )
-    .bind(item_id)
-    .bind(character)
-    .bind(type_id)
-    .bind(quantity)
-    .bind(copy)
-    .execute(pool)
-    .await
-    .unwrap();
+    app.stores
+        .wealth
+        .seed_asset(
+            character,
+            &sekondo::esi::EsiAsset {
+                item_id,
+                type_id,
+                location_id: 60003760,
+                location_type: "station".to_owned(),
+                location_flag: "Hangar".to_owned(),
+                quantity,
+                is_singleton: false,
+                is_blueprint_copy: copy,
+            },
+            Some(60003760),
+        )
+        .await
+        .unwrap();
 }
 
 /// The text of each row's cells, row by row.
@@ -294,27 +318,27 @@ fn rows(html: &str) -> Vec<Vec<String>> {
         .collect()
 }
 
-#[sqlx::test]
-async fn unauthenticated_requests_for_the_list_are_redirected(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn unauthenticated_requests_for_the_list_are_redirected() {
+    let app = app().await;
     let res = app.browser().get(&app.url("/wealth/content")).await;
     assert!(res.status().is_redirection());
     assert_eq!(Browser::location(&res), "/");
 }
 
-#[sqlx::test]
-async fn the_list_is_sorted_by_value_with_unpriced_rows_last_and_shows_the_total(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn the_list_is_sorted_by_value_with_unpriced_rows_last_and_shows_the_total() {
+    let app = app().await;
     let browser = signed_in(&app).await;
-    price(&pool, 34, Some("5.00")).await;
-    price(&pool, 35, Some("1000000.00")).await;
-    name(&pool, 34, "Tritanium").await;
-    name(&pool, 35, "Pyerite").await;
-    name(&pool, 60003760, "Jita IV").await;
-    holds(&pool, 1, ALICE, 34, 10, false).await; // 50.00
-    holds(&pool, 2, ALICE, 35, 1234, false).await; // 1,234,000,000.00
-    holds(&pool, 3, ALICE, 35, 2, true).await; // a blueprint copy: unpriced
-    holds(&pool, 4, ALICE, 99, 1, false).await; // no name, no price
+    price(&app, 34, Some("5.00")).await;
+    price(&app, 35, Some("1000000.00")).await;
+    name(&app, 34, "Tritanium").await;
+    name(&app, 35, "Pyerite").await;
+    name(&app, 60003760, "Jita IV").await;
+    holds(&app, 1, ALICE, 34, 10, false).await; // 50.00
+    holds(&app, 2, ALICE, 35, 1234, false).await; // 1,234,000,000.00
+    holds(&app, 3, ALICE, 35, 2, true).await; // a blueprint copy: unpriced
+    holds(&app, 4, ALICE, 99, 1, false).await; // no name, no price
 
     let html = get(&app, &browser, "/wealth/content").await;
     let rows = rows(&html);
@@ -337,12 +361,12 @@ async fn the_list_is_sorted_by_value_with_unpriced_rows_last_and_shows_the_total
     assert_eq!(inventory.detail.as_deref(), Some("2 unpriced rows"));
 }
 
-#[sqlx::test]
-async fn amounts_are_shortened_with_the_exact_value_on_hover(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn amounts_are_shortened_with_the_exact_value_on_hover() {
+    let app = app().await;
     let browser = signed_in(&app).await;
-    price(&pool, 35, Some("1234567890.12")).await;
-    holds(&pool, 1, ALICE, 35, 1, false).await;
+    price(&app, 35, Some("1234567890.12")).await;
+    holds(&app, 1, ALICE, 35, 1, false).await;
 
     let html = get(&app, &browser, "/wealth/content").await;
 
@@ -350,11 +374,11 @@ async fn amounts_are_shortened_with_the_exact_value_on_hover(pool: PgPool) {
     assert!(html.contains(r#"title="1,234,567,890.12 ISK""#), "{html}");
 }
 
-#[sqlx::test]
-async fn the_headers_sort_and_the_sorted_one_reverses(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn the_headers_sort_and_the_sorted_one_reverses() {
+    let app = app().await;
     let browser = signed_in(&app).await;
-    holds(&pool, 1, ALICE, 34, 10, false).await;
+    holds(&app, 1, ALICE, 34, 10, false).await;
 
     let html = get(&app, &browser, "/wealth/content").await;
     assert!(
@@ -383,9 +407,9 @@ async fn the_headers_sort_and_the_sorted_one_reverses(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn an_empty_list_says_so(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn an_empty_list_says_so() {
+    let app = app().await;
     let browser = signed_in(&app).await;
 
     let html = get(&app, &browser, "/wealth/content").await;
@@ -394,17 +418,17 @@ async fn an_empty_list_says_so(pool: PgPool) {
     assert!(!html.contains("<table"));
 }
 
-#[sqlx::test]
-async fn the_list_covers_only_the_selected_characters_of_the_account(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn the_list_covers_only_the_selected_characters_of_the_account() {
+    let app = app().await;
     let alice = signed_in(&app).await;
     alice.sso_round_trip(&app, "/auth/add", BOB).await;
     let stranger = app.browser();
     stranger.sso_round_trip(&app, "/auth/login", 90000003).await;
-    price(&pool, 34, Some("1.00")).await;
-    holds(&pool, 1, ALICE, 34, 1, false).await;
-    holds(&pool, 2, BOB, 34, 2, false).await;
-    holds(&pool, 3, 90000003, 34, 999, false).await;
+    price(&app, 34, Some("1.00")).await;
+    holds(&app, 1, ALICE, 34, 1, false).await;
+    holds(&app, 2, BOB, 34, 2, false).await;
+    holds(&app, 3, 90000003, 34, 999, false).await;
 
     let all = rows(&get(&app, &alice, "/wealth/content").await);
     assert_eq!(all.len(), 2);
@@ -419,9 +443,9 @@ async fn the_list_covers_only_the_selected_characters_of_the_account(pool: PgPoo
     );
 }
 
-#[sqlx::test]
-async fn the_page_embeds_the_list_with_its_live_refresh(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn the_page_embeds_the_list_with_its_live_refresh() {
+    let app = app().await;
     let browser = signed_in(&app).await;
 
     let html = get(&app, &browser, "/wealth?sort=item&dir=asc").await;
@@ -434,17 +458,17 @@ async fn the_page_embeds_the_list_with_its_live_refresh(pool: PgPool) {
 
 // ---- the graph ----
 
-#[sqlx::test]
-async fn unauthenticated_requests_for_the_graph_are_redirected(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn unauthenticated_requests_for_the_graph_are_redirected() {
+    let app = app().await;
     let res = app.browser().get(&app.url("/wealth/content")).await;
     assert!(res.status().is_redirection());
     assert_eq!(Browser::location(&res), "/");
 }
 
-#[sqlx::test]
-async fn without_history_the_graph_says_so_and_draws_nothing(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn without_history_the_graph_says_so_and_draws_nothing() {
+    let app = app().await;
     let browser = signed_in(&app).await;
 
     let html = get(&app, &browser, "/wealth/content").await;
@@ -453,13 +477,14 @@ async fn without_history_the_graph_says_so_and_draws_nothing(pool: PgPool) {
     assert!(!html.contains("<canvas"));
 }
 
-#[sqlx::test]
-async fn the_graph_carries_four_series_and_the_range_links_push_the_page_url(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn the_graph_carries_four_series_and_the_range_links_push_the_page_url() {
+    let app = app().await;
     let browser = signed_in(&app).await;
-    sqlx::query("INSERT INTO wallet_balances (character_id, polled_at, balance) VALUES ($1, now() - interval '1 hour', 5)")
-        .bind(ALICE)
-        .execute(&pool)
+    let hour_ago = OffsetDateTime::now_utc() - Duration::hours(1);
+    app.stores
+        .wealth
+        .store_wallet(ALICE, hour_ago, 500, hour_ago, None)
         .await
         .unwrap();
 
@@ -487,9 +512,9 @@ async fn the_graph_carries_four_series_and_the_range_links_push_the_page_url(poo
     assert!(html.contains(r#"id="wealth-range" name="range" value="30d" hx-swap-oob="true""#));
 }
 
-#[sqlx::test]
-async fn an_unknown_range_selects_seven_days(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn an_unknown_range_selects_seven_days() {
+    let app = app().await;
     let browser = signed_in(&app).await;
 
     let html = get(&app, &browser, "/wealth/content?range=1y").await;
@@ -498,13 +523,13 @@ async fn an_unknown_range_selects_seven_days(pool: PgPool) {
     assert_eq!(html.matches(r#"aria-current="true""#).count(), 1);
 }
 
-#[sqlx::test]
-async fn a_character_needing_relogin_with_stale_wallet_and_assets_counts_once(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn a_character_needing_relogin_with_stale_wallet_and_assets_counts_once() {
+    let app = app().await;
     let browser = signed_in(&app).await;
     let now = OffsetDateTime::now_utc();
-    sync(&pool, ALICE, "wallet", Some(now - Duration::hours(5))).await;
-    sync(&pool, ALICE, "assets", Some(now - Duration::hours(5))).await;
+    sync(&app, ALICE, "wallet", Some(now - Duration::hours(5))).await;
+    sync(&app, ALICE, "assets", Some(now - Duration::hours(5))).await;
     app.state.repo.mark_needs_relogin(ALICE).await.unwrap();
 
     let html = get(&app, &browser, "/wealth/freshness").await;
@@ -513,13 +538,13 @@ async fn a_character_needing_relogin_with_stale_wallet_and_assets_counts_once(po
     assert!(!html.contains("warnings"), "no warning count: {html}");
 }
 
-#[sqlx::test]
-async fn stale_assets_alone_count_as_a_warning(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn stale_assets_alone_count_as_a_warning() {
+    let app = app().await;
     let browser = signed_in(&app).await;
     let now = OffsetDateTime::now_utc();
-    sync(&pool, ALICE, "wallet", Some(now)).await;
-    sync(&pool, ALICE, "assets", Some(now - Duration::hours(3))).await;
+    sync(&app, ALICE, "wallet", Some(now)).await;
+    sync(&app, ALICE, "assets", Some(now - Duration::hours(3))).await;
 
     let html = get(&app, &browser, "/wealth/freshness").await;
 
@@ -527,13 +552,13 @@ async fn stale_assets_alone_count_as_a_warning(pool: PgPool) {
     assert!(!html.contains("warnings"), "no warning count: {html}");
 }
 
-#[sqlx::test]
-async fn fresh_wallet_and_assets_show_no_warning_count(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn fresh_wallet_and_assets_show_no_warning_count() {
+    let app = app().await;
     let browser = signed_in(&app).await;
     let now = OffsetDateTime::now_utc();
-    sync(&pool, ALICE, "wallet", Some(now)).await;
-    sync(&pool, ALICE, "assets", Some(now)).await;
+    sync(&app, ALICE, "wallet", Some(now)).await;
+    sync(&app, ALICE, "assets", Some(now)).await;
 
     let html = get(&app, &browser, "/wealth/freshness").await;
 
@@ -544,24 +569,41 @@ async fn fresh_wallet_and_assets_show_no_warning_count(pool: PgPool) {
 
 /// Alice holds 50m ISK in her wallet, sells 100m and has 20m in escrow, and her priced inventory is
 /// worth 30m, with two rows without a price (blueprint copies).
-async fn alice_worth_200m(pool: &PgPool) {
-    for statement in [
-        "INSERT INTO wallet_balances (character_id, polled_at, balance) VALUES (90000001, now(), 50000000)",
-        "INSERT INTO order_poll_totals (character_id, polled_at, sell_value, escrow, sell_corp, \
-         escrow_corp, sell_count, buy_count) VALUES (90000001, now(), 100000000, 20000000, 0, 0, 1, 1)",
-        "INSERT INTO inventory_values (character_id, recorded_at, value) VALUES (90000001, now(), 30000000)",
-    ] {
-        sqlx::query(statement).execute(pool).await.unwrap();
-    }
-    holds(pool, 1, ALICE, 34, 1, true).await;
-    holds(pool, 2, ALICE, 35, 1, true).await;
+async fn alice_worth_200m(app: &TestApp) {
+    let now = OffsetDateTime::now_utc();
+    let wealth = &app.stores.wealth;
+    wealth
+        .store_wallet(ALICE, now, 5_000_000_000, now, None)
+        .await
+        .unwrap();
+    wealth
+        .seed_poll_totals(
+            ALICE,
+            &sekondo::store::PollTotalsRow {
+                polled_at: now,
+                sell_cents: 10_000_000_000,
+                escrow_cents: 2_000_000_000,
+                sell_corp_cents: 0,
+                escrow_corp_cents: 0,
+                sell_count: 1,
+                buy_count: 1,
+            },
+        )
+        .await
+        .unwrap();
+    wealth
+        .seed_inventory_value(ALICE, now, 3_000_000_000)
+        .await
+        .unwrap();
+    holds(app, 1, ALICE, 34, 1, true).await;
+    holds(app, 2, ALICE, 35, 1, true).await;
 }
 
-#[sqlx::test]
-async fn the_cards_read_the_current_figures_and_count_the_unpriced_rows(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn the_cards_read_the_current_figures_and_count_the_unpriced_rows() {
+    let app = app().await;
     let browser = signed_in(&app).await;
-    alice_worth_200m(&pool).await;
+    alice_worth_200m(&app).await;
 
     let html = get(&app, &browser, "/wealth").await;
 
@@ -586,11 +628,11 @@ async fn the_cards_read_the_current_figures_and_count_the_unpriced_rows(pool: Pg
     assert_eq!(kpi(&html, "kpi-wealth").title, "200,000,000.00 ISK");
 }
 
-#[sqlx::test]
-async fn the_total_equals_the_dashboard_wealth_card_for_the_same_selection(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn the_total_equals_the_dashboard_wealth_card_for_the_same_selection() {
+    let app = app().await;
     let browser = signed_in(&app).await;
-    alice_worth_200m(&pool).await;
+    alice_worth_200m(&app).await;
 
     let wealth = get(&app, &browser, "/wealth").await;
     let dashboard = get(&app, &browser, "/dashboard").await;
@@ -607,11 +649,11 @@ async fn the_total_equals_the_dashboard_wealth_card_for_the_same_selection(pool:
     assert_eq!(kpi(&wealth, "kpi-wealth").title, title);
 }
 
-#[sqlx::test]
-async fn the_range_does_not_change_the_cards(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn the_range_does_not_change_the_cards() {
+    let app = app().await;
     let browser = signed_in(&app).await;
-    alice_worth_200m(&pool).await;
+    alice_worth_200m(&app).await;
 
     let cards = |html: &str| {
         [
@@ -633,15 +675,13 @@ async fn the_range_does_not_change_the_cards(pool: PgPool) {
 
 // ---- pagination ----
 
-#[sqlx::test]
-async fn three_hundred_rows_read_page_one_of_six_and_the_cards_do_not_depend_on_the_page(
-    pool: PgPool,
-) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn three_hundred_rows_read_page_one_of_six_and_the_cards_do_not_depend_on_the_page() {
+    let app = app().await;
     let browser = signed_in(&app).await;
     for i in 0..300 {
-        price(&pool, 1000 + i, Some("1.00")).await;
-        holds(&pool, 100 + i, ALICE, 1000 + i, 1, false).await;
+        price(&app, 1000 + i, Some("1.00")).await;
+        holds(&app, 100 + i, ALICE, 1000 + i, 1, false).await;
     }
 
     let first = get(&app, &browser, "/wealth/content?sort=item&dir=asc").await;
@@ -666,11 +706,11 @@ async fn three_hundred_rows_read_page_one_of_six_and_the_cards_do_not_depend_on_
     );
 }
 
-#[sqlx::test]
-async fn a_range_switch_and_a_sorting_start_on_the_first_page(pool: PgPool) {
-    let app = app(pool.clone()).await;
+#[tokio::test]
+async fn a_range_switch_and_a_sorting_start_on_the_first_page() {
+    let app = app().await;
     let browser = signed_in(&app).await;
-    holds(&pool, 1, ALICE, 34, 1, false).await;
+    holds(&app, 1, ALICE, 34, 1, false).await;
 
     let html = get(
         &app,

@@ -2,7 +2,6 @@ mod common;
 
 use common::{AppBuilder, Browser, TestApp};
 use sekondo::{config::SecretKey, crypto::TokenCipher, repo::Repo};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 const ALICE: i64 = 90000001;
@@ -10,17 +9,16 @@ const BOB: i64 = 90000002;
 
 struct Env {
     app: TestApp,
-    pool: PgPool,
     repo: Repo,
 }
 
-async fn env(pool: PgPool) -> Env {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+async fn env() -> Env {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let repo = Repo::new(
-        pool.clone(),
+        app.stores.accounts.clone(),
         TokenCipher::new(&SecretKey(common::ENCRYPTION_KEY)),
     );
-    Env { app, pool, repo }
+    Env { app, repo }
 }
 
 impl Env {
@@ -70,17 +68,33 @@ impl Env {
             .await
     }
 
+    /// How many accounts exist, or how many characters all accounts have.
     async fn count(&self, table: &str) -> i64 {
-        sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
-            .fetch_one(&self.pool)
-            .await
-            .unwrap()
+        let accounts = &self.app.stores.accounts;
+        match table {
+            "accounts" => accounts.account_count().await.unwrap(),
+            "characters" => {
+                let mut total = 0;
+                for account in accounts.account_ids().await.unwrap() {
+                    total += accounts.list_characters(account).await.unwrap().len() as i64;
+                }
+                total
+            }
+            "character_tokens" => {
+                let mut total = 0;
+                for id in [ALICE, BOB, 90000003] {
+                    total += i64::from(accounts.load_tokens(id).await.unwrap().is_some());
+                }
+                total
+            }
+            other => panic!("no count of {other}"),
+        }
     }
 }
 
-#[sqlx::test]
-async fn unlinking_one_of_two_characters_deletes_it_and_all_its_data(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn unlinking_one_of_two_characters_deletes_it_and_all_its_data() {
+    let e = env().await;
     let (browser, account) = e.alice_and_bob().await;
     let token = e.csrf_token(&browser).await;
 
@@ -117,9 +131,9 @@ async fn unlinking_one_of_two_characters_deletes_it_and_all_its_data(pool: PgPoo
     assert!(page.contains("Alice Alpha") && !page.contains("Bob Bravo"));
 }
 
-#[sqlx::test]
-async fn unlinking_the_last_character_deletes_the_account_and_signs_out(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn unlinking_the_last_character_deletes_the_account_and_signs_out() {
+    let e = env().await;
     let browser = e.app.browser();
     browser.sso_round_trip(&e.app, "/auth/login", ALICE).await;
     let token = e.csrf_token(&browser).await;
@@ -139,9 +153,9 @@ async fn unlinking_the_last_character_deletes_the_account_and_signs_out(pool: Pg
     assert_eq!(Browser::location(&after), "/", "signed out");
 }
 
-#[sqlx::test]
-async fn without_htmx_the_last_unlink_redirects_to_the_landing_page(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn without_htmx_the_last_unlink_redirects_to_the_landing_page() {
+    let e = env().await;
     let browser = e.app.browser();
     browser.sso_round_trip(&e.app, "/auth/login", ALICE).await;
     let token = e.csrf_token(&browser).await;
@@ -158,9 +172,9 @@ async fn without_htmx_the_last_unlink_redirects_to_the_landing_page(pool: PgPool
     assert_eq!(Browser::location(&res), "/");
 }
 
-#[sqlx::test]
-async fn another_accounts_character_cannot_be_unlinked(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn another_accounts_character_cannot_be_unlinked() {
+    let e = env().await;
     let mine = e.app.browser();
     mine.sso_round_trip(&e.app, "/auth/login", ALICE).await;
     let theirs = e.app.browser();
@@ -176,18 +190,18 @@ async fn another_accounts_character_cannot_be_unlinked(pool: PgPool) {
     assert_eq!(mine.get(&e.app.url("/characters")).await.status(), 200);
 }
 
-#[sqlx::test]
-async fn an_unknown_character_is_not_found(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn an_unknown_character_is_not_found() {
+    let e = env().await;
     let (browser, _) = e.alice_and_bob().await;
     let token = e.csrf_token(&browser).await;
     assert_eq!(e.unlink(&browser, &token, 12345).await.status(), 404);
     assert_eq!(e.count("characters").await, 2);
 }
 
-#[sqlx::test]
-async fn unlink_without_a_csrf_token_is_forbidden_and_deletes_nothing(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn unlink_without_a_csrf_token_is_forbidden_and_deletes_nothing() {
+    let e = env().await;
     let (browser, _) = e.alice_and_bob().await;
     let res = browser
         .send(
@@ -201,9 +215,9 @@ async fn unlink_without_a_csrf_token_is_forbidden_and_deletes_nothing(pool: PgPo
     assert_eq!(e.count("characters").await, 2);
 }
 
-#[sqlx::test]
-async fn unlink_with_a_foreign_origin_or_another_sessions_token_is_forbidden(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn unlink_with_a_foreign_origin_or_another_sessions_token_is_forbidden() {
+    let e = env().await;
     let (browser, _) = e.alice_and_bob().await;
     let token = e.csrf_token(&browser).await;
 
@@ -227,70 +241,216 @@ async fn unlink_with_a_foreign_origin_or_another_sessions_token_is_forbidden(poo
     assert_eq!(e.count("characters").await, 3, "nothing was deleted");
 }
 
-#[sqlx::test]
-async fn unlinking_a_character_removes_its_wealth_and_fee_data_and_keeps_the_others(pool: PgPool) {
-    let e = env(pool).await;
-    let (browser, _) = e.alice_and_bob().await;
+#[tokio::test]
+async fn unlinking_a_character_removes_its_wealth_and_fee_data_and_keeps_the_others() {
+    use sekondo::{fee_poller::Kind as FeeKind, store::StandingInput, wealth_poller::Kind};
+
+    let e = env().await;
+    let (browser, account) = e.alice_and_bob().await;
+    let stores = &e.app.stores;
+    let now = e.app.state.clock.now();
+    let soon = now + time::Duration::hours(1);
+    let station = 60003760;
     for character in [ALICE, BOB] {
-        for statement in [
-            "INSERT INTO wallet_balances (character_id, polled_at, balance) VALUES ($1, now(), 5)",
-            "INSERT INTO inventory_values (character_id, recorded_at, value) VALUES ($1, now(), 5)",
-            "INSERT INTO current_assets (item_id, character_id, type_id, location_id, location_type, \
-             location_flag, quantity, is_singleton, is_blueprint_copy) \
-             VALUES ($1, $1, 34, 60003760, 'station', 'Hangar', 1, false, false)",
-            "INSERT INTO wealth_sync (character_id, kind, next_poll_at) VALUES ($1, 'wallet', now())",
-            "INSERT INTO wealth_sync (character_id, kind, next_poll_at) VALUES ($1, 'assets', now())",
-            "INSERT INTO character_skills (character_id, skill_id, active_level) VALUES ($1, 16622, 4)",
-            "INSERT INTO character_standings (character_id, from_id, from_type, standing) \
-             VALUES ($1, 1000035, 'npc_corp', 1.5)",
-            "INSERT INTO fee_sync (character_id, kind, next_poll_at) VALUES ($1, 'skills', now())",
-            "INSERT INTO fee_sync (character_id, kind, next_poll_at) VALUES ($1, 'location', now())",
-            "INSERT INTO character_locations (character_id, location_id, kind, updated_at) \
-             VALUES ($1, 60003760, 'station', now())",
-            "INSERT INTO wealth_sync (character_id, kind, next_poll_at) VALUES ($1, 'transactions', now())",
-            "INSERT INTO purchases (transaction_id, character_id, type_id, location_id, quantity, \
-             unit_price, bought_at) VALUES ($1, $1, 34, 60003760, 10, 100, now())",
-            "INSERT INTO sell_order_history (order_id, character_id, type_id, first_issued, \
-             volume_total) VALUES ($1, $1, 34, now(), 20)",
-            "INSERT INTO sell_order_costs (order_id, covered_units, cost) VALUES ($1, 10, 1000)",
-            "INSERT INTO sales (transaction_id, character_id, type_id, location_id, quantity, \
-             unit_price, sold_at) VALUES ($1, $1, 34, 60003760, 10, 150, now())",
-            "INSERT INTO sale_costs (transaction_id, covered_units, cost) VALUES ($1, 10, 1000)",
-        ] {
-            sqlx::query(statement)
-                .bind(character)
-                .execute(&e.pool)
-                .await
-                .unwrap();
-        }
+        stores
+            .wealth
+            .store_wallet(character, now, 500, soon, None)
+            .await
+            .unwrap();
+        let asset = sekondo::esi::EsiAsset {
+            item_id: character,
+            type_id: 34,
+            location_id: station,
+            location_type: "station".to_owned(),
+            location_flag: "Hangar".to_owned(),
+            quantity: 1,
+            is_singleton: false,
+            is_blueprint_copy: false,
+        };
+        stores
+            .wealth
+            .store_assets(character, now, &[asset], &[Some(station)], soon, None)
+            .await
+            .unwrap();
+        let transaction = |id: i64, is_buy: bool, price_cents: i64| sekondo::esi::EsiTransaction {
+            transaction_id: id,
+            bought_at: now - time::Duration::days(1),
+            type_id: 34,
+            location_id: station,
+            quantity: 10,
+            unit_price_cents: price_cents,
+            is_buy,
+            is_personal: true,
+        };
+        stores
+            .wealth
+            .store_transactions(
+                character,
+                now,
+                &[
+                    transaction(character, true, 10_000),
+                    transaction(character + 1000, false, 15_000),
+                ],
+                soon,
+                None,
+            )
+            .await
+            .unwrap();
+        // A remembered sell order, with the cost the purchase gives it.
+        let mut order = sekondo::esi::EsiOrder {
+            order_id: character,
+            type_id: 34,
+            region_id: 10000002,
+            location_id: station,
+            is_buy_order: false,
+            is_corporation: false,
+            price_cents: 20_000,
+            volume_remain: 10,
+            volume_total: 10,
+            min_volume: 1,
+            range: "station".to_owned(),
+            escrow_cents: None,
+            issued: now,
+            duration: 90,
+        };
+        order.issued = now;
+        stores
+            .orders
+            .replace_orders(character, now, &[order], soon, None)
+            .await
+            .unwrap();
+        stores
+            .fees
+            .store_skills(character, &[16622], &[4], now, soon, None)
+            .await
+            .unwrap();
+        stores
+            .fees
+            .store_standings(
+                character,
+                &[StandingInput {
+                    from_id: 1000035,
+                    from_type: "npc_corp".to_owned(),
+                    standing: "1.5".to_owned(),
+                }],
+                now,
+                soon,
+                None,
+            )
+            .await
+            .unwrap();
+        stores
+            .fees
+            .store_location(character, Some((station, "station")), now, soon, None)
+            .await
+            .unwrap();
     }
     let token = e.csrf_token(&browser).await;
 
     assert_eq!(e.unlink(&browser, &token, BOB).await.status(), 200);
 
-    for (table, expected) in [
-        ("wallet_balances", 1),
-        ("inventory_values", 1),
-        ("current_assets", 1),
-        ("wealth_sync", 3),
-        ("purchases", 1),
-        ("sales", 1),
-        ("sell_order_history", 1),
-        ("character_skills", 1),
-        ("character_standings", 1),
-        ("character_locations", 1),
-        ("fee_sync", 2),
-    ] {
-        assert_eq!(e.count(table).await, expected, "{table}");
-        let gone: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-            "SELECT count(*) FROM {table} WHERE character_id = {BOB}"
-        )))
-        .fetch_one(&e.pool)
+    // Bob's data is gone ...
+    for kind in Kind::ALL {
+        assert!(
+            stores
+                .wealth
+                .wealth_sync(BOB, kind)
+                .await
+                .unwrap()
+                .is_none(),
+            "{kind:?}"
+        );
+        assert!(
+            stores
+                .wealth
+                .wealth_sync(ALICE, kind)
+                .await
+                .unwrap()
+                .is_some(),
+            "{kind:?}"
+        );
+    }
+    for kind in [FeeKind::Skills, FeeKind::Standings] {
+        assert!(
+            stores.fees.fee_sync(BOB, kind).await.unwrap().is_none(),
+            "{kind:?}"
+        );
+        assert!(
+            stores.fees.fee_sync(ALICE, kind).await.unwrap().is_some(),
+            "{kind:?}"
+        );
+    }
+    assert!(stores.orders.order_sync(BOB).await.unwrap().is_none());
+    assert!(
+        !stores
+            .wealth
+            .any_transaction_stored(&[BOB, BOB + 1000])
+            .await
+            .unwrap()
+    );
+    assert!(
+        stores
+            .wealth
+            .any_transaction_stored(&[ALICE, ALICE + 1000])
+            .await
+            .unwrap()
+    );
+    let range = (now - time::Duration::days(2), now);
+    let trades = stores
+        .trades
+        .list_trades(account, &[ALICE, BOB], range.0, range.1)
         .await
         .unwrap();
-        assert_eq!(gone, 0, "{table}");
-    }
-    // The costs hang off the remembered orders, so they go with them.
-    assert_eq!(e.count("sell_order_costs").await, 1);
-    assert_eq!(e.count("sale_costs").await, 1);
+    assert_eq!(
+        trades.iter().map(|t| t.character_id).collect::<Vec<_>>(),
+        [ALICE, ALICE],
+        "Alice's purchase and sale are all that is left"
+    );
+    // ... and what hangs off it: the remembered order with its cost, the fees' inputs, the location.
+    let sale = trades.iter().find(|t| t.is_sale).unwrap();
+    assert_eq!(sale.covered_units, Some(10), "Alice's own cost is intact");
+    let orders = stores
+        .orders
+        .list_orders(
+            account,
+            &[ALICE, BOB],
+            sekondo::orders::Side::Sell,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        orders.iter().map(|o| o.character_id).collect::<Vec<_>>(),
+        [ALICE]
+    );
+    assert_eq!(orders[0].covered_units, Some(10));
+    let fees = stores.fees.for_characters(&[ALICE, BOB]).await.unwrap();
+    assert_eq!(
+        fees.iter().map(|f| f.character_id).collect::<Vec<_>>(),
+        [ALICE]
+    );
+    let current = stores.wealth.current(account, &[ALICE, BOB]).await.unwrap();
+    assert_eq!(
+        (current.wallet_cents, current.inventory_cents),
+        (500, 0),
+        "one wallet, and no prices to value the asset"
+    );
+    let rows = stores
+        .wealth
+        .inventory_rows(account, &[ALICE, BOB], Default::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.iter().map(|r| r.character_id).collect::<Vec<_>>(),
+        [ALICE]
+    );
+    let at = stores
+        .fees
+        .at_fee_location(account, &[ALICE, BOB])
+        .await
+        .unwrap();
+    assert_eq!(
+        at.iter().map(|f| f.row.character_id).collect::<Vec<_>>(),
+        [ALICE]
+    );
 }

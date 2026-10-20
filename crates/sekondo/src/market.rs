@@ -4,7 +4,6 @@
 use std::sync::Arc;
 
 use futures_util::StreamExt;
-use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -12,8 +11,8 @@ use crate::{
     clock::Clock,
     esi::{EsiClient, EsiError, EsiMarketOrder, EsiResponse},
     events::{Event, EventBus},
-    orders::{GAP_CENTS, STANDING_JOIN},
     poller::{BACKOFF_START, CLAIM_LEASE, SCHEDULER_TICK, jitter, spread},
+    store::{MarketStore, StandingRow, StoreError, Stores},
 };
 
 /// How often a pair is refreshed: the cache time of ESI's market answers.
@@ -32,14 +31,12 @@ pub enum RefreshOutcome {
     Deferred,
 }
 
-type SnapshotRow = (Uuid, i64, Option<i64>, Option<i64>, Option<i64>);
-
 /// What a pair's refresh may change on screen: per current order using the pair, its standing
 /// gap and undercut volume (design §6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     /// `(account, order, undercut, gap in cents, undercut volume)`, ordered.
-    rows: Vec<SnapshotRow>,
+    rows: Vec<StandingRow>,
 }
 
 impl Snapshot {
@@ -59,75 +56,36 @@ impl Snapshot {
     }
 }
 
-/// The standing, gap and undercut volume of every current order that uses the pair, from the same SQL the orders
-/// page lists with.
+/// The standing, gap and undercut volume of every current order that uses the pair, from the same
+/// read the orders page lists with.
 pub async fn snapshot(
-    pool: &PgPool,
+    store: &dyn MarketStore,
     region_id: i64,
     type_id: i64,
-) -> Result<Snapshot, sqlx::Error> {
-    let sql = format!(
-        "SELECT c.account_id, o.order_id, st.undercut, {GAP_CENTS}, st.undercut_volume
-         FROM current_orders o
-         JOIN characters c ON c.character_id = o.character_id
-         {STANDING_JOIN}
-         WHERE o.region_id = $1 AND o.type_id = $2
-         ORDER BY o.order_id"
-    );
-    let rows = sqlx::query_as(sqlx::AssertSqlSafe(sql))
-        .bind(region_id)
-        .bind(type_id)
-        .fetch_all(pool)
-        .await?;
-    Ok(Snapshot { rows })
+) -> Result<Snapshot, StoreError> {
+    Ok(Snapshot {
+        rows: store.standings(region_id, type_id).await?,
+    })
 }
 
 pub struct MarketPoller {
-    pool: PgPool,
+    store: Arc<dyn MarketStore>,
     esi: Arc<EsiClient>,
     events: Arc<dyn EventBus>,
     clock: Arc<dyn Clock>,
     interval: Duration,
 }
 
-/// Columns of the market orders of one pair, as the parallel arrays `unnest` takes.
-#[derive(Default)]
-struct MarketColumns {
-    order_id: Vec<i64>,
-    location_id: Vec<i64>,
-    system_id: Vec<i64>,
-    is_buy_order: Vec<bool>,
-    price_cents: Vec<i64>,
-    range: Vec<String>,
-    volume_remain: Vec<i64>,
-}
-
-impl MarketColumns {
-    fn new(orders: &[EsiMarketOrder]) -> Self {
-        let mut c = Self::default();
-        for o in orders {
-            c.order_id.push(o.order_id);
-            c.location_id.push(o.location_id);
-            c.system_id.push(o.system_id);
-            c.is_buy_order.push(o.is_buy_order);
-            c.price_cents.push(o.price_cents);
-            c.range.push(o.range.clone());
-            c.volume_remain.push(o.volume_remain);
-        }
-        c
-    }
-}
-
 impl MarketPoller {
     pub fn new(
-        pool: PgPool,
+        stores: &Stores,
         esi: Arc<EsiClient>,
         events: Arc<dyn EventBus>,
         clock: Arc<dyn Clock>,
         interval: Duration,
     ) -> Self {
         Self {
-            pool,
+            store: stores.market.clone(),
             esi,
             events,
             clock,
@@ -172,17 +130,9 @@ impl MarketPoller {
 
     /// Refreshes every pair the account's current orders use right now, whatever the schedule
     /// says, after tracking them. Returns how many pairs it refreshed. For the test hook.
-    pub async fn refresh_account_pairs(&self, account_id: Uuid) -> Result<usize, sqlx::Error> {
+    pub async fn refresh_account_pairs(&self, account_id: Uuid) -> Result<usize, StoreError> {
         self.track(self.clock.now()).await?;
-        let pairs: Vec<(i64, i64)> = sqlx::query_as(
-            "SELECT DISTINCT o.region_id, o.type_id FROM current_orders o
-             JOIN characters c ON c.character_id = o.character_id
-             WHERE c.account_id = $1
-             ORDER BY o.region_id, o.type_id",
-        )
-        .bind(account_id)
-        .fetch_all(&self.pool)
-        .await?;
+        let pairs = self.store.account_pairs(account_id).await?;
         for (region_id, type_id) in &pairs {
             self.refresh_pair(*region_id, *type_id).await;
         }
@@ -191,17 +141,9 @@ impl MarketPoller {
 
     /// Gives every pair a current order uses a first refresh time inside the next interval, and
     /// drops the sync state and the copy of pairs no current order uses any more.
-    async fn track(&self, now: OffsetDateTime) -> Result<(), sqlx::Error> {
-        let missing: Vec<(i64, i64)> = sqlx::query_as(
-            "SELECT DISTINCT o.region_id, o.type_id FROM current_orders o
-             WHERE NOT EXISTS (SELECT 1 FROM market_sync s
-                               WHERE s.region_id = o.region_id AND s.type_id = o.type_id)",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+    async fn track(&self, now: OffsetDateTime) -> Result<(), StoreError> {
+        let missing = self.store.untracked_pairs().await?;
         if !missing.is_empty() {
-            let regions: Vec<i64> = missing.iter().map(|p| p.0).collect();
-            let types: Vec<i64> = missing.iter().map(|p| p.1).collect();
             let times: Vec<OffsetDateTime> = missing
                 .iter()
                 .map(|(region, type_id)| {
@@ -210,59 +152,24 @@ impl MarketPoller {
                     now + spread(&key, self.interval)
                 })
                 .collect();
-            sqlx::query(
-                "INSERT INTO market_sync (region_id, type_id, next_poll_at)
-                 SELECT * FROM unnest($1::bigint[], $2::bigint[], $3::timestamptz[])
-                 ON CONFLICT (region_id, type_id) DO NOTHING",
-            )
-            .bind(&regions)
-            .bind(&types)
-            .bind(&times)
-            .execute(&self.pool)
-            .await?;
+            self.store.insert_pair_schedule(&missing, &times).await?;
         }
-        sqlx::query(
-            "DELETE FROM market_sync s
-             WHERE NOT EXISTS (SELECT 1 FROM current_orders o
-                               WHERE o.region_id = s.region_id AND o.type_id = s.type_id)",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "DELETE FROM market_orders m
-             WHERE NOT EXISTS (SELECT 1 FROM current_orders o
-                               WHERE o.region_id = m.region_id AND o.type_id = m.type_id)",
-        )
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        self.store.drop_unused_pairs().await
     }
 
     /// Takes the due pairs. They are pushed back by a lease, so neither this nor another tick
     /// takes them again while their refresh runs.
-    async fn claim_due(&self, now: OffsetDateTime) -> Result<Vec<(i64, i64)>, sqlx::Error> {
-        sqlx::query_as(
-            "UPDATE market_sync SET next_poll_at = $1 + $2::float8 * interval '1 second'
-             WHERE (region_id, type_id) IN (
-                 SELECT region_id, type_id FROM market_sync
-                 WHERE next_poll_at <= $1
-                 ORDER BY next_poll_at
-                 LIMIT $3
-                 FOR UPDATE SKIP LOCKED)
-             RETURNING region_id, type_id",
-        )
-        .bind(now)
-        .bind(CLAIM_LEASE.as_seconds_f64())
-        .bind((CONCURRENCY * 8) as i64)
-        .fetch_all(&self.pool)
-        .await
+    async fn claim_due(&self, now: OffsetDateTime) -> Result<Vec<(i64, i64)>, StoreError> {
+        self.store
+            .claim_due_pairs(now, CLAIM_LEASE, (CONCURRENCY * 8) as i64)
+            .await
     }
 
     /// Refreshes one pair now, whatever its schedule says. Every way it can end is a
     /// [`RefreshOutcome`], and the database records the details.
     pub async fn refresh_pair(&self, region_id: i64, type_id: i64) -> RefreshOutcome {
         let now = self.clock.now();
-        let before = snapshot(&self.pool, region_id, type_id).await;
+        let before = snapshot(&*self.store, region_id, type_id).await;
         let response = match self.esi.market_orders(region_id, type_id).await {
             Ok(response) => response,
             Err(EsiError::Deferred { until }) => {
@@ -292,9 +199,9 @@ impl MarketPoller {
         &self,
         region_id: i64,
         type_id: i64,
-        before: Result<Snapshot, sqlx::Error>,
+        before: Result<Snapshot, StoreError>,
     ) {
-        let (Ok(before), Ok(after)) = (before, snapshot(&self.pool, region_id, type_id).await)
+        let (Ok(before), Ok(after)) = (before, snapshot(&*self.store, region_id, type_id).await)
         else {
             tracing::error!(
                 region_id,
@@ -315,57 +222,19 @@ impl MarketPoller {
         type_id: i64,
         now: OffsetDateTime,
         response: &EsiResponse<Vec<EsiMarketOrder>>,
-    ) -> Result<(), sqlx::Error> {
-        let columns = MarketColumns::new(&response.body);
-        let mut tx = self.pool.begin().await?;
-        sqlx::query("DELETE FROM market_orders WHERE region_id = $1 AND type_id = $2")
-            .bind(region_id)
-            .bind(type_id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(
-            "INSERT INTO market_orders
-                 (order_id, region_id, type_id, location_id, system_id, is_buy_order, price, range,
-                  volume_remain)
-             SELECT o.order_id, $1, $2, o.location_id, o.system_id, o.is_buy_order,
-                    o.price_cents::numeric / 100, o.range, o.volume_remain
-             FROM unnest($3::bigint[], $4::bigint[], $5::bigint[], $6::bool[], $7::bigint[],
-                         $8::text[], $9::bigint[])
-                  AS o(order_id, location_id, system_id, is_buy_order, price_cents, range,
-                       volume_remain)
-             ON CONFLICT (order_id) DO UPDATE SET
-                 region_id = excluded.region_id, type_id = excluded.type_id,
-                 location_id = excluded.location_id, system_id = excluded.system_id,
-                 is_buy_order = excluded.is_buy_order, price = excluded.price,
-                 range = excluded.range, volume_remain = excluded.volume_remain",
-        )
-        .bind(region_id)
-        .bind(type_id)
-        .bind(&columns.order_id)
-        .bind(&columns.location_id)
-        .bind(&columns.system_id)
-        .bind(&columns.is_buy_order)
-        .bind(&columns.price_cents)
-        .bind(&columns.range)
-        .bind(&columns.volume_remain)
-        .execute(&mut *tx)
-        .await?;
+    ) -> Result<(), StoreError> {
         // `max(now + interval, ESI's Expires)`, pushed back by a little jitter.
         let earliest = (now + self.interval).max(response.expires_at.unwrap_or(now));
-        sqlx::query(
-            "UPDATE market_sync SET
-                 next_poll_at = $3, last_success_at = $4, last_attempt_at = $4,
-                 last_error = NULL, esi_expires_at = $5, failures = 0
-             WHERE region_id = $1 AND type_id = $2",
-        )
-        .bind(region_id)
-        .bind(type_id)
-        .bind(earliest + jitter(self.interval))
-        .bind(now)
-        .bind(response.expires_at)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await
+        self.store
+            .replace_market_orders(
+                region_id,
+                type_id,
+                now,
+                &response.body,
+                earliest + jitter(self.interval),
+                response.expires_at,
+            )
+            .await
     }
 
     /// Records the failure with the order poll's backoff; the old copy stays.
@@ -377,22 +246,17 @@ impl MarketPoller {
         reason: &str,
     ) -> RefreshOutcome {
         tracing::warn!(region_id, type_id, "market refresh failed: {reason}");
-        let result = sqlx::query(
-            "UPDATE market_sync SET
-                 next_poll_at = $3 + LEAST(
-                     $5::float8 * power(2, LEAST(failures, 20)) * interval '1 second',
-                     $6::float8 * interval '1 second'),
-                 last_attempt_at = $3, last_error = $4, failures = failures + 1
-             WHERE region_id = $1 AND type_id = $2",
-        )
-        .bind(region_id)
-        .bind(type_id)
-        .bind(now)
-        .bind(reason)
-        .bind(BACKOFF_START.as_seconds_f64())
-        .bind(self.interval.as_seconds_f64())
-        .execute(&self.pool)
-        .await;
+        let result = self
+            .store
+            .record_pair_failure(
+                region_id,
+                type_id,
+                now,
+                reason,
+                BACKOFF_START,
+                self.interval,
+            )
+            .await;
         if let Err(e) = result {
             tracing::error!(region_id, type_id, "cannot record a market failure: {e}");
         }
@@ -407,16 +271,10 @@ impl MarketPoller {
         now: OffsetDateTime,
         until: OffsetDateTime,
     ) -> RefreshOutcome {
-        let result = sqlx::query(
-            "UPDATE market_sync SET next_poll_at = $3, last_attempt_at = $4
-             WHERE region_id = $1 AND type_id = $2",
-        )
-        .bind(region_id)
-        .bind(type_id)
-        .bind(until + jitter(self.interval))
-        .bind(now)
-        .execute(&self.pool)
-        .await;
+        let result = self
+            .store
+            .record_pair_deferral(region_id, type_id, now, until + jitter(self.interval))
+            .await;
         if let Err(e) = result {
             tracing::error!(region_id, type_id, "cannot record a deferred refresh: {e}");
         }

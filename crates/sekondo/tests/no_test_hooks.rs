@@ -4,13 +4,12 @@
 mod common;
 
 use common::AppBuilder;
-use sqlx::PgPool;
 
 const ALICE: i64 = 90000001;
 
-#[sqlx::test]
-async fn the_market_poll_hook_is_absent(pool: PgPool) {
-    let app = AppBuilder::new(pool).with_stub().spawn().await;
+#[tokio::test]
+async fn the_market_poll_hook_is_absent() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let browser = app.browser();
     browser.sso_round_trip(&app, "/auth/login", ALICE).await;
     let html = browser
@@ -40,9 +39,9 @@ async fn the_market_poll_hook_is_absent(pool: PgPool) {
     assert_eq!(res.status(), 404);
 }
 
-#[sqlx::test]
-async fn the_wealth_and_fee_hooks_are_absent(pool: PgPool) {
-    let app = AppBuilder::new(pool).with_stub().spawn().await;
+#[tokio::test]
+async fn the_wealth_and_fee_hooks_are_absent() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let browser = app.browser();
     browser.sso_round_trip(&app, "/auth/login", ALICE).await;
     let html = browser
@@ -78,9 +77,9 @@ async fn the_wealth_and_fee_hooks_are_absent(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
-async fn the_station_hooks_are_absent(pool: PgPool) {
-    let app = AppBuilder::new(pool).with_stub().spawn().await;
+#[tokio::test]
+async fn the_station_hooks_are_absent() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let browser = app.browser();
     browser.sso_round_trip(&app, "/auth/login", ALICE).await;
     let html = browser

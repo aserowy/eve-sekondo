@@ -8,7 +8,6 @@ use axum::{
     routing::{get, post},
 };
 use axum_server::Handle;
-use sqlx::{PgPool, postgres::PgPoolOptions};
 use tower_http::services::ServeDir;
 
 use crate::{
@@ -30,6 +29,7 @@ use crate::{
     sso::SsoClient,
     station_book::{BOOK_INTERVAL, StationBookPoller},
     station_history::StationHistoryPoller,
+    store::{Stores, pg::PgStores},
     tls,
     tokens::TokenService,
     trades_page, wealth_page,
@@ -39,7 +39,7 @@ use crate::{
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
-    pub pool: PgPool,
+    pub stores: Stores,
     pub http: reqwest::Client,
     pub clock: Arc<dyn Clock>,
     pub repo: Repo,
@@ -90,32 +90,34 @@ pub enum StartupError {
 }
 
 impl App {
-    /// Runs migrations over the given pool and builds the router.
-    pub async fn new(config: Config, pool: PgPool) -> Result<Self, StartupError> {
-        Self::new_with(config, pool, Arc::new(SystemClock), Router::new()).await
+    /// Builds the router over stores whose database is already migrated.
+    pub async fn new(config: Config, stores: Stores) -> Result<Self, StartupError> {
+        Self::new_with(config, stores, Arc::new(SystemClock), Router::new()).await
     }
 
     /// Like [`App::new`], with an injected clock and extra routes (used by tests).
     pub async fn new_with(
         config: Config,
-        pool: PgPool,
+        stores: Stores,
         clock: Arc<dyn Clock>,
         extra_routes: Router<AppState>,
     ) -> Result<Self, StartupError> {
-        Self::new_with_options(config, pool, clock, extra_routes, Options::default()).await
+        Self::new_with_options(config, stores, clock, extra_routes, Options::default()).await
     }
 
     pub async fn new_with_options(
         config: Config,
-        pool: PgPool,
+        stores: Stores,
         clock: Arc<dyn Clock>,
         extra_routes: Router<AppState>,
         options: Options,
     ) -> Result<Self, StartupError> {
         tls::install_crypto_provider();
-        sqlx::migrate!("./migrations").run(&pool).await?;
         let http = tls::http_client(config.tls_extra_ca_path.as_deref())?;
-        let repo = Repo::new(pool.clone(), TokenCipher::new(&config.token_encryption_key));
+        let repo = Repo::new(
+            stores.accounts.clone(),
+            TokenCipher::new(&config.token_encryption_key),
+        );
         let sso = Arc::new(SsoClient::new(
             http.clone(),
             config.eve_sso_base_url.clone(),
@@ -127,7 +129,7 @@ impl App {
         let esi = Arc::new(EsiClient::new(http.clone(), &config, clock.clone()));
         let events: Arc<dyn EventBus> = Arc::new(InProcessBus::new());
         let poller = Arc::new(Poller::new(
-            pool.clone(),
+            &stores,
             tokens.clone(),
             esi.clone(),
             events.clone(),
@@ -135,27 +137,27 @@ impl App {
             config.order_poll_interval,
         ));
         let market = Arc::new(MarketPoller::new(
-            pool.clone(),
+            &stores,
             esi.clone(),
             events.clone(),
             clock.clone(),
             MARKET_INTERVAL,
         ));
         let station_book = Arc::new(StationBookPoller::new(
-            pool.clone(),
+            &stores,
             esi.clone(),
             events.clone(),
             clock.clone(),
             BOOK_INTERVAL,
         ));
         let station_history = Arc::new(StationHistoryPoller::new(
-            pool.clone(),
+            &stores,
             esi.clone(),
             events.clone(),
             clock.clone(),
         ));
         let wealth = Arc::new(WealthPoller::new(
-            pool.clone(),
+            &stores,
             tokens.clone(),
             esi.clone(),
             events.clone(),
@@ -163,21 +165,21 @@ impl App {
             config.order_poll_interval,
         ));
         let fees = Arc::new(FeePoller::new(
-            pool.clone(),
+            &stores,
             tokens.clone(),
             esi.clone(),
             events.clone(),
             clock.clone(),
         ));
         let prices = Arc::new(PricePoller::new(
-            pool.clone(),
+            &stores,
             esi.clone(),
             events.clone(),
             clock.clone(),
         ));
         let state = AppState {
             config: Arc::new(config),
-            pool,
+            stores,
             http,
             clock,
             repo,
@@ -200,12 +202,8 @@ impl App {
 
     /// Connects to the (verify-full) database named in the config.
     pub async fn connect(config: Config) -> Result<Self, StartupError> {
-        use secrecy::ExposeSecret;
-        let pool = PgPoolOptions::new()
-            .max_connections(10)
-            .connect(config.database_url.expose_secret())
-            .await?;
-        Self::new(config, pool).await
+        let pg = PgStores::connect(&config).await?;
+        Self::new(config, pg.stores()).await
     }
 }
 
@@ -298,8 +296,8 @@ pub fn router(state: AppState, extra_routes: Router<AppState>) -> Router {
             state.clone(),
             session::enforce_lifetime,
         ))
-        .layer(session::layer(session::PgSessionStore::new(
-            state.pool.clone(),
+        .layer(session::layer(session::AppSessionStore::new(
+            state.stores.sessions.clone(),
         )))
         .with_state(state.clone());
     headers::apply(router, &state.config.eve_sso_base_url)

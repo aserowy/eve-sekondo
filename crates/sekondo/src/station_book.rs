@@ -5,7 +5,6 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 
 use crate::{
@@ -16,6 +15,7 @@ use crate::{
     names,
     opportunities::{REGION_ID, STATION_ID, stats},
     poller::{BACKOFF_START, CLAIM_LEASE, SCHEDULER_TICK, jitter},
+    store::{MarketStore, StationOrder, StationStore, StoreError, Stores},
 };
 
 /// How often the book is refreshed at the earliest: the cache time of ESI's market answers.
@@ -47,7 +47,8 @@ enum ReadError {
 }
 
 pub struct StationBookPoller {
-    pool: PgPool,
+    market: Arc<dyn MarketStore>,
+    station: Arc<dyn StationStore>,
     pages: Arc<dyn BookPages>,
     /// For the names of the items; without it (a scripted source) no names are looked up.
     esi: Option<Arc<EsiClient>>,
@@ -58,7 +59,7 @@ pub struct StationBookPoller {
 
 impl StationBookPoller {
     pub fn new(
-        pool: PgPool,
+        stores: &Stores,
         esi: Arc<EsiClient>,
         events: Arc<dyn EventBus>,
         clock: Arc<dyn Clock>,
@@ -66,19 +67,20 @@ impl StationBookPoller {
     ) -> Self {
         Self {
             esi: Some(esi.clone()),
-            ..Self::with_source(pool, esi, events, clock, interval)
+            ..Self::with_source(stores, esi, events, clock, interval)
         }
     }
 
     pub fn with_source(
-        pool: PgPool,
+        stores: &Stores,
         pages: Arc<dyn BookPages>,
         events: Arc<dyn EventBus>,
         clock: Arc<dyn Clock>,
         interval: Duration,
     ) -> Self {
         Self {
-            pool,
+            market: stores.market.clone(),
+            station: stores.station.clone(),
             pages,
             esi: None,
             events,
@@ -103,30 +105,10 @@ impl StationBookPoller {
     /// refreshes it started.
     pub async fn tick(&self) -> usize {
         let now = self.clock.now();
-        let claimed = async {
-            sqlx::query(
-                "INSERT INTO station_sync (region_id, station_id, kind, next_poll_at)
-                 VALUES ($1, $2, 'book', $3) ON CONFLICT DO NOTHING",
-            )
-            .bind(REGION_ID)
-            .bind(STATION_ID)
-            .bind(now)
-            .execute(&self.pool)
-            .await?;
-            // Pushed back by a lease, so another tick leaves it alone while the refresh runs.
-            sqlx::query(
-                "UPDATE station_sync SET next_poll_at = $3 + $4::float8 * interval '1 second'
-                 WHERE region_id = $1 AND station_id = $2 AND kind = 'book' AND next_poll_at <= $3",
-            )
-            .bind(REGION_ID)
-            .bind(STATION_ID)
-            .bind(now)
-            .bind(CLAIM_LEASE.as_seconds_f64())
-            .execute(&self.pool)
-            .await
-            .map(|done| done.rows_affected() > 0)
-        }
-        .await;
+        let claimed = self
+            .station
+            .claim_book_refresh(REGION_ID, STATION_ID, now, CLAIM_LEASE)
+            .await;
         match claimed {
             Ok(true) => {
                 self.refresh().await;
@@ -176,31 +158,23 @@ impl StationBookPoller {
     /// them. Never fails the refresh.
     async fn resolve_names(&self, now: OffsetDateTime) {
         let Some(esi) = &self.esi else { return };
-        let tradable: Vec<i64> = match sqlx::query_scalar(
-            "SELECT type_id FROM station_orders WHERE region_id = $1 AND station_id = $2
-             GROUP BY type_id HAVING bool_or(is_buy_order) AND bool_or(NOT is_buy_order)",
-        )
-        .bind(REGION_ID)
-        .bind(STATION_ID)
-        .fetch_all(&self.pool)
-        .await
-        {
+        let tradable = match self.station.tradable_items(REGION_ID, STATION_ID).await {
             Ok(tradable) => tradable,
             Err(e) => {
                 tracing::error!("cannot list the tradable items to name: {e}");
                 return;
             }
         };
-        names::resolve_public_names(&self.pool, esi, tradable, now).await;
+        names::resolve_public_names(&*self.market, esi, tradable, now).await;
     }
 
     /// The book fields of every item, and the expansion fields when the hourly rollup advanced.
     /// A failure here never fails the refresh: the book and its snapshot are safe already.
     async fn update_stats(&self, now: OffsetDateTime) {
-        if let Err(e) = stats::refresh_book_fields(&self.pool, now).await {
+        if let Err(e) = stats::refresh_book_fields(&*self.station, now).await {
             tracing::error!("cannot update the station book fields: {e}");
         }
-        if let Err(e) = stats::refresh_expansions_if_advanced(&self.pool, now).await {
+        if let Err(e) = stats::refresh_expansions_if_advanced(&*self.station, now).await {
             tracing::error!("cannot update the station expansion fields: {e}");
         }
     }
@@ -255,7 +229,7 @@ impl StationBookPoller {
         now: OffsetDateTime,
         orders: &[EsiMarketOrder],
         expires_at: Option<OffsetDateTime>,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), StoreError> {
         // The orders at the station. An order can show up on two pages when the book moved
         // under the read; the last one wins.
         let at_station: HashMap<i64, &EsiMarketOrder> = orders
@@ -265,136 +239,45 @@ impl StationBookPoller {
             .collect();
         let mut rows: Vec<&EsiMarketOrder> = at_station.into_values().collect();
         rows.sort_unstable_by_key(|o| o.order_id);
-        let order_id: Vec<i64> = rows.iter().map(|o| o.order_id).collect();
-        let type_id: Vec<i64> = rows.iter().map(|o| o.type_id).collect();
-        let is_buy: Vec<bool> = rows.iter().map(|o| o.is_buy_order).collect();
-        let price_cents: Vec<i64> = rows.iter().map(|o| o.price_cents).collect();
-        let volume_remain: Vec<i64> = rows.iter().map(|o| o.volume_remain).collect();
-
-        let mut tx = self.pool.begin().await?;
-        sqlx::query(
-            "CREATE TEMP TABLE new_station_orders ON COMMIT DROP AS
-             SELECT o.order_id, o.type_id, o.is_buy_order, o.price_cents::numeric / 100 AS price,
-                    o.volume_remain
-             FROM unnest($1::bigint[], $2::bigint[], $3::bool[], $4::bigint[], $5::bigint[])
-                  AS o(order_id, type_id, is_buy_order, price_cents, volume_remain)",
-        )
-        .bind(&order_id)
-        .bind(&type_id)
-        .bind(&is_buy)
-        .bind(&price_cents)
-        .bind(&volume_remain)
-        .execute(&mut *tx)
-        .await?;
-
-        // Snapshots of the tradable items (both sides present). Within 1% of a side's best is
-        // compared as price * 100 against best * 99 or 101, so it is exact. Units taken look at
-        // orders present in the previous book and this one, before the book is replaced.
-        sqlx::query(
-            "WITH best AS (
-                 SELECT type_id,
-                        max(price) FILTER (WHERE is_buy_order) AS best_buy,
-                        min(price) FILTER (WHERE NOT is_buy_order) AS best_sell
-                 FROM new_station_orders GROUP BY type_id
-                 HAVING bool_or(is_buy_order) AND bool_or(NOT is_buy_order)),
-             sides AS (
-                 SELECT n.type_id,
-                        COALESCE(sum(n.volume_remain) FILTER (WHERE n.is_buy_order), 0)::bigint AS buy_units,
-                        COALESCE(sum(n.volume_remain) FILTER (WHERE NOT n.is_buy_order), 0)::bigint AS sell_units,
-                        COALESCE(sum(n.volume_remain) FILTER (WHERE n.is_buy_order AND n.price * 100 >= b.best_buy * 99), 0)::bigint AS buy_near_units,
-                        count(*) FILTER (WHERE n.is_buy_order AND n.price * 100 >= b.best_buy * 99)::int AS buy_near_orders,
-                        COALESCE(sum(n.volume_remain) FILTER (WHERE NOT n.is_buy_order AND n.price * 100 <= b.best_sell * 101), 0)::bigint AS sell_near_units,
-                        count(*) FILTER (WHERE NOT n.is_buy_order AND n.price * 100 <= b.best_sell * 101)::int AS sell_near_orders
-                 FROM new_station_orders n JOIN best b USING (type_id)
-                 GROUP BY n.type_id),
-             taken AS (
-                 SELECT n.type_id,
-                        COALESCE(sum(greatest(o.volume_remain - n.volume_remain, 0)) FILTER (WHERE n.is_buy_order), 0)::bigint AS buy_taken,
-                        COALESCE(sum(greatest(o.volume_remain - n.volume_remain, 0)) FILTER (WHERE NOT n.is_buy_order), 0)::bigint AS sell_taken
-                 FROM new_station_orders n
-                 JOIN station_orders o ON o.order_id = n.order_id
-                  AND o.region_id = $1 AND o.station_id = $2
-                 GROUP BY n.type_id)
-             INSERT INTO station_snapshots
-                 (recorded_at, region_id, station_id, type_id, best_buy, best_sell, spread,
-                  buy_near_units, buy_near_orders, sell_near_units, sell_near_orders,
-                  buy_units, sell_units, buy_taken, sell_taken)
-             SELECT $3, $1, $2, b.type_id, b.best_buy, b.best_sell,
-                    (b.best_sell - b.best_buy) / NULLIF(b.best_buy, 0),
-                    s.buy_near_units, s.buy_near_orders, s.sell_near_units, s.sell_near_orders,
-                    s.buy_units, s.sell_units,
-                    COALESCE(t.buy_taken, 0), COALESCE(t.sell_taken, 0)
-             FROM best b JOIN sides s USING (type_id) LEFT JOIN taken t USING (type_id)
-             WHERE b.best_buy > 0",
-        )
-        .bind(REGION_ID)
-        .bind(STATION_ID)
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query("DELETE FROM station_orders WHERE region_id = $1 AND station_id = $2")
-            .bind(REGION_ID)
-            .bind(STATION_ID)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(
-            "INSERT INTO station_orders
-                 (region_id, station_id, order_id, type_id, is_buy_order, price, volume_remain)
-             SELECT $1, $2, order_id, type_id, is_buy_order, price, volume_remain
-             FROM new_station_orders",
-        )
-        .bind(REGION_ID)
-        .bind(STATION_ID)
-        .execute(&mut *tx)
-        .await?;
-
+        let rows: Vec<StationOrder> = rows
+            .into_iter()
+            .map(|o| StationOrder {
+                order_id: o.order_id,
+                type_id: o.type_id,
+                is_buy_order: o.is_buy_order,
+                price_cents: o.price_cents,
+                volume_remain: o.volume_remain,
+            })
+            .collect();
         // `max(now + interval, ESI's Expires)`, pushed back by a little jitter.
         let earliest = (now + self.interval).max(expires_at.unwrap_or(now));
-        sqlx::query(
-            "INSERT INTO station_sync
-                 (region_id, station_id, kind, next_poll_at, last_success_at, last_attempt_at,
-                  last_error, esi_expires_at, failures)
-             VALUES ($1, $2, 'book', $3, $4, $4, NULL, $5, 0)
-             ON CONFLICT (region_id, station_id, kind) DO UPDATE SET
-                 next_poll_at = excluded.next_poll_at,
-                 last_success_at = excluded.last_success_at,
-                 last_attempt_at = excluded.last_attempt_at,
-                 last_error = NULL, esi_expires_at = excluded.esi_expires_at, failures = 0",
-        )
-        .bind(REGION_ID)
-        .bind(STATION_ID)
-        .bind(earliest + jitter(self.interval))
-        .bind(now)
-        .bind(expires_at)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await
+        self.station
+            .replace_station_book(
+                REGION_ID,
+                STATION_ID,
+                now,
+                &rows,
+                earliest + jitter(self.interval),
+                expires_at,
+            )
+            .await
     }
 
     /// Records the failure with the other polls' backoff; the old book stays and no snapshot is
     /// recorded.
     async fn record_failure(&self, now: OffsetDateTime, reason: &str) -> RefreshOutcome {
         tracing::warn!("station book refresh failed: {reason}");
-        let result = sqlx::query(
-            "INSERT INTO station_sync
-                 (region_id, station_id, kind, next_poll_at, last_attempt_at, last_error, failures)
-             VALUES ($1, $2, 'book', $3 + $5::float8 * interval '1 second', $3, $4, 1)
-             ON CONFLICT (region_id, station_id, kind) DO UPDATE SET
-                 next_poll_at = $3 + LEAST(
-                     $5::float8 * power(2, LEAST(station_sync.failures, 20)) * interval '1 second',
-                     $6::float8 * interval '1 second'),
-                 last_attempt_at = $3, last_error = $4,
-                 failures = station_sync.failures + 1",
-        )
-        .bind(REGION_ID)
-        .bind(STATION_ID)
-        .bind(now)
-        .bind(reason)
-        .bind(BACKOFF_START.as_seconds_f64())
-        .bind(self.interval.as_seconds_f64())
-        .execute(&self.pool)
-        .await;
+        let result = self
+            .station
+            .record_book_failure(
+                REGION_ID,
+                STATION_ID,
+                now,
+                reason,
+                BACKOFF_START,
+                self.interval,
+            )
+            .await;
         if let Err(e) = result {
             tracing::error!("cannot record a station book failure: {e}");
         }
@@ -403,18 +286,10 @@ impl StationBookPoller {
 
     /// The gate paused the route: try again when it lets us, without counting a failure.
     async fn record_deferral(&self, now: OffsetDateTime, until: OffsetDateTime) -> RefreshOutcome {
-        let result = sqlx::query(
-            "INSERT INTO station_sync (region_id, station_id, kind, next_poll_at, last_attempt_at)
-             VALUES ($1, $2, 'book', $3, $4)
-             ON CONFLICT (region_id, station_id, kind) DO UPDATE SET
-                 next_poll_at = excluded.next_poll_at, last_attempt_at = excluded.last_attempt_at",
-        )
-        .bind(REGION_ID)
-        .bind(STATION_ID)
-        .bind(until + jitter(self.interval))
-        .bind(now)
-        .execute(&self.pool)
-        .await;
+        let result = self
+            .station
+            .record_book_deferral(REGION_ID, STATION_ID, now, until + jitter(self.interval))
+            .await;
         if let Err(e) = result {
             tracing::error!("cannot record a deferred station book refresh: {e}");
         }

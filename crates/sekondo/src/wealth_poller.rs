@@ -6,7 +6,6 @@ use std::{collections::HashMap, sync::Arc};
 
 use futures_util::StreamExt;
 use secrecy::SecretString;
-use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 
 use crate::{
@@ -18,6 +17,7 @@ use crate::{
         BACKOFF_START, CLAIM_LEASE, PollOutcome, SCHEDULER_TICK, is_foreign_key_violation, jitter,
         spread,
     },
+    store::{AccountStore, MarketStore, StoreError, Stores, WealthStore},
     tokens::{TokenError, TokenService},
 };
 
@@ -56,7 +56,7 @@ impl Kind {
         }
     }
 
-    fn parse(raw: &str) -> Option<Self> {
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|kind| kind.as_str() == raw)
     }
 
@@ -84,7 +84,9 @@ struct Stored {
 }
 
 pub struct WealthPoller {
-    pool: PgPool,
+    wealth: Arc<dyn WealthStore>,
+    accounts: Arc<dyn AccountStore>,
+    market: Arc<dyn MarketStore>,
     tokens: Arc<TokenService>,
     esi: Arc<EsiClient>,
     events: Arc<dyn EventBus>,
@@ -96,7 +98,7 @@ pub struct WealthPoller {
 
 impl WealthPoller {
     pub fn new(
-        pool: PgPool,
+        stores: &Stores,
         tokens: Arc<TokenService>,
         esi: Arc<EsiClient>,
         events: Arc<dyn EventBus>,
@@ -104,7 +106,9 @@ impl WealthPoller {
         interval: Duration,
     ) -> Self {
         Self {
-            pool,
+            wealth: stores.wealth.clone(),
+            accounts: stores.accounts.clone(),
+            market: stores.market.clone(),
             tokens,
             esi,
             events,
@@ -126,14 +130,8 @@ impl WealthPoller {
 
     /// Tells the character's account's open pages what changed.
     async fn publish(&self, character_id: i64, event: Event) {
-        match sqlx::query_scalar::<_, uuid::Uuid>(
-            "SELECT account_id FROM characters WHERE character_id = $1",
-        )
-        .bind(character_id)
-        .fetch_optional(&self.pool)
-        .await
-        {
-            Ok(Some(account)) => self.events.publish(account, event),
+        match self.accounts.find_character(character_id).await {
+            Ok(Some(character)) => self.events.publish(character.account_id, event),
             Ok(None) => {}
             Err(e) => tracing::error!(character_id, "cannot look up the account to signal: {e}"),
         }
@@ -150,15 +148,7 @@ impl WealthPoller {
             Ok(token) => Ok(token),
             Err(TokenError::NeedsRelogin) => {
                 // Make it due again, so it is polled right after it logged in.
-                let _ = sqlx::query(
-                    "UPDATE wealth_sync SET next_poll_at = LEAST(next_poll_at, $3)
-                     WHERE character_id = $1 AND kind = $2",
-                )
-                .bind(character_id)
-                .bind(kind.as_str())
-                .bind(now)
-                .execute(&self.pool)
-                .await;
+                let _ = self.wealth.make_due(character_id, kind, now).await;
                 Err(PollOutcome::NeedsRelogin)
             }
             Err(TokenError::UnknownCharacter) => Err(PollOutcome::Dropped),
@@ -201,7 +191,7 @@ impl WealthPoller {
                             .flat_map(|a| [Some(a.type_id), tops[&a.item_id]])
                             .flatten()
                             .collect();
-                        names::resolve(&self.pool, &self.esi, &token, wanted, now).await;
+                        names::resolve(&*self.market, &self.esi, &token, wanted, now).await;
                         wealth(PollOutcome::Updated)
                     }
                     Err(e) => wealth(self.store_failed(character_id, kind, now, e).await),
@@ -223,7 +213,7 @@ impl WealthPoller {
         token: &SecretString,
     ) -> (PollOutcome, Vec<Event>) {
         let kind = Kind::Transactions;
-        let full_read = match self.full_read(character_id).await {
+        let full_read = match self.wealth.full_read(character_id).await {
             Ok(full_read) => full_read,
             Err(e) => {
                 return (
@@ -254,7 +244,7 @@ impl WealthPoller {
                     .filter(|t| t.is_personal)
                     .flat_map(|t| [t.type_id, t.location_id])
                     .collect();
-                names::resolve(&self.pool, &self.esi, token, wanted, now).await;
+                names::resolve(&*self.market, &self.esi, token, wanted, now).await;
                 let mut signals = Vec::new();
                 if stored.purchases + stored.sales > 0 {
                     signals.push(Event::TradesUpdated);
@@ -273,16 +263,6 @@ impl WealthPoller {
 
     /// Whether the next transactions poll must read the whole window of ESI, ignoring what is
     /// stored. Set once for the characters that existed before sales were kept.
-    async fn full_read(&self, character_id: i64) -> Result<bool, sqlx::Error> {
-        let flag: Option<bool> = sqlx::query_scalar(
-            "SELECT full_read FROM wealth_sync WHERE character_id = $1 AND kind = 'transactions'",
-        )
-        .bind(character_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(flag.unwrap_or(false))
-    }
-
     async fn fetch_transactions(
         &self,
         character_id: i64,
@@ -305,15 +285,12 @@ impl WealthPoller {
                     expires_at,
                 });
             };
-            let known: bool = !full_read
-                && sqlx::query_scalar(
-                    "SELECT EXISTS (SELECT 1 FROM purchases WHERE transaction_id = ANY($1))
-                         OR EXISTS (SELECT 1 FROM sales WHERE transaction_id = ANY($1))",
-                )
-                .bind(&ids)
-                .fetch_one(&self.pool)
-                .await
-                .map_err(|e| EsiError::Temporary(format!("database error: {e}")))?;
+            let known = !full_read
+                && self
+                    .wealth
+                    .any_transaction_stored(&ids)
+                    .await
+                    .map_err(|e| EsiError::Temporary(format!("database error: {e}")))?;
             if known {
                 return Ok(Fetched {
                     transactions,
@@ -344,81 +321,29 @@ impl WealthPoller {
         character_id: i64,
         polled_at: OffsetDateTime,
         fetched: &Fetched,
-    ) -> Result<Stored, sqlx::Error> {
-        let mut tx = self.pool.begin().await?;
-        let mut purchase_types = Self::insert_transactions(
-            &mut tx,
-            character_id,
-            fetched,
-            true,
-            "purchases",
-            "bought_at",
-        )
-        .await?;
-        let mut sale_types =
-            Self::insert_transactions(&mut tx, character_id, fetched, false, "sales", "sold_at")
-                .await?;
-        let stored = Stored {
-            purchases: purchase_types.len(),
-            sales: sale_types.len(),
-        };
-        purchase_types.append(&mut sale_types);
-        purchase_types.sort_unstable();
-        purchase_types.dedup();
-        crate::trade::recompute(&mut tx, character_id, &purchase_types).await?;
-        self.record_success(
-            &mut tx,
-            character_id,
-            Kind::Transactions,
-            polled_at,
-            fetched.expires_at,
-        )
-        .await?;
-        tx.commit().await?;
-        Ok(stored)
+    ) -> Result<Stored, StoreError> {
+        let (purchases, sales) = self
+            .wealth
+            .store_transactions(
+                character_id,
+                polled_at,
+                &fetched.transactions,
+                self.next_poll_at(Kind::Transactions, polled_at, fetched.expires_at),
+                fetched.expires_at,
+            )
+            .await?;
+        Ok(Stored { purchases, sales })
     }
 
-    /// Inserts the personal purchases (`buys`) or sales among the fetched transactions that are not
-    /// stored yet. Returns the item type of each new row.
-    async fn insert_transactions(
-        tx: &mut sqlx::PgConnection,
-        character_id: i64,
-        fetched: &Fetched,
-        buys: bool,
-        table: &'static str,
-        date_column: &'static str,
-    ) -> Result<Vec<i64>, sqlx::Error> {
-        let rows: Vec<&EsiTransaction> = fetched
-            .transactions
-            .iter()
-            .filter(|t| t.is_buy == buys && t.is_personal)
-            .collect();
-        let ids: Vec<i64> = rows.iter().map(|t| t.transaction_id).collect();
-        let types: Vec<i64> = rows.iter().map(|t| t.type_id).collect();
-        let locations: Vec<i64> = rows.iter().map(|t| t.location_id).collect();
-        let quantities: Vec<i64> = rows.iter().map(|t| t.quantity).collect();
-        let prices: Vec<i64> = rows.iter().map(|t| t.unit_price_cents).collect();
-        let dates: Vec<OffsetDateTime> = rows.iter().map(|t| t.bought_at).collect();
-        // Both tables differ only in the name of the date column.
-        sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-            "INSERT INTO {table}
-                 (transaction_id, character_id, type_id, location_id, quantity, unit_price, {date_column})
-             SELECT p.id, $1, p.type_id, p.location_id, p.quantity, p.price_cents::numeric / 100, p.at
-             FROM unnest($2::bigint[], $3::bigint[], $4::bigint[], $5::bigint[], $6::bigint[],
-                         $7::timestamptz[])
-                  AS p(id, type_id, location_id, quantity, price_cents, at)
-             ON CONFLICT (transaction_id) DO NOTHING
-             RETURNING type_id"
-        )))
-        .bind(character_id)
-        .bind(&ids)
-        .bind(&types)
-        .bind(&locations)
-        .bind(&quantities)
-        .bind(&prices)
-        .bind(&dates)
-        .fetch_all(tx)
-        .await
+    /// `max(polled_at + interval, ESI's Expires)`, pushed back by a little jitter.
+    fn next_poll_at(
+        &self,
+        kind: Kind,
+        polled_at: OffsetDateTime,
+        expires_at: Option<OffsetDateTime>,
+    ) -> OffsetDateTime {
+        let interval = kind.interval(self.interval);
+        (polled_at + interval).max(expires_at.unwrap_or(polled_at)) + jitter(interval)
     }
 
     async fn esi_failed(
@@ -444,7 +369,7 @@ impl WealthPoller {
         character_id: i64,
         kind: Kind,
         now: OffsetDateTime,
-        error: sqlx::Error,
+        error: StoreError,
     ) -> PollOutcome {
         if is_foreign_key_violation(&error) {
             tracing::info!(character_id, "character was unlinked during its poll");
@@ -461,27 +386,16 @@ impl WealthPoller {
         character_id: i64,
         polled_at: OffsetDateTime,
         response: &EsiResponse<i64>,
-    ) -> Result<(), sqlx::Error> {
-        let mut tx = self.pool.begin().await?;
-        sqlx::query(
-            "INSERT INTO wallet_balances (character_id, polled_at, balance)
-             VALUES ($1, $2, $3::numeric / 100)
-             ON CONFLICT (character_id, polled_at) DO UPDATE SET balance = excluded.balance",
-        )
-        .bind(character_id)
-        .bind(polled_at)
-        .bind(response.body)
-        .execute(&mut *tx)
-        .await?;
-        self.record_success(
-            &mut tx,
-            character_id,
-            Kind::Wallet,
-            polled_at,
-            response.expires_at,
-        )
-        .await?;
-        tx.commit().await
+    ) -> Result<(), StoreError> {
+        self.wealth
+            .store_wallet(
+                character_id,
+                polled_at,
+                response.body,
+                self.next_poll_at(Kind::Wallet, polled_at, response.expires_at),
+                response.expires_at,
+            )
+            .await
     }
 
     /// Replaces the character's assets with what ESI returned, records the inventory value from
@@ -491,122 +405,19 @@ impl WealthPoller {
         character_id: i64,
         polled_at: OffsetDateTime,
         response: &EsiResponse<Vec<EsiAsset>>,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), StoreError> {
         let tops = top_locations(&response.body);
-        let item_id: Vec<i64> = response.body.iter().map(|a| a.item_id).collect();
-        let type_id: Vec<i64> = response.body.iter().map(|a| a.type_id).collect();
-        let location_id: Vec<i64> = response.body.iter().map(|a| a.location_id).collect();
-        let location_type: Vec<&str> = response
-            .body
-            .iter()
-            .map(|a| a.location_type.as_str())
-            .collect();
-        let location_flag: Vec<&str> = response
-            .body
-            .iter()
-            .map(|a| a.location_flag.as_str())
-            .collect();
-        let quantity: Vec<i64> = response.body.iter().map(|a| a.quantity).collect();
-        let singleton: Vec<bool> = response.body.iter().map(|a| a.is_singleton).collect();
-        let copy: Vec<bool> = response.body.iter().map(|a| a.is_blueprint_copy).collect();
         let top: Vec<Option<i64>> = response.body.iter().map(|a| tops[&a.item_id]).collect();
-
-        let mut tx = self.pool.begin().await?;
-        sqlx::query("DELETE FROM current_assets WHERE character_id = $1")
-            .bind(character_id)
-            .execute(&mut *tx)
-            .await?;
-        // An item that changed hands may still be on its previous owner's list: it moves.
-        sqlx::query(
-            "INSERT INTO current_assets
-                 (item_id, character_id, type_id, location_id, location_type, location_flag,
-                  quantity, is_singleton, is_blueprint_copy, top_location_id)
-             SELECT a.item_id, $1, a.type_id, a.location_id, a.location_type, a.location_flag,
-                    a.quantity, a.is_singleton, a.is_blueprint_copy, a.top_location_id
-             FROM unnest($2::bigint[], $3::bigint[], $4::bigint[], $5::text[], $6::text[],
-                         $7::bigint[], $8::bool[], $9::bool[], $10::bigint[])
-                  AS a(item_id, type_id, location_id, location_type, location_flag, quantity,
-                       is_singleton, is_blueprint_copy, top_location_id)
-             ON CONFLICT (item_id) DO UPDATE SET
-                 character_id = excluded.character_id,
-                 type_id = excluded.type_id,
-                 location_id = excluded.location_id,
-                 location_type = excluded.location_type,
-                 location_flag = excluded.location_flag,
-                 quantity = excluded.quantity,
-                 is_singleton = excluded.is_singleton,
-                 is_blueprint_copy = excluded.is_blueprint_copy,
-                 top_location_id = excluded.top_location_id",
-        )
-        .bind(character_id)
-        .bind(&item_id)
-        .bind(&type_id)
-        .bind(&location_id)
-        .bind(&location_type)
-        .bind(&location_flag)
-        .bind(&quantity)
-        .bind(&singleton)
-        .bind(&copy)
-        .bind(&top)
-        .execute(&mut *tx)
-        .await?;
-        // Two entries in the same instant keep the later one.
-        let entry = format!(
-            "INSERT INTO inventory_values (character_id, recorded_at, value)
-             SELECT $1, $2, {INVENTORY_VALUE_SUM}
-             FROM current_assets a LEFT JOIN item_prices p USING (type_id)
-             WHERE a.character_id = $1
-             ON CONFLICT (character_id, recorded_at) DO UPDATE SET value = excluded.value"
-        );
-        sqlx::query(sqlx::AssertSqlSafe(entry))
-            .bind(character_id)
-            .bind(polled_at)
-            .execute(&mut *tx)
-            .await?;
-        self.record_success(
-            &mut tx,
-            character_id,
-            Kind::Assets,
-            polled_at,
-            response.expires_at,
-        )
-        .await?;
-        tx.commit().await
-    }
-
-    async fn record_success(
-        &self,
-        tx: &mut sqlx::PgConnection,
-        character_id: i64,
-        kind: Kind,
-        polled_at: OffsetDateTime,
-        expires_at: Option<OffsetDateTime>,
-    ) -> Result<(), sqlx::Error> {
-        let interval = kind.interval(self.interval);
-        let next_poll_at =
-            (polled_at + interval).max(expires_at.unwrap_or(polled_at)) + jitter(interval);
-        sqlx::query(
-            "INSERT INTO wealth_sync
-                 (character_id, kind, next_poll_at, last_success_at, last_attempt_at, last_error,
-                  esi_expires_at, failures)
-             VALUES ($1, $2, $3, $4, $4, NULL, $5, 0)
-             ON CONFLICT (character_id, kind) DO UPDATE SET
-                 next_poll_at = excluded.next_poll_at,
-                 last_success_at = excluded.last_success_at,
-                 last_attempt_at = excluded.last_attempt_at,
-                 last_error = NULL,
-                 esi_expires_at = excluded.esi_expires_at,
-                 failures = 0,
-                 full_read = false",
-        )
-        .bind(character_id)
-        .bind(kind.as_str())
-        .bind(next_poll_at)
-        .bind(polled_at)
-        .bind(expires_at)
-        .execute(tx)
-        .await?;
-        Ok(())
+        self.wealth
+            .store_assets(
+                character_id,
+                polled_at,
+                &response.body,
+                &top,
+                self.next_poll_at(Kind::Assets, polled_at, response.expires_at),
+                response.expires_at,
+            )
+            .await
     }
 
     async fn record_failure(
@@ -622,26 +433,10 @@ impl WealthPoller {
             "wealth poll failed: {reason}"
         );
         let interval = kind.interval(self.interval);
-        let result = sqlx::query(
-            "INSERT INTO wealth_sync (character_id, kind, next_poll_at, last_attempt_at, last_error, failures)
-             VALUES ($1, $2, $3, $4, $5, 1)
-             ON CONFLICT (character_id, kind) DO UPDATE SET
-                 next_poll_at = $4 + LEAST(
-                     $6::float8 * power(2, LEAST(wealth_sync.failures, 20)) * interval '1 second',
-                     $7::float8 * interval '1 second'),
-                 last_attempt_at = $4,
-                 last_error = $5,
-                 failures = wealth_sync.failures + 1",
-        )
-        .bind(character_id)
-        .bind(kind.as_str())
-        .bind(now + BACKOFF_START.min(interval))
-        .bind(now)
-        .bind(reason)
-        .bind(BACKOFF_START.as_seconds_f64())
-        .bind(interval.as_seconds_f64())
-        .execute(&self.pool)
-        .await;
+        let result = self
+            .wealth
+            .record_failure(character_id, kind, now, reason, BACKOFF_START, interval)
+            .await;
         match result {
             Ok(_) => PollOutcome::Failed,
             Err(e) if is_foreign_key_violation(&e) => PollOutcome::Dropped,
@@ -659,19 +454,15 @@ impl WealthPoller {
         now: OffsetDateTime,
         until: OffsetDateTime,
     ) -> PollOutcome {
-        let result = sqlx::query(
-            "INSERT INTO wealth_sync (character_id, kind, next_poll_at, last_attempt_at)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT (character_id, kind) DO UPDATE SET
-                 next_poll_at = excluded.next_poll_at,
-                 last_attempt_at = excluded.last_attempt_at",
-        )
-        .bind(character_id)
-        .bind(kind.as_str())
-        .bind(until + jitter(kind.interval(self.interval)))
-        .bind(now)
-        .execute(&self.pool)
-        .await;
+        let result = self
+            .wealth
+            .record_deferral(
+                character_id,
+                kind,
+                now,
+                until + jitter(kind.interval(self.interval)),
+            )
+            .await;
         match result {
             Err(e) if is_foreign_key_violation(&e) => PollOutcome::Dropped,
             Err(e) => {
@@ -758,17 +549,9 @@ impl WealthPoller {
 
     /// Gives every character and kind without a schedule a first poll time inside the next
     /// interval, spread by the character and the kind.
-    async fn schedule_new(&self, now: OffsetDateTime) -> Result<(), sqlx::Error> {
+    async fn schedule_new(&self, now: OffsetDateTime) -> Result<(), StoreError> {
         for kind in Kind::ALL {
-            let unscheduled: Vec<i64> = sqlx::query_scalar(
-                "SELECT c.character_id FROM characters c
-                 WHERE NOT c.needs_relogin
-                   AND NOT EXISTS (SELECT 1 FROM wealth_sync s
-                                   WHERE s.character_id = c.character_id AND s.kind = $1)",
-            )
-            .bind(kind.as_str())
-            .fetch_all(&self.pool)
-            .await?;
+            let unscheduled = self.wealth.list_unscheduled(kind).await?;
             if unscheduled.is_empty() {
                 continue;
             }
@@ -781,43 +564,19 @@ impl WealthPoller {
                     now + spread(&key, interval)
                 })
                 .collect();
-            sqlx::query(
-                "INSERT INTO wealth_sync (character_id, kind, next_poll_at)
-                 SELECT c, $1, t FROM unnest($2::bigint[], $3::timestamptz[]) AS u(c, t)
-                 ON CONFLICT (character_id, kind) DO NOTHING",
-            )
-            .bind(kind.as_str())
-            .bind(&unscheduled)
-            .bind(&times)
-            .execute(&self.pool)
-            .await?;
+            self.wealth
+                .insert_schedule(kind, &unscheduled, &times)
+                .await?;
         }
         Ok(())
     }
 
     /// Takes the due pairs of characters that do not need a re-login. They are pushed back by a
     /// lease, so neither this nor another tick takes them again while their poll runs.
-    async fn claim_due(&self, now: OffsetDateTime) -> Result<Vec<(i64, Kind)>, sqlx::Error> {
-        let claimed: Vec<(i64, String)> = sqlx::query_as(
-            "UPDATE wealth_sync w SET next_poll_at = $1 + $2::float8 * interval '1 second'
-             WHERE (w.character_id, w.kind) IN (
-                 SELECT s.character_id, s.kind FROM wealth_sync s
-                 JOIN characters c USING (character_id)
-                 WHERE NOT c.needs_relogin AND s.next_poll_at <= $1
-                 ORDER BY s.next_poll_at
-                 LIMIT $3
-                 FOR UPDATE OF s SKIP LOCKED)
-             RETURNING w.character_id, w.kind",
-        )
-        .bind(now)
-        .bind(CLAIM_LEASE.as_seconds_f64())
-        .bind((self.concurrency * 8) as i64)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(claimed
-            .into_iter()
-            .filter_map(|(id, kind)| Kind::parse(&kind).map(|kind| (id, kind)))
-            .collect())
+    async fn claim_due(&self, now: OffsetDateTime) -> Result<Vec<(i64, Kind)>, StoreError> {
+        self.wealth
+            .claim_due(now, CLAIM_LEASE, (self.concurrency * 8) as i64)
+            .await
     }
 }
 

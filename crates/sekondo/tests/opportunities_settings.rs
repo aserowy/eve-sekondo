@@ -1,7 +1,7 @@
 mod common;
 
 use common::{AppBuilder, Browser, TestApp};
-use sqlx::PgPool;
+use sekondo::opportunities::settings::Settings;
 
 const ALICE: i64 = 90000001;
 const BOB: i64 = 90000002;
@@ -67,33 +67,57 @@ const VALID: [(&str, &str); 4] = [
     ("capital", "100000000"),
 ];
 
-async fn stored(pool: &PgPool) -> Vec<(String, String, String, String)> {
-    sqlx::query_as(
-        "SELECT min_margin::text, min_isk_per_day::text, search, capital::text
-         FROM opportunity_settings ORDER BY account_id",
-    )
-    .fetch_all(pool)
-    .await
-    .unwrap()
+async fn stored(app: &TestApp) -> Vec<Settings> {
+    let mut all = Vec::new();
+    for account in app.stores.accounts.account_ids().await.unwrap() {
+        all.extend(
+            app.stores
+                .opportunities
+                .load_settings(account)
+                .await
+                .unwrap(),
+        );
+    }
+    all
 }
 
 /// An item that passes the shared rules: a price of 100 to 130, calm, with a huge volume.
-async fn item(pool: &PgPool, type_id: i64, name: &str, volume: f64) {
-    sqlx::query(
-        "INSERT INTO station_item_stats
-             (region_id, station_id, type_id, book_at, best_buy, best_sell, buy_near_orders,
-              sell_near_orders, rho, indicators_at, volume_7d, volume_30d, sigma, returns)
-         VALUES (10000002, 60003760, $1, now(), 100, 130, 0, 0, 0.5, now(), $2, $2, 0.02, 29)",
-    )
-    .bind(type_id)
-    .bind(volume)
-    .execute(pool)
-    .await
-    .unwrap();
-    sqlx::query("INSERT INTO names (id, category, name, resolved_at) VALUES ($1, 'inventory_type', $2, now())")
-        .bind(type_id)
-        .bind(name)
-        .execute(pool)
+async fn item(app: &TestApp, type_id: i64, name: &str, volume: f64) {
+    let now = time::OffsetDateTime::now_utc();
+    app.stores
+        .station
+        .seed_item_stats(
+            10000002,
+            60003760,
+            type_id,
+            &sekondo::store::ItemStatsRecord {
+                book_at: Some(now),
+                best_buy: Some("100".to_owned()),
+                best_sell: Some("130".to_owned()),
+                buy_near_orders: Some(0),
+                sell_near_orders: Some(0),
+                rho: Some(0.5),
+                indicators_at: Some(now),
+                volume_7d: Some(volume),
+                volume_30d: Some(volume),
+                sigma: Some(0.02),
+                returns: Some(29),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    app.stores
+        .market
+        .store_names(
+            &[sekondo::store::NameRow {
+                id: type_id,
+                category: "inventory_type".to_owned(),
+                name: Some(name.to_owned()),
+            }],
+            now,
+            None,
+        )
         .await
         .unwrap();
 }
@@ -111,9 +135,9 @@ fn rows(html: &str, table: &str) -> Vec<i64> {
         .collect()
 }
 
-#[sqlx::test]
-async fn a_first_visit_shows_the_default_filters(pool: PgPool) {
-    let app = AppBuilder::new(pool).with_stub().spawn().await;
+#[tokio::test]
+async fn a_first_visit_shows_the_default_filters() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let browser = signed_in(&app, ALICE).await;
 
     let html = browser
@@ -140,12 +164,12 @@ async fn a_first_visit_shows_the_default_filters(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
-async fn saving_stores_the_settings_per_account_and_answers_the_tables(pool: PgPool) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+#[tokio::test]
+async fn saving_stores_the_settings_per_account_and_answers_the_tables() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let browser = signed_in(&app, ALICE).await;
     let token = csrf_token(&app, &browser).await;
-    item(&pool, 34, "Tritanium", 100_000_000.0).await;
+    item(&app, 34, "Tritanium", 100_000_000.0).await;
 
     let res = save(
         &app,
@@ -171,19 +195,19 @@ async fn saving_stores_the_settings_per_account_and_answers_the_tables(pool: PgP
         "{html}"
     );
     assert_eq!(
-        stored(&pool).await,
-        [(
-            "0.075".to_owned(),
-            "10000000".to_owned(),
-            "trit".to_owned(),
-            "2000000000".to_owned()
-        )]
+        stored(&app).await,
+        [Settings {
+            min_margin: 0.075,
+            min_isk_per_day: 10_000_000.0,
+            search: "trit".to_owned(),
+            capital: 2_000_000_000.0,
+        }]
     );
 }
 
-#[sqlx::test]
-async fn the_stored_settings_are_what_the_page_shows_after_signing_in_again(pool: PgPool) {
-    let app = AppBuilder::new(pool).with_stub().spawn().await;
+#[tokio::test]
+async fn the_stored_settings_are_what_the_page_shows_after_signing_in_again() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let browser = signed_in(&app, ALICE).await;
     let token = csrf_token(&app, &browser).await;
     save(
@@ -220,16 +244,16 @@ async fn the_stored_settings_are_what_the_page_shows_after_signing_in_again(pool
     }
 }
 
-#[sqlx::test]
-async fn a_capital_of_zero_is_rejected_with_a_message_and_the_stored_settings_stay(pool: PgPool) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+#[tokio::test]
+async fn a_capital_of_zero_is_rejected_with_a_message_and_the_stored_settings_stay() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let browser = signed_in(&app, ALICE).await;
     let token = csrf_token(&app, &browser).await;
     assert_eq!(
         save(&app, &browser, Some(&token), &VALID).await.status(),
         200
     );
-    let before = stored(&pool).await;
+    let before = stored(&app).await;
 
     let res = save(
         &app,
@@ -258,12 +282,12 @@ async fn a_capital_of_zero_is_rejected_with_a_message_and_the_stored_settings_st
         !html.contains("<form") && !html.contains(r#"id="classic""#),
         "{html}"
     );
-    assert_eq!(stored(&pool).await, before);
+    assert_eq!(stored(&app).await, before);
 }
 
-#[sqlx::test]
-async fn invalid_values_never_reach_the_database(pool: PgPool) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+#[tokio::test]
+async fn invalid_values_never_reach_the_database() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let browser = signed_in(&app, ALICE).await;
     let token = csrf_token(&app, &browser).await;
 
@@ -281,12 +305,12 @@ async fn invalid_values_never_reach_the_database(pool: PgPool) {
         let res = save(&app, &browser, Some(&token), &pairs).await;
         assert_eq!(res.status(), 422, "{field}={value}");
     }
-    assert_eq!(stored(&pool).await, Vec::new());
+    assert_eq!(stored(&app).await, Vec::<Settings>::new());
 }
 
-#[sqlx::test]
-async fn saving_without_the_csrf_token_is_refused_and_stores_nothing(pool: PgPool) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+#[tokio::test]
+async fn saving_without_the_csrf_token_is_refused_and_stores_nothing() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let browser = signed_in(&app, ALICE).await;
 
     let without = save(&app, &browser, None, &VALID).await;
@@ -294,12 +318,12 @@ async fn saving_without_the_csrf_token_is_refused_and_stores_nothing(pool: PgPoo
 
     assert_eq!(without.status(), 403);
     assert_eq!(wrong.status(), 403);
-    assert_eq!(stored(&pool).await, Vec::new());
+    assert_eq!(stored(&app).await, Vec::<Settings>::new());
 }
 
-#[sqlx::test]
-async fn an_unauthenticated_post_is_refused(pool: PgPool) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+#[tokio::test]
+async fn an_unauthenticated_post_is_refused() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let anonymous = app.browser();
 
     let res = save(&app, &anonymous, Some("anything"), &VALID).await;
@@ -309,12 +333,12 @@ async fn an_unauthenticated_post_is_refused(pool: PgPool) {
         "{}",
         res.status()
     );
-    assert_eq!(stored(&pool).await, Vec::new());
+    assert_eq!(stored(&app).await, Vec::<Settings>::new());
 }
 
-#[sqlx::test]
-async fn one_accounts_settings_do_not_change_another_accounts(pool: PgPool) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+#[tokio::test]
+async fn one_accounts_settings_do_not_change_another_accounts() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let alice = signed_in(&app, ALICE).await;
     let bob = signed_in(&app, BOB).await;
     let alice_token = csrf_token(&app, &alice).await;
@@ -341,16 +365,16 @@ async fn one_accounts_settings_do_not_change_another_accounts(pool: PgPool) {
     assert!(html.contains(r#"name="min_margin" value="5""#), "{html}");
     assert!(html.contains(r#"name="capital" value="100000000""#));
     assert!(!html.contains("only-alice"));
-    assert_eq!(stored(&pool).await.len(), 1);
+    assert_eq!(stored(&app).await.len(), 1);
 }
 
-#[sqlx::test]
-async fn raising_the_capital_removes_an_item_that_can_no_longer_fill_in_time(pool: PgPool) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+#[tokio::test]
+async fn raising_the_capital_removes_an_item_that_can_no_longer_fill_in_time() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let browser = signed_in(&app, ALICE).await;
     let token = csrf_token(&app, &browser).await;
     // 10 million traded a day: fine for the default capital, far too slow for 2 billion.
-    item(&pool, 34, "Tritanium", 10_000_000.0).await;
+    item(&app, 34, "Tritanium", 10_000_000.0).await;
     let first = browser
         .get(&app.url("/opportunities/classic/content"))
         .await
@@ -376,13 +400,13 @@ async fn raising_the_capital_removes_an_item_that_can_no_longer_fill_in_time(poo
     assert_eq!(rows(&html, "classic"), Vec::<i64>::new());
 }
 
-#[sqlx::test]
-async fn the_name_search_narrows_every_table_without_regard_to_case(pool: PgPool) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+#[tokio::test]
+async fn the_name_search_narrows_every_table_without_regard_to_case() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let browser = signed_in(&app, ALICE).await;
     let token = csrf_token(&app, &browser).await;
-    item(&pool, 34, "Tritanium", 100_000_000.0).await;
-    item(&pool, 35, "Pyerite", 100_000_000.0).await;
+    item(&app, 34, "Tritanium", 100_000_000.0).await;
+    item(&app, 35, "Pyerite", 100_000_000.0).await;
 
     let res = save(
         &app,
@@ -409,13 +433,13 @@ async fn the_name_search_narrows_every_table_without_regard_to_case(pool: PgPool
     assert_eq!(rows(&page, "classic"), [35]);
 }
 
-#[sqlx::test]
-async fn the_answer_keeps_the_selection_and_the_sorting_of_the_view(pool: PgPool) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+#[tokio::test]
+async fn the_answer_keeps_the_selection_and_the_sorting_of_the_view() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let browser = signed_in(&app, ALICE).await;
     let token = csrf_token(&app, &browser).await;
-    item(&pool, 34, "Tritanium", 100_000_000.0).await;
-    item(&pool, 35, "Pyerite", 200_000_000.0).await;
+    item(&app, 34, "Tritanium", 100_000_000.0).await;
+    item(&app, 35, "Pyerite", 200_000_000.0).await;
     let mut pairs = VALID.to_vec();
     pairs.extend([("cs", "item"), ("cd", "desc")]);
 
@@ -429,13 +453,11 @@ async fn the_answer_keeps_the_selection_and_the_sorting_of_the_view(pool: PgPool
     );
 }
 
-#[sqlx::test]
-async fn the_live_content_answer_brings_the_context_and_the_sub_menu_but_leaves_the_error_text(
-    pool: PgPool,
-) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+#[tokio::test]
+async fn the_live_content_answer_brings_the_context_and_the_sub_menu_but_leaves_the_error_text() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let browser = signed_in(&app, ALICE).await;
-    item(&pool, 34, "Tritanium", 10_000_000.0).await;
+    item(&app, 34, "Tritanium", 10_000_000.0).await;
 
     let html = browser
         .get(&app.url("/opportunities/classic/content"))
@@ -459,9 +481,9 @@ async fn the_live_content_answer_brings_the_context_and_the_sub_menu_but_leaves_
     );
 }
 
-#[sqlx::test]
-async fn a_saved_filter_goes_back_to_the_first_page_in_the_address_bar(pool: PgPool) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+#[tokio::test]
+async fn a_saved_filter_goes_back_to_the_first_page_in_the_address_bar() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let browser = signed_in(&app, ALICE).await;
     let token = csrf_token(&app, &browser).await;
     let mut pairs = VALID.to_vec();

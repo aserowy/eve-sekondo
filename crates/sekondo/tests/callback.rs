@@ -10,10 +10,10 @@ use sekondo::{
     auth,
     config::SecretKey,
     crypto::TokenCipher,
+    fee_poller::Kind,
     repo::{CharacterUpsert, Repo},
 };
 use serde_json::json;
-use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 use tower_sessions::Session;
 use uuid::Uuid;
@@ -44,21 +44,16 @@ fn routes() -> Router<AppState> {
 
 struct Env {
     app: TestApp,
-    pool: PgPool,
     repo: Repo,
 }
 
-async fn env(pool: PgPool) -> Env {
-    let app = AppBuilder::new(pool.clone())
-        .routes(routes())
-        .with_stub()
-        .spawn()
-        .await;
+async fn env() -> Env {
+    let app = AppBuilder::new().routes(routes()).with_stub().spawn().await;
     let repo = Repo::new(
-        pool.clone(),
+        app.stores.accounts.clone(),
         TokenCipher::new(&SecretKey(common::ENCRYPTION_KEY)),
     );
-    Env { app, pool, repo }
+    Env { app, repo }
 }
 
 impl Env {
@@ -84,11 +79,20 @@ impl Env {
             .await
     }
 
+    /// How many accounts exist, or how many characters all accounts have.
     async fn count(&self, table: &str) -> i64 {
-        sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
-            .fetch_one(&self.pool)
-            .await
-            .unwrap()
+        let accounts = &self.app.stores.accounts;
+        match table {
+            "accounts" => accounts.account_count().await.unwrap(),
+            "characters" => {
+                let mut total = 0;
+                for account in accounts.account_ids().await.unwrap() {
+                    total += accounts.list_characters(account).await.unwrap().len() as i64;
+                }
+                total
+            }
+            other => panic!("no count of {other}"),
+        }
     }
 
     /// Links a character directly, with placeholder tokens, to set up existing state.
@@ -127,9 +131,9 @@ fn assert_redirects_to_dashboard(res: &reqwest::Response) {
 
 // ---- Sign in with EVE SSO ----
 
-#[sqlx::test]
-async fn brand_new_character_creates_an_account_and_signs_in(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn brand_new_character_creates_an_account_and_signs_in() {
+    let e = env().await;
     let browser = e.app.browser();
     let res = e.login(&browser, ALICE).await;
     assert_redirects_to_dashboard(&res);
@@ -154,9 +158,9 @@ async fn brand_new_character_creates_an_account_and_signs_in(pool: PgPool) {
     assert!(tokens.access_expires_at.unwrap() > OffsetDateTime::now_utc());
 }
 
-#[sqlx::test]
-async fn callback_with_a_mismatched_state_is_rejected(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn callback_with_a_mismatched_state_is_rejected() {
+    let e = env().await;
     let browser = e.app.browser();
     let res = browser
         .sso_round_trip_with(&e.app, "/auth/login", ALICE, |url| {
@@ -190,9 +194,9 @@ async fn callback_with_a_mismatched_state_is_rejected(pool: PgPool) {
     assert!(e.whoami(&browser).await.is_none());
 }
 
-#[sqlx::test]
-async fn callback_without_a_started_flow_is_rejected(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn callback_without_a_started_flow_is_rejected() {
+    let e = env().await;
     let res = e
         .app
         .browser()
@@ -202,9 +206,9 @@ async fn callback_without_a_started_flow_is_rejected(pool: PgPool) {
     assert_eq!(e.count("characters").await, 0);
 }
 
-#[sqlx::test]
-async fn state_is_single_use(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn state_is_single_use() {
+    let e = env().await;
     let browser = e.app.browser();
     let start = browser.get(&e.app.url("/auth/login")).await;
     let mut select = url::Url::parse(&Browser::location(&start)).unwrap();
@@ -224,9 +228,9 @@ async fn state_is_single_use(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn sso_error_or_cancellation_links_nothing(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn sso_error_or_cancellation_links_nothing() {
+    let e = env().await;
     let browser = e.app.browser();
     let res = browser
         .sso_round_trip_with(&e.app, "/auth/login", ALICE, |url| {
@@ -250,9 +254,9 @@ async fn sso_error_or_cancellation_links_nothing(pool: PgPool) {
     assert!(e.whoami(&browser).await.is_none());
 }
 
-#[sqlx::test]
-async fn an_invalid_access_token_is_rejected_and_nothing_is_stored(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn an_invalid_access_token_is_rejected_and_nothing_is_stored() {
+    let e = env().await;
     for options in [
         TokenOptions {
             expires_in_secs: Some(-3600),
@@ -276,9 +280,9 @@ async fn an_invalid_access_token_is_rejected_and_nothing_is_stored(pool: PgPool)
     }
 }
 
-#[sqlx::test]
-async fn a_login_that_lacks_required_scopes_is_rejected(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn a_login_that_lacks_required_scopes_is_rejected() {
+    let e = env().await;
     e.app
         .stub_control(
             "scopes",
@@ -297,9 +301,9 @@ async fn a_login_that_lacks_required_scopes_is_rejected(pool: PgPool) {
     assert_eq!(e.count("characters").await, 0);
 }
 
-#[sqlx::test]
-async fn an_sso_outage_during_login_links_nothing(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn an_sso_outage_during_login_links_nothing() {
+    let e = env().await;
     e.app.stub_control("fail-next-token", json!({})).await;
     let browser = e.app.browser();
     let res = e.login(&browser, ALICE).await;
@@ -311,9 +315,9 @@ async fn an_sso_outage_during_login_links_nothing(pool: PgPool) {
 
 // ---- Login resumes an existing account ----
 
-#[sqlx::test]
-async fn returning_character_signs_in_to_its_account_with_all_characters(pool: PgPool) {
-    let e = env(pool.clone()).await;
+#[tokio::test]
+async fn returning_character_signs_in_to_its_account_with_all_characters() {
+    let e = env().await;
     let account = e.repo.create_account().await.unwrap();
     for (id, owner) in [
         (ALICE, "owner-hash-90000001"),
@@ -322,11 +326,7 @@ async fn returning_character_signs_in_to_its_account_with_all_characters(pool: P
     ] {
         e.seed(account, id, owner).await;
     }
-    sqlx::query("UPDATE characters SET needs_relogin = true WHERE character_id = $1")
-        .bind(BOB)
-        .execute(&pool)
-        .await
-        .unwrap();
+    e.app.stores.accounts.mark_needs_relogin(BOB).await.unwrap();
 
     let browser = e.app.browser();
     assert_redirects_to_dashboard(&e.login(&browser, BOB).await);
@@ -346,9 +346,9 @@ async fn returning_character_signs_in_to_its_account_with_all_characters(pool: P
     assert_eq!(bob.name, "Bob Bravo", "the name is refreshed too");
 }
 
-#[sqlx::test]
-async fn logging_in_with_another_linked_character_returns_to_the_same_account(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn logging_in_with_another_linked_character_returns_to_the_same_account() {
+    let e = env().await;
     let first = e.app.browser();
     e.login(&first, ALICE).await;
     let account = e.whoami(&first).await.unwrap();
@@ -363,9 +363,9 @@ async fn logging_in_with_another_linked_character_returns_to_the_same_account(po
 
 // ---- Character ownership change ----
 
-#[sqlx::test]
-async fn a_transferred_character_leaves_the_old_account_and_starts_a_new_one(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn a_transferred_character_leaves_the_old_account_and_starts_a_new_one() {
+    let e = env().await;
     let old_account = e.repo.create_account().await.unwrap();
     e.seed(old_account, ALICE, "the-previous-owner").await;
     e.seed(old_account, BOB, "owner-hash-90000002").await;
@@ -396,34 +396,54 @@ async fn a_transferred_character_leaves_the_old_account_and_starts_a_new_one(poo
     assert_eq!(e.owner_hash_of(ALICE).await, "owner-hash-90000001");
 }
 
-#[sqlx::test]
-async fn a_transferred_character_leaves_no_fee_data_with_the_new_owner(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn a_transferred_character_leaves_no_fee_data_with_the_new_owner() {
+    let e = env().await;
     let old_account = e.repo.create_account().await.unwrap();
     e.seed(old_account, ALICE, "the-previous-owner").await;
-    for statement in [
-        "INSERT INTO character_skills (character_id, skill_id, active_level) VALUES ($1, 16622, 4)",
-        "INSERT INTO character_standings (character_id, from_id, from_type, standing) \
-         VALUES ($1, 1000035, 'npc_corp', 1.5)",
-        "INSERT INTO fee_sync (character_id, kind, next_poll_at) VALUES ($1, 'skills', now())",
-    ] {
-        sqlx::query(statement)
-            .bind(ALICE)
-            .execute(&e.pool)
-            .await
-            .unwrap();
-    }
+    let now = e.app.state.clock.now();
+    let fees = &e.app.stores.fees;
+    fees.store_skills(ALICE, &[16622], &[4], now, now, None)
+        .await
+        .unwrap();
+    fees.store_standings(
+        ALICE,
+        &[sekondo::store::StandingInput {
+            from_id: 1000035,
+            from_type: "npc_corp".to_owned(),
+            standing: "1.5".to_owned(),
+        }],
+        now,
+        now,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(fees.fee_sync(ALICE, Kind::Skills).await.unwrap().is_some());
 
-    e.login(&e.app.browser(), ALICE).await;
+    let browser = e.app.browser();
+    e.login(&browser, ALICE).await;
 
-    for table in ["character_skills", "character_standings", "fee_sync"] {
-        assert_eq!(e.count(table).await, 0, "{table}");
+    // What the new owner finds: no sync state, no skills and no standings, even towards a station
+    // whose owner is known.
+    fees.insert_station_owner(60003760, 1000035, now)
+        .await
+        .unwrap();
+    let account = e.whoami(&browser).await.unwrap();
+    for kind in Kind::ALL {
+        assert!(
+            fees.fee_sync(ALICE, kind).await.unwrap().is_none(),
+            "{kind:?}"
+        );
     }
+    let rows = fees.at_location(account, &[ALICE], 60003760).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].accounting, &rows[0].corp_standing), (None, &None));
 }
 
-#[sqlx::test]
-async fn a_transferred_last_character_deletes_the_old_account(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn a_transferred_last_character_deletes_the_old_account() {
+    let e = env().await;
     let old_account = e.repo.create_account().await.unwrap();
     e.seed(old_account, ALICE, "the-previous-owner").await;
 
@@ -433,9 +453,9 @@ async fn a_transferred_last_character_deletes_the_old_account(pool: PgPool) {
     assert_eq!(e.count("accounts").await, 1, "the emptied account is gone");
 }
 
-#[sqlx::test]
-async fn ownership_change_is_detected_through_the_stub_control(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn ownership_change_is_detected_through_the_stub_control() {
+    let e = env().await;
     let first = e.app.browser();
     e.login(&first, ALICE).await;
     let account = e.whoami(&first).await.unwrap();
@@ -458,9 +478,9 @@ async fn ownership_change_is_detected_through_the_stub_control(pool: PgPool) {
 
 // ---- Add character to the current account ----
 
-#[sqlx::test]
-async fn adding_a_second_character_keeps_the_session_and_account(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn adding_a_second_character_keeps_the_session_and_account() {
+    let e = env().await;
     let browser = e.app.browser();
     e.login(&browser, ALICE).await;
     let account = e.whoami(&browser).await.unwrap();
@@ -485,9 +505,9 @@ async fn adding_a_second_character_keeps_the_session_and_account(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn adding_a_character_already_in_the_account_refreshes_it(pool: PgPool) {
-    let e = env(pool.clone()).await;
+#[tokio::test]
+async fn adding_a_character_already_in_the_account_refreshes_it() {
+    let e = env().await;
     let browser = e.app.browser();
     e.login(&browser, ALICE).await;
     let account = e.whoami(&browser).await.unwrap();
@@ -498,8 +518,10 @@ async fn adding_a_character_already_in_the_account_refreshes_it(pool: PgPool) {
         .unwrap()
         .unwrap()
         .refresh_token;
-    sqlx::query("UPDATE characters SET needs_relogin = true")
-        .execute(&pool)
+    e.app
+        .stores
+        .accounts
+        .mark_needs_relogin(ALICE)
         .await
         .unwrap();
 
@@ -532,9 +554,9 @@ async fn adding_a_character_already_in_the_account_refreshes_it(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn adding_a_character_of_another_account_is_rejected_with_a_message(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn adding_a_character_of_another_account_is_rejected_with_a_message() {
+    let e = env().await;
     let mine = e.app.browser();
     e.login(&mine, ALICE).await;
     let my_account = e.whoami(&mine).await.unwrap();
@@ -574,9 +596,9 @@ async fn adding_a_character_of_another_account_is_rejected_with_a_message(pool: 
 
 // ---- Sessions ----
 
-#[sqlx::test]
-async fn the_session_cookie_changes_on_login_and_the_old_one_stops_working(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn the_session_cookie_changes_on_login_and_the_old_one_stops_working() {
+    let e = env().await;
     let browser = e.app.browser();
     // A browser that already has a session (here: an anonymous one that also holds a CSRF token).
     browser.get(&e.app.url("/")).await;
@@ -593,9 +615,9 @@ async fn the_session_cookie_changes_on_login_and_the_old_one_stops_working(pool:
     assert!(e.whoami(&attacker).await.is_none());
 }
 
-#[sqlx::test]
-async fn login_while_a_fixated_session_exists_does_not_authenticate_the_old_cookie(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn login_while_a_fixated_session_exists_does_not_authenticate_the_old_cookie() {
+    let e = env().await;
     let victim = e.app.browser();
     victim.get(&e.app.url("/")).await;
     let planted = victim.cookie().unwrap();
@@ -611,9 +633,9 @@ async fn login_while_a_fixated_session_exists_does_not_authenticate_the_old_cook
     );
 }
 
-#[sqlx::test]
-async fn the_csrf_token_is_renewed_on_sign_in(pool: PgPool) {
-    let e = env(pool).await;
+#[tokio::test]
+async fn the_csrf_token_is_renewed_on_sign_in() {
+    let e = env().await;
     let browser = e.app.browser();
     let token = |body: String| {
         body.split(r#"<meta name="csrf-token" content=""#)

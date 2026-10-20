@@ -7,7 +7,6 @@ use sekondo::{
     selection::CharacterSelection,
 };
 use serde_json::{Value, json};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 const ALICE: i64 = 90000001;
@@ -65,14 +64,16 @@ async fn figures(env: &PollEnv, account: Uuid) -> Vec<CharacterFigures> {
         .map(|c| c.character_id)
         .collect();
     let selection = CharacterSelection::resolve(&ids, None);
-    dashboard::character_figures(&env.pool, account, &selection)
+    env.stores
+        .orders
+        .character_figures(account, selection.ids())
         .await
         .unwrap()
 }
 
-#[sqlx::test]
-async fn totals_add_up_the_orders_of_all_selected_characters(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn totals_add_up_the_orders_of_all_selected_characters() {
+    let env = PollEnv::new().await;
     let account = account_with(
         &env,
         &[
@@ -92,9 +93,9 @@ async fn totals_add_up_the_orders_of_all_selected_characters(pool: PgPool) {
     assert_eq!((totals.sell_count, totals.buy_count), (2, 1));
 }
 
-#[sqlx::test]
-async fn characters_without_orders_count_as_zero(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn characters_without_orders_count_as_zero() {
+    let env = PollEnv::new().await;
     let account = account_with(&env, &[(ALICE, vec![])]).await;
 
     let totals = Totals::of(&figures(&env, account).await);
@@ -110,9 +111,9 @@ async fn characters_without_orders_count_as_zero(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn orders_of_another_account_never_count(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn orders_of_another_account_never_count() {
+    let env = PollEnv::new().await;
     let mine = account_with(&env, &[(ALICE, vec![sell(1, 10.0, 1)])]).await;
     account_with(
         &env,
@@ -127,11 +128,9 @@ async fn orders_of_another_account_never_count(pool: PgPool) {
     assert_eq!(totals.escrow_cents, 0);
 }
 
-#[sqlx::test]
-async fn the_breakdown_lists_every_character_in_link_order_with_zeros_for_the_idle_ones(
-    pool: PgPool,
-) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn the_breakdown_lists_every_character_in_link_order_with_zeros_for_the_idle_ones() {
+    let env = PollEnv::new().await;
     let account = account_with(
         &env,
         &[
@@ -167,9 +166,9 @@ async fn the_breakdown_lists_every_character_in_link_order_with_zeros_for_the_id
     );
 }
 
-#[sqlx::test]
-async fn a_character_never_polled_still_gets_a_row(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn a_character_never_polled_still_gets_a_row() {
+    let env = PollEnv::new().await;
     let account = env.new_account().await;
     env.link(account, CAROL).await;
 
@@ -180,9 +179,9 @@ async fn a_character_never_polled_still_gets_a_row(pool: PgPool) {
     assert!(rows[0].freshness.last_success_at.is_none());
 }
 
-#[sqlx::test]
-async fn the_totals_equal_the_sums_of_the_rows(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn the_totals_equal_the_sums_of_the_rows() {
+    let env = PollEnv::new().await;
     let account = account_with(
         &env,
         &[
@@ -221,9 +220,9 @@ async fn the_totals_equal_the_sums_of_the_rows(pool: PgPool) {
     assert_eq!((totals.sell_cents, totals.escrow_cents), (2_886, 336));
 }
 
-#[sqlx::test]
-async fn a_buy_order_without_escrow_counts_as_zero_escrow_but_still_as_an_order(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn a_buy_order_without_escrow_counts_as_zero_escrow_but_still_as_an_order() {
+    let env = PollEnv::new().await;
     let account = account_with(&env, &[(ALICE, vec![buy(1, None), buy(2, Some(5.0))])]).await;
 
     let totals = Totals::of(&figures(&env, account).await);
@@ -237,9 +236,9 @@ fn corporation(mut order: Value) -> Value {
     order
 }
 
-#[sqlx::test]
-async fn corporation_sell_orders_count_in_the_total_and_in_their_share(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn corporation_sell_orders_count_in_the_total_and_in_their_share() {
+    let env = PollEnv::new().await;
     let account = account_with(
         &env,
         &[(
@@ -259,9 +258,9 @@ async fn corporation_sell_orders_count_in_the_total_and_in_their_share(pool: PgP
     assert_eq!(totals.sell_count, 2);
 }
 
-#[sqlx::test]
-async fn the_escrow_of_a_corporation_buy_order_is_its_own_share(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn the_escrow_of_a_corporation_buy_order_is_its_own_share() {
+    let env = PollEnv::new().await;
     let account = account_with(
         &env,
         &[(
@@ -278,9 +277,9 @@ async fn the_escrow_of_a_corporation_buy_order_is_its_own_share(pool: PgPool) {
     assert_eq!(totals.sell_corp_cents, 0);
 }
 
-#[sqlx::test]
-async fn without_corporation_orders_both_shares_are_zero(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn without_corporation_orders_both_shares_are_zero() {
+    let env = PollEnv::new().await;
     let account = account_with(&env, &[(ALICE, vec![sell(1, 5.0, 2), buy(2, Some(3.0))])]).await;
 
     let totals = Totals::of(&figures(&env, account).await);
@@ -288,9 +287,9 @@ async fn without_corporation_orders_both_shares_are_zero(pool: PgPool) {
     assert_eq!((totals.sell_corp_cents, totals.escrow_corp_cents), (0, 0));
 }
 
-#[sqlx::test]
-async fn a_character_needing_relogin_still_contributes_its_last_known_orders(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn a_character_needing_relogin_still_contributes_its_last_known_orders() {
+    let env = PollEnv::new().await;
     let account = account_with(&env, &[(ALICE, vec![sell(1, 10.0, 3)])]).await;
     env.repo.mark_needs_relogin(ALICE).await.unwrap();
 
@@ -317,7 +316,9 @@ async fn top(env: &PollEnv, account: Uuid, side: Side) -> Vec<(String, i64)> {
         .map(|c| c.character_id)
         .collect();
     let selection = CharacterSelection::resolve(&ids, None);
-    dashboard::top_items(&env.pool, account, &selection, side)
+    env.stores
+        .orders
+        .top_items(account, selection.ids(), side, dashboard::TOP_ITEMS)
         .await
         .unwrap()
         .into_iter()
@@ -325,9 +326,9 @@ async fn top(env: &PollEnv, account: Uuid, side: Side) -> Vec<(String, i64)> {
         .collect()
 }
 
-#[sqlx::test]
-async fn an_item_listed_by_two_characters_is_summed_into_one_bar(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn an_item_listed_by_two_characters_is_summed_into_one_bar() {
+    let env = PollEnv::new().await;
     let account = account_with(
         &env,
         &[
@@ -343,9 +344,9 @@ async fn an_item_listed_by_two_characters_is_summed_into_one_bar(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn only_the_ten_most_valuable_items_are_listed_highest_first(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn only_the_ten_most_valuable_items_are_listed_highest_first() {
+    let env = PollEnv::new().await;
     // Twelve items worth 1.00, 2.00 ... 12.00 ISK.
     let orders = (1..=12)
         .map(|n| of_type(sell(n, n as f64, 1), 100 + n))
@@ -359,9 +360,9 @@ async fn only_the_ten_most_valuable_items_are_listed_highest_first(pool: PgPool)
     assert_eq!(items.last(), Some(&("#103".to_owned(), 300)));
 }
 
-#[sqlx::test]
-async fn equal_figures_are_ordered_by_item_name(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn equal_figures_are_ordered_by_item_name() {
+    let env = PollEnv::new().await;
     let account = account_with(
         &env,
         &[(
@@ -383,9 +384,9 @@ async fn equal_figures_are_ordered_by_item_name(pool: PgPool) {
     assert_eq!(labels, vec!["Pyerite", "Tritanium"]);
 }
 
-#[sqlx::test]
-async fn an_item_without_a_resolved_name_is_labelled_with_its_type_id(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn an_item_without_a_resolved_name_is_labelled_with_its_type_id() {
+    let env = PollEnv::new().await;
     let account = account_with(&env, &[(ALICE, vec![of_type(sell(1, 5.0, 1), 999_999)])]).await;
 
     assert_eq!(
@@ -394,9 +395,9 @@ async fn an_item_without_a_resolved_name_is_labelled_with_its_type_id(pool: PgPo
     );
 }
 
-#[sqlx::test]
-async fn the_escrow_graph_ranks_buy_orders_and_ignores_sell_orders(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn the_escrow_graph_ranks_buy_orders_and_ignores_sell_orders() {
+    let env = PollEnv::new().await;
     let account = account_with(
         &env,
         &[(
@@ -416,9 +417,9 @@ async fn the_escrow_graph_ranks_buy_orders_and_ignores_sell_orders(pool: PgPool)
     );
 }
 
-#[sqlx::test]
-async fn orders_of_another_account_for_the_same_item_are_not_summed_in(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn orders_of_another_account_for_the_same_item_are_not_summed_in() {
+    let env = PollEnv::new().await;
     let mine = account_with(&env, &[(ALICE, vec![sell(1, 10.0, 1)])]).await;
     account_with(&env, &[(BOB, vec![sell(2, 1_000.0, 1)])]).await;
 
@@ -443,7 +444,9 @@ async fn history(env: &PollEnv, account: Uuid, range: Range) -> Vec<HistoryPoint
         .map(|c| c.character_id)
         .collect();
     let selection = CharacterSelection::resolve(&ids, None);
-    dashboard::history(&env.pool, account, &selection, range, env.clock.now())
+    env.stores
+        .orders
+        .history(account, selection.ids(), range, env.clock.now())
         .await
         .unwrap()
 }
@@ -465,9 +468,9 @@ fn shown_before(points: &[HistoryPoint], at: OffsetDateTime) -> &HistoryPoint {
         .unwrap_or_else(|| panic!("no point before {at}"))
 }
 
-#[sqlx::test]
-async fn the_series_has_one_point_per_bucket_ending_at_now(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn the_series_has_one_point_per_bucket_ending_at_now() {
+    let env = PollEnv::new().await;
     let account = account_with(&env, &[(ALICE, vec![])]).await;
 
     let points = history(&env, account, Range::Day).await;
@@ -485,9 +488,9 @@ async fn the_series_has_one_point_per_bucket_ending_at_now(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn the_value_develops_with_the_polls(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn the_value_develops_with_the_polls() {
+    let env = PollEnv::new().await;
     let account = env.new_account().await;
     env.link(account, ALICE).await;
     set_orders(&env, ALICE, vec![sell(1, 1_000_000.0, 10)]).await;
@@ -509,9 +512,9 @@ async fn the_value_develops_with_the_polls(pool: PgPool) {
     assert_eq!(points.last().unwrap().sell_cents, 1_500_000_000);
 }
 
-#[sqlx::test]
-async fn the_figures_drop_to_zero_when_all_orders_close(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn the_figures_drop_to_zero_when_all_orders_close() {
+    let env = PollEnv::new().await;
     let account = env.new_account().await;
     env.link(account, ALICE).await;
     set_orders(&env, ALICE, vec![sell(1, 10.0, 5), buy(2, Some(7.0))]).await;
@@ -551,9 +554,9 @@ async fn the_figures_drop_to_zero_when_all_orders_close(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn characters_polled_at_different_times_both_contribute_their_latest_figures(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn characters_polled_at_different_times_both_contribute_their_latest_figures() {
+    let env = PollEnv::new().await;
     let account = env.new_account().await;
     env.link(account, ALICE).await;
     env.link(account, BOB).await;
@@ -583,9 +586,9 @@ async fn characters_polled_at_different_times_both_contribute_their_latest_figur
     );
 }
 
-#[sqlx::test]
-async fn a_stale_character_is_carried_forward_to_now(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn a_stale_character_is_carried_forward_to_now() {
+    let env = PollEnv::new().await;
     let account = env.new_account().await;
     env.link(account, ALICE).await;
     set_orders(&env, ALICE, vec![sell(1, 5_000_000.0, 1)]).await;
@@ -603,9 +606,9 @@ async fn a_stale_character_is_carried_forward_to_now(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn without_any_poll_there_is_no_history(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn without_any_poll_there_is_no_history() {
+    let env = PollEnv::new().await;
     let account = env.new_account().await;
     env.link(account, ALICE).await;
 
@@ -619,9 +622,9 @@ async fn without_any_poll_there_is_no_history(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn a_poll_before_the_start_of_the_range_is_carried_in(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn a_poll_before_the_start_of_the_range_is_carried_in() {
+    let env = PollEnv::new().await;
     let account = env.new_account().await;
     env.link(account, ALICE).await;
     set_orders(&env, ALICE, vec![sell(1, 10.0, 3)]).await;
@@ -634,9 +637,9 @@ async fn a_poll_before_the_start_of_the_range_is_carried_in(pool: PgPool) {
     assert!(points.iter().all(|p| p.sell_cents == 3_000), "{points:?}");
 }
 
-#[sqlx::test]
-async fn the_last_point_equals_the_current_totals(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn the_last_point_equals_the_current_totals() {
+    let env = PollEnv::new().await;
     let account = account_with(
         &env,
         &[
@@ -672,9 +675,9 @@ async fn the_last_point_equals_the_current_totals(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn another_accounts_history_never_counts(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn another_accounts_history_never_counts() {
+    let env = PollEnv::new().await;
     let mine = account_with(&env, &[(ALICE, vec![sell(1, 10.0, 1)])]).await;
     account_with(&env, &[(BOB, vec![sell(2, 1_000.0, 1)])]).await;
 
@@ -685,9 +688,9 @@ async fn another_accounts_history_never_counts(pool: PgPool) {
 
 // ---- the page ----
 
-async fn app_at(pool: PgPool) -> (TestApp, std::sync::Arc<ManualClock>) {
+async fn app_at() -> (TestApp, std::sync::Arc<ManualClock>) {
     let clock = ManualClock::new();
-    let app = AppBuilder::new(pool)
+    let app = AppBuilder::new()
         .with_stub()
         .clock(clock.clone())
         .spawn()
@@ -738,11 +741,10 @@ fn breakdown_row(html: &str, character: i64) -> &str {
     between(html, &format!(r#"id="character-{character}""#), "</tr>")
 }
 
-#[sqlx::test]
-async fn the_dashboard_shows_the_totals_of_all_characters_shortened_with_the_exact_value_on_hover(
-    pool: PgPool,
-) {
-    let (app, _) = app_at(pool).await;
+#[tokio::test]
+async fn the_dashboard_shows_the_totals_of_all_characters_shortened_with_the_exact_value_on_hover()
+{
+    let (app, _) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[BOB]).await;
     stub_orders(
         &app,
@@ -772,9 +774,9 @@ async fn the_dashboard_shows_the_totals_of_all_characters_shortened_with_the_exa
     assert!(!html.to_lowercase().contains("coming"));
 }
 
-#[sqlx::test]
-async fn a_large_total_is_shortened_to_four_significant_digits(pool: PgPool) {
-    let (app, _) = app_at(pool).await;
+#[tokio::test]
+async fn a_large_total_is_shortened_to_four_significant_digits() {
+    let (app, _) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[]).await;
     stub_orders(&app, ALICE, vec![sell(1, 1_234_567_890.12, 1)]).await;
     app.state.poller.poll_character(ALICE).await;
@@ -789,9 +791,9 @@ async fn a_large_total_is_shortened_to_four_significant_digits(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn an_account_without_orders_shows_zeros(pool: PgPool) {
-    let (app, _) = app_at(pool).await;
+#[tokio::test]
+async fn an_account_without_orders_shows_zeros() {
+    let (app, _) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[]).await;
     stub_orders(&app, ALICE, vec![]).await;
     app.state.poller.poll_character(ALICE).await;
@@ -804,9 +806,9 @@ async fn an_account_without_orders_shows_zeros(pool: PgPool) {
     assert!(tile(&html, "tile-buy-count").contains(">0<"));
 }
 
-#[sqlx::test]
-async fn the_corporation_share_is_shown_only_when_there_is_one(pool: PgPool) {
-    let (app, _) = app_at(pool).await;
+#[tokio::test]
+async fn the_corporation_share_is_shown_only_when_there_is_one() {
+    let (app, _) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[]).await;
     stub_orders(
         &app,
@@ -839,9 +841,9 @@ async fn the_corporation_share_is_shown_only_when_there_is_one(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn the_breakdown_has_a_row_per_character_in_link_order_with_its_figures(pool: PgPool) {
-    let (app, _) = app_at(pool).await;
+#[tokio::test]
+async fn the_breakdown_has_a_row_per_character_in_link_order_with_its_figures() {
+    let (app, _) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[BOB]).await;
     stub_orders(
         &app,
@@ -870,9 +872,9 @@ async fn the_breakdown_has_a_row_per_character_in_link_order_with_its_figures(po
     assert!(html.find(r#"id="character-90000001""#) < html.find(r#"id="character-90000002""#));
 }
 
-#[sqlx::test]
-async fn a_freshly_polled_character_shows_its_times_in_eve_time_and_no_badge(pool: PgPool) {
-    let (app, clock) = app_at(pool).await;
+#[tokio::test]
+async fn a_freshly_polled_character_shows_its_times_in_eve_time_and_no_badge() {
+    let (app, clock) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[]).await;
     app.state.poller.poll_character(ALICE).await;
     let polled = clock.now();
@@ -889,9 +891,9 @@ async fn a_freshly_polled_character_shows_its_times_in_eve_time_and_no_badge(poo
     );
 }
 
-#[sqlx::test]
-async fn a_character_that_needs_relogin_is_stale_links_to_login_and_still_counts(pool: PgPool) {
-    let (app, _) = app_at(pool).await;
+#[tokio::test]
+async fn a_character_that_needs_relogin_is_stale_links_to_login_and_still_counts() {
+    let (app, _) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[]).await;
     stub_orders(&app, ALICE, vec![sell(1, 10.0, 3)]).await;
     app.state.poller.poll_character(ALICE).await;
@@ -913,9 +915,9 @@ async fn a_character_that_needs_relogin_is_stale_links_to_login_and_still_counts
     assert!(tile(&html, "tile-sell-value").contains(">30.00<"));
 }
 
-#[sqlx::test]
-async fn a_character_whose_last_poll_is_older_than_twice_the_interval_is_stale(pool: PgPool) {
-    let (app, clock) = app_at(pool).await;
+#[tokio::test]
+async fn a_character_whose_last_poll_is_older_than_twice_the_interval_is_stale() {
+    let (app, clock) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[]).await;
     app.state.poller.poll_character(ALICE).await;
 
@@ -932,9 +934,9 @@ async fn a_character_whose_last_poll_is_older_than_twice_the_interval_is_stale(p
     );
 }
 
-#[sqlx::test]
-async fn a_newly_linked_character_is_waiting_for_its_first_update(pool: PgPool) {
-    let (app, _) = app_at(pool).await;
+#[tokio::test]
+async fn a_newly_linked_character_is_waiting_for_its_first_update() {
+    let (app, _) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[]).await;
 
     let html = page(&app, &browser, "/dashboard").await;
@@ -943,11 +945,9 @@ async fn a_newly_linked_character_is_waiting_for_its_first_update(pool: PgPool) 
     assert!(row.contains("Waiting for first update"), "{row}");
 }
 
-#[sqlx::test]
-async fn the_summary_fragment_is_the_tiles_and_breakdown_without_the_page_around_them(
-    pool: PgPool,
-) {
-    let (app, _) = app_at(pool).await;
+#[tokio::test]
+async fn the_summary_fragment_is_the_tiles_and_breakdown_without_the_page_around_them() {
+    let (app, _) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[]).await;
     app.state.poller.poll_character(ALICE).await;
 
@@ -966,9 +966,9 @@ async fn the_summary_fragment_is_the_tiles_and_breakdown_without_the_page_around
     );
 }
 
-#[sqlx::test]
-async fn unauthenticated_requests_for_the_dashboard_go_to_the_landing_page(pool: PgPool) {
-    let (app, _) = app_at(pool).await;
+#[tokio::test]
+async fn unauthenticated_requests_for_the_dashboard_go_to_the_landing_page() {
+    let (app, _) = app_at().await;
     for path in ["/dashboard", "/dashboard/summary"] {
         let res = app.browser().get(&app.url(path)).await;
         assert!(res.status().is_redirection(), "{path}");
@@ -996,18 +996,29 @@ fn chart_series(html: &str, kind: &str) -> (String, Value) {
     (raw, parsed)
 }
 
-#[sqlx::test]
-async fn the_split_graph_holds_the_breakdown_figures_and_escapes_names(pool: PgPool) {
-    let (app, _) = app_at(pool.clone()).await;
+#[tokio::test]
+async fn the_split_graph_holds_the_breakdown_figures_and_escapes_names() {
+    let (app, _) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[BOB]).await;
     stub_orders(&app, ALICE, vec![sell(1, 1_000_000.0, 30)]).await;
     stub_orders(&app, BOB, vec![buy(2, Some(2_000_000.0))]).await;
     app.state.poller.poll_character(ALICE).await;
     app.state.poller.poll_character(BOB).await;
-    sqlx::query("UPDATE characters SET name = $1 WHERE character_id = $2")
-        .bind(r#"Eve "<b>" & Co"#)
-        .bind(BOB)
-        .execute(&pool)
+    let bob = app.state.repo.find_character(BOB).await.unwrap().unwrap();
+    app.state
+        .repo
+        .upsert_character(
+            bob.account_id,
+            &sekondo::repo::CharacterUpsert {
+                character_id: BOB,
+                name: r#"Eve "<b>" & Co"#.to_owned(),
+                owner_hash: bob.owner_hash,
+                scopes: bob.scopes,
+                refresh_token: secrecy::SecretString::from("renamed"),
+                access_token: secrecy::SecretString::from("renamed"),
+                access_expires_at: app.state.clock.now() + Duration::hours(1),
+            },
+        )
         .await
         .unwrap();
 
@@ -1030,9 +1041,9 @@ async fn the_split_graph_holds_the_breakdown_figures_and_escapes_names(pool: PgP
     assert_eq!(series["series"][1]["exact"][1], "2,000,000.00 ISK");
 }
 
-#[sqlx::test]
-async fn the_top_item_graphs_hold_the_ranked_items_with_exact_values(pool: PgPool) {
-    let (app, _) = app_at(pool).await;
+#[tokio::test]
+async fn the_top_item_graphs_hold_the_ranked_items_with_exact_values() {
+    let (app, _) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[BOB]).await;
     stub_orders(
         &app,
@@ -1064,9 +1075,9 @@ async fn the_top_item_graphs_hold_the_ranked_items_with_exact_values(pool: PgPoo
     assert_eq!(buy_top["series"][0]["cents"], json!([30_000]));
 }
 
-#[sqlx::test]
-async fn a_top_item_graph_without_orders_says_so_instead_of_drawing(pool: PgPool) {
-    let (app, _) = app_at(pool).await;
+#[tokio::test]
+async fn a_top_item_graph_without_orders_says_so_instead_of_drawing() {
+    let (app, _) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[]).await;
     stub_orders(&app, ALICE, vec![sell(1, 5.0, 1)]).await;
     app.state.poller.poll_character(ALICE).await;
@@ -1084,9 +1095,9 @@ async fn a_top_item_graph_without_orders_says_so_instead_of_drawing(pool: PgPool
     assert!(html.contains("No sell orders.") && !html.contains(r#"data-chart="top-sell""#));
 }
 
-#[sqlx::test]
-async fn the_history_graphs_hold_bucket_end_times_and_amounts_in_cents(pool: PgPool) {
-    let (app, clock) = app_at(pool).await;
+#[tokio::test]
+async fn the_history_graphs_hold_bucket_end_times_and_amounts_in_cents() {
+    let (app, clock) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[]).await;
     stub_orders(
         &app,
@@ -1162,9 +1173,9 @@ async fn the_history_graphs_hold_bucket_end_times_and_amounts_in_cents(pool: PgP
     );
 }
 
-#[sqlx::test]
-async fn the_history_graphs_say_when_there_is_no_history_yet(pool: PgPool) {
-    let (app, _) = app_at(pool).await;
+#[tokio::test]
+async fn the_history_graphs_say_when_there_is_no_history_yet() {
+    let (app, _) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[]).await;
 
     let html = page(&app, &browser, "/dashboard/summary").await;
@@ -1174,9 +1185,9 @@ async fn the_history_graphs_say_when_there_is_no_history_yet(pool: PgPool) {
     assert!(!html.contains(r#"data-chart="count-history""#));
 }
 
-#[sqlx::test]
-async fn the_history_graphs_describe_their_latest_values_for_screen_readers(pool: PgPool) {
-    let (app, _) = app_at(pool).await;
+#[tokio::test]
+async fn the_history_graphs_describe_their_latest_values_for_screen_readers() {
+    let (app, _) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[]).await;
     stub_orders(
         &app,
@@ -1236,8 +1247,8 @@ fn history_times(html: &str) -> Vec<i64> {
 }
 
 /// An app whose only character was polled an hour ago.
-async fn polled_app(pool: PgPool, others: &[i64]) -> (TestApp, Browser) {
-    let (app, clock) = app_at(pool).await;
+async fn polled_app(others: &[i64]) -> (TestApp, Browser) {
+    let (app, clock) = app_at().await;
     let browser = signed_in_with(&app, ALICE, others).await;
     stub_orders(&app, ALICE, vec![sell(1, 10.0, 5), buy(2, Some(7.0))]).await;
     app.state.poller.poll_character(ALICE).await;
@@ -1245,9 +1256,9 @@ async fn polled_app(pool: PgPool, others: &[i64]) -> (TestApp, Browser) {
     (app, browser)
 }
 
-#[sqlx::test]
-async fn without_a_range_the_control_marks_seven_days_and_the_graphs_cover_them(pool: PgPool) {
-    let (app, browser) = polled_app(pool, &[]).await;
+#[tokio::test]
+async fn without_a_range_the_control_marks_seven_days_and_the_graphs_cover_them() {
+    let (app, browser) = polled_app(&[]).await;
 
     let html = page(&app, &browser, "/dashboard").await;
 
@@ -1260,9 +1271,9 @@ async fn without_a_range_the_control_marks_seven_days_and_the_graphs_cover_them(
     assert!((84..=85).contains(&times.len()), "{}", times.len());
 }
 
-#[sqlx::test]
-async fn an_unknown_range_behaves_like_seven_days(pool: PgPool) {
-    let (app, browser) = polled_app(pool, &[]).await;
+#[tokio::test]
+async fn an_unknown_range_behaves_like_seven_days() {
+    let (app, browser) = polled_app(&[]).await;
 
     let html = page(&app, &browser, "/dashboard?range=1y").await;
 
@@ -1275,9 +1286,9 @@ async fn an_unknown_range_behaves_like_seven_days(pool: PgPool) {
     assert!((84..=85).contains(&history_times(&html).len()));
 }
 
-#[sqlx::test]
-async fn each_range_marks_itself_and_sets_the_bucket_width(pool: PgPool) {
-    let (app, browser) = polled_app(pool, &[]).await;
+#[tokio::test]
+async fn each_range_marks_itself_and_sets_the_bucket_width() {
+    let (app, browser) = polled_app(&[]).await;
 
     for (range, label, buckets) in [
         ("24h", "24 hours", 48..=49),
@@ -1296,9 +1307,9 @@ async fn each_range_marks_itself_and_sets_the_bucket_width(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
-async fn the_range_links_keep_the_selection_and_omit_the_default_range(pool: PgPool) {
-    let (app, browser) = polled_app(pool, &[BOB]).await;
+#[tokio::test]
+async fn the_range_links_keep_the_selection_and_omit_the_default_range() {
+    let (app, browser) = polled_app(&[BOB]).await;
 
     let summary = page(
         &app,
@@ -1344,9 +1355,9 @@ async fn the_range_links_keep_the_selection_and_omit_the_default_range(pool: PgP
     );
 }
 
-#[sqlx::test]
-async fn the_range_changes_only_the_over_time_graphs(pool: PgPool) {
-    let (app, browser) = polled_app(pool, &[]).await;
+#[tokio::test]
+async fn the_range_changes_only_the_over_time_graphs() {
+    let (app, browser) = polled_app(&[]).await;
 
     let week = page(&app, &browser, "/dashboard/summary").await;
     let quarter = page(&app, &browser, "/dashboard/summary?range=90d").await;
@@ -1367,8 +1378,8 @@ async fn the_range_changes_only_the_over_time_graphs(pool: PgPool) {
 
 // ---- the character filter ----
 
-async fn two_polled_characters(pool: PgPool) -> (TestApp, Browser) {
-    let (app, clock) = app_at(pool).await;
+async fn two_polled_characters() -> (TestApp, Browser) {
+    let (app, clock) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[BOB]).await;
     stub_orders(
         &app,
@@ -1383,9 +1394,9 @@ async fn two_polled_characters(pool: PgPool) -> (TestApp, Browser) {
     (app, browser)
 }
 
-#[sqlx::test]
-async fn a_selection_restricts_every_figure_and_graph_to_those_characters(pool: PgPool) {
-    let (app, browser) = two_polled_characters(pool).await;
+#[tokio::test]
+async fn a_selection_restricts_every_figure_and_graph_to_those_characters() {
+    let (app, browser) = two_polled_characters().await;
 
     let html = page(&app, &browser, &format!("/dashboard?chars={ALICE}")).await;
 
@@ -1412,9 +1423,9 @@ async fn a_selection_restricts_every_figure_and_graph_to_those_characters(pool: 
     );
 }
 
-#[sqlx::test]
-async fn a_foreign_character_id_falls_back_to_all_characters(pool: PgPool) {
-    let (app, browser) = two_polled_characters(pool).await;
+#[tokio::test]
+async fn a_foreign_character_id_falls_back_to_all_characters() {
+    let (app, browser) = two_polled_characters().await;
 
     let html = page(&app, &browser, &format!("/dashboard?chars={CAROL}")).await;
 
@@ -1424,11 +1435,9 @@ async fn a_foreign_character_id_falls_back_to_all_characters(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn the_filter_lists_every_character_with_the_selected_ones_checked_and_keeps_the_range(
-    pool: PgPool,
-) {
-    let (app, browser) = two_polled_characters(pool).await;
+#[tokio::test]
+async fn the_filter_lists_every_character_with_the_selected_ones_checked_and_keeps_the_range() {
+    let (app, browser) = two_polled_characters().await;
 
     let html = page(
         &app,
@@ -1462,9 +1471,9 @@ async fn the_filter_lists_every_character_with_the_selected_ones_checked_and_kee
     );
 }
 
-#[sqlx::test]
-async fn the_navigation_carries_the_selection_to_the_orders_page(pool: PgPool) {
-    let (app, browser) = two_polled_characters(pool).await;
+#[tokio::test]
+async fn the_navigation_carries_the_selection_to_the_orders_page() {
+    let (app, browser) = two_polled_characters().await;
 
     let html = page(
         &app,
@@ -1493,9 +1502,9 @@ async fn stub_wallet(app: &TestApp, character: i64, balance: f64) {
     assert_eq!(res.status(), 204);
 }
 
-#[sqlx::test]
-async fn the_wealth_tile_adds_up_everything_of_all_selected_characters(pool: PgPool) {
-    let (app, _) = app_at(pool).await;
+#[tokio::test]
+async fn the_wealth_tile_adds_up_everything_of_all_selected_characters() {
+    let (app, _) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[BOB]).await;
     // Alice: 200m wallet. Bob: 50m wallet, nothing else.
     stub_orders(&app, ALICE, vec![]).await;
@@ -1517,11 +1526,9 @@ async fn the_wealth_tile_adds_up_everything_of_all_selected_characters(pool: PgP
     assert!(tile(&alice, "tile-wealth").contains(">200m<"));
 }
 
-#[sqlx::test]
-async fn the_wealth_tile_counts_wallet_orders_escrow_and_inventory_but_not_corporation_orders(
-    pool: PgPool,
-) {
-    let (app, _) = app_at(pool.clone()).await;
+#[tokio::test]
+async fn the_wealth_tile_counts_wallet_orders_escrow_and_inventory_but_not_corporation_orders() {
+    let (app, _) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[]).await;
     let mut corp = sell(3, 40_000_000.0, 1);
     corp["is_corporation"] = json!(true);
@@ -1534,13 +1541,15 @@ async fn the_wealth_tile_counts_wallet_orders_escrow_and_inventory_but_not_corpo
     stub_wallet(&app, ALICE, 100_000_000.0).await;
     app.state.poller.poll_character(ALICE).await;
     app.state.wealth.poll(ALICE, Kind::Wallet).await;
-    sqlx::query(
-        "INSERT INTO inventory_values (character_id, recorded_at, value) VALUES ($1, now() - interval '1 minute', 50000000)",
-    )
-    .bind(ALICE)
-    .execute(&pool)
-    .await
-    .unwrap();
+    app.stores
+        .wealth
+        .seed_inventory_value(
+            ALICE,
+            time::OffsetDateTime::now_utc() - Duration::minutes(1),
+            5_000_000_000,
+        )
+        .await
+        .unwrap();
 
     let html = page(&app, &browser, "/dashboard").await;
 
@@ -1551,11 +1560,9 @@ async fn the_wealth_tile_counts_wallet_orders_escrow_and_inventory_but_not_corpo
     );
 }
 
-#[sqlx::test]
-async fn the_wealth_tile_links_to_the_wealth_page_with_the_selection_and_never_the_range(
-    pool: PgPool,
-) {
-    let (app, _) = app_at(pool).await;
+#[tokio::test]
+async fn the_wealth_tile_links_to_the_wealth_page_with_the_selection_and_never_the_range() {
+    let (app, _) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[BOB]).await;
 
     let narrowed = page(
@@ -1572,9 +1579,9 @@ async fn the_wealth_tile_links_to_the_wealth_page_with_the_selection_and_never_t
     assert!(tile(&all, "tile-wealth").contains(r#"href="/wealth""#));
 }
 
-#[sqlx::test]
-async fn a_character_without_any_figure_makes_a_wealth_of_zero(pool: PgPool) {
-    let (app, _) = app_at(pool).await;
+#[tokio::test]
+async fn a_character_without_any_figure_makes_a_wealth_of_zero() {
+    let (app, _) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[]).await;
 
     let html = page(&app, &browser, "/dashboard").await;
@@ -1584,11 +1591,9 @@ async fn a_character_without_any_figure_makes_a_wealth_of_zero(pool: PgPool) {
 
 // ---- the wealth line ----
 
-use sekondo::wealth;
-
-#[sqlx::test]
-async fn the_wealth_line_is_the_top_edge_of_the_wealth_stack_and_ends_at_the_tile(pool: PgPool) {
-    let (app, clock) = app_at(pool.clone()).await;
+#[tokio::test]
+async fn the_wealth_line_is_the_top_edge_of_the_wealth_stack_and_ends_at_the_tile() {
+    let (app, clock) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[BOB]).await;
     stub_orders(
         &app,
@@ -1604,14 +1609,11 @@ async fn the_wealth_line_is_the_top_edge_of_the_wealth_stack_and_ends_at_the_til
         app.state.poller.poll_character(id).await;
         app.state.wealth.poll(id, Kind::Wallet).await;
     }
-    sqlx::query(
-        "INSERT INTO inventory_values (character_id, recorded_at, value) VALUES ($1, $2, 7000000)",
-    )
-    .bind(ALICE)
-    .bind(clock.now() - Duration::minutes(30))
-    .execute(&pool)
-    .await
-    .unwrap();
+    app.stores
+        .wealth
+        .seed_inventory_value(ALICE, clock.now() - Duration::minutes(30), 700_000_000)
+        .await
+        .unwrap();
     clock.advance(Duration::minutes(10));
 
     let html = page(&app, &browser, "/dashboard?range=24h").await;
@@ -1636,7 +1638,10 @@ async fn the_wealth_line_is_the_top_edge_of_the_wealth_stack_and_ends_at_the_til
         .unwrap()
         .unwrap()
         .account_id;
-    let stack = wealth::history(&pool, account, &selection, Range::Day, clock.now())
+    let stack = app
+        .stores
+        .wealth
+        .history(account, selection.ids(), Range::Day, clock.now())
         .await
         .unwrap();
     let top: Vec<i64> = stack.iter().map(|p| p.total_cents()).collect();
@@ -1651,9 +1656,9 @@ async fn the_wealth_line_is_the_top_edge_of_the_wealth_stack_and_ends_at_the_til
     );
 }
 
-#[sqlx::test]
-async fn the_wealth_line_steps_with_the_wallet_polls(pool: PgPool) {
-    let (app, clock) = app_at(pool).await;
+#[tokio::test]
+async fn the_wealth_line_steps_with_the_wallet_polls() {
+    let (app, clock) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[]).await;
     stub_orders(&app, ALICE, vec![]).await;
     stub_wallet(&app, ALICE, 10_000_000.0).await;
@@ -1686,9 +1691,9 @@ async fn the_wealth_line_steps_with_the_wallet_polls(pool: PgPool) {
     assert_eq!(at(second, true), 1_500_000_000);
 }
 
-#[sqlx::test]
-async fn without_any_wealth_figure_the_graph_says_there_is_no_wealth_history(pool: PgPool) {
-    let (app, _) = app_at(pool).await;
+#[tokio::test]
+async fn without_any_wealth_figure_the_graph_says_there_is_no_wealth_history() {
+    let (app, _) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[]).await;
 
     let html = page(&app, &browser, "/dashboard").await;
@@ -1697,9 +1702,9 @@ async fn without_any_wealth_figure_the_graph_says_there_is_no_wealth_history(poo
     assert!(!html.contains(r#"data-chart="wealth-history""#));
 }
 
-#[sqlx::test]
-async fn the_summary_also_refreshes_on_the_wealth_signal_and_keeps_the_range(pool: PgPool) {
-    let (app, _) = app_at(pool).await;
+#[tokio::test]
+async fn the_summary_also_refreshes_on_the_wealth_signal_and_keeps_the_range() {
+    let (app, _) = app_at().await;
     let browser = signed_in_with(&app, ALICE, &[]).await;
 
     let html = page(&app, &browser, "/dashboard?range=30d").await;

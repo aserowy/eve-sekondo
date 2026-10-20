@@ -5,19 +5,21 @@
 
 use std::{cmp::Ordering, collections::HashSet};
 
-use sqlx::PgPool;
 use time::{Date, OffsetDateTime, Weekday};
 use uuid::Uuid;
 
 use super::settings::Settings;
 use super::{
-    REGION_ID, STATION_ID,
+    STATION_ID,
     analysis::{
         Exclusion, FeeSource, Fees, Figures, Inputs, WindowKind, choose_fees, evaluate, figures,
         round_down_valid, tick_below,
     },
 };
-use crate::orders::Dir;
+use crate::{
+    orders::Dir,
+    store::{FeeStore, OpportunityStore, StoreError},
+};
 
 /// The four tables, in the order the page shows them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -284,28 +286,6 @@ fn weekday_from_monday(n: i16) -> Option<Weekday> {
     .copied()
 }
 
-/// Every item with book fields, with its name.
-pub async fn load_stats(pool: &PgPool) -> Result<Vec<Stats>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT s.type_id, n.name,
-                (s.best_buy * 100)::bigint AS best_buy_cents,
-                (s.best_sell * 100)::bigint AS best_sell_cents,
-                s.buy_near_orders, s.sell_near_orders, s.rho, s.volume_7d, s.volume_30d, s.sigma,
-                s.sma5, s.sma20, s.cross_day, s.volume_rising, s.percent_b, s.rsi14,
-                s.expansion_kind, s.expansion_weekday, s.expansion_hour,
-                (s.expansion_sell * 100)::bigint AS expansion_sell_cents
-         FROM station_item_stats s
-         LEFT JOIN names n ON n.id = s.type_id
-         WHERE s.region_id = $1 AND s.station_id = $2
-           AND s.best_buy IS NOT NULL AND s.best_sell IS NOT NULL
-           AND s.buy_near_orders IS NOT NULL AND s.sell_near_orders IS NOT NULL",
-    )
-    .bind(REGION_ID)
-    .bind(STATION_ID)
-    .fetch_all(pool)
-    .await
-}
-
 /// The items on which the selected characters have an order at the station.
 #[derive(Debug, Default)]
 pub struct OwnOrders {
@@ -314,20 +294,13 @@ pub struct OwnOrders {
 }
 
 pub async fn load_own_orders(
-    pool: &PgPool,
+    store: &dyn OpportunityStore,
     account_id: Uuid,
     character_ids: &[i64],
-) -> Result<OwnOrders, sqlx::Error> {
-    let rows: Vec<(i64, bool)> = sqlx::query_as(
-        "SELECT DISTINCT o.type_id, o.is_buy_order FROM current_orders o
-         JOIN characters c ON c.character_id = o.character_id
-         WHERE c.account_id = $1 AND o.character_id = ANY($2) AND o.location_id = $3",
-    )
-    .bind(account_id)
-    .bind(character_ids)
-    .bind(STATION_ID)
-    .fetch_all(pool)
-    .await?;
+) -> Result<OwnOrders, StoreError> {
+    let rows = store
+        .own_orders_at(account_id, character_ids, STATION_ID)
+        .await?;
     let mut own = OwnOrders::default();
     for (type_id, is_buy) in rows {
         if is_buy {
@@ -352,11 +325,13 @@ pub struct FeeChoice {
 /// The fees at the station of the selected characters: the lowest minimum margin wins, and a
 /// character whose fees are not known yet counts with the base rates.
 pub async fn choose_station_fees(
-    pool: &PgPool,
+    store: &dyn FeeStore,
     account_id: Uuid,
     character_ids: &[i64],
-) -> Result<FeeChoice, sqlx::Error> {
-    let rows = crate::fees::at_location(pool, account_id, character_ids, STATION_ID).await?;
+) -> Result<FeeChoice, StoreError> {
+    let rows = store
+        .at_location(account_id, character_ids, STATION_ID)
+        .await?;
     let percent = |text: &Option<String>| text.as_deref().and_then(|t| t.parse::<f64>().ok());
     let characters: Vec<(i64, Option<Fees>)> = rows
         .iter()

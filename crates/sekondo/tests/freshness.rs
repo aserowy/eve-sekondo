@@ -1,13 +1,12 @@
 mod common;
 
 use common::{AppBuilder, Browser, TestApp};
-use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 
 const ALICE: i64 = 90000001;
 
-async fn setup(pool: PgPool) -> (TestApp, Browser) {
-    let app = AppBuilder::new(pool).with_stub().spawn().await;
+async fn setup() -> (TestApp, Browser) {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let browser = app.browser();
     browser.sso_round_trip(&app, "/auth/login", ALICE).await;
     (app, browser)
@@ -26,25 +25,24 @@ fn strip(html: &str) -> &str {
     &rest[..rest.find("</section>").unwrap()]
 }
 
-async fn seed_sync(pool: &PgPool, last_success: Option<OffsetDateTime>, next: OffsetDateTime) {
-    sqlx::query(
-        "INSERT INTO order_sync (character_id, next_poll_at, last_success_at) VALUES ($1, $2, $3)",
-    )
-    .bind(ALICE)
-    .bind(next)
-    .bind(last_success)
-    .execute(pool)
-    .await
-    .unwrap();
+async fn seed_sync(app: &TestApp, last_success: Option<OffsetDateTime>, next: OffsetDateTime) {
+    let orders = &app.stores.orders;
+    match last_success {
+        Some(polled_at) => orders
+            .replace_orders(ALICE, polled_at, &[], next, None)
+            .await
+            .unwrap(),
+        None => orders.insert_schedule(&[ALICE], &[next]).await.unwrap(),
+    }
 }
 
-#[sqlx::test]
-async fn a_recently_polled_character_shows_its_times_and_no_stale_badge(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
+#[tokio::test]
+async fn a_recently_polled_character_shows_its_times_and_no_stale_badge() {
+    let (app, browser) = setup().await;
     let now = OffsetDateTime::now_utc();
     let last = now - Duration::minutes(5);
     let next = now + Duration::minutes(15);
-    seed_sync(&pool, Some(last), next).await;
+    seed_sync(&app, Some(last), next).await;
 
     let html = orders_page(&app, &browser).await;
     let strip = strip(&html);
@@ -57,9 +55,9 @@ async fn a_recently_polled_character_shows_its_times_and_no_stale_badge(pool: Pg
     assert!(!strip.contains("Waiting for first update"));
 }
 
-#[sqlx::test]
-async fn a_character_needing_relogin_is_stale_links_to_login_and_keeps_its_orders(pool: PgPool) {
-    let (app, browser) = setup(pool).await;
+#[tokio::test]
+async fn a_character_needing_relogin_is_stale_links_to_login_and_keeps_its_orders() {
+    let (app, browser) = setup().await;
     app.state.poller.poll_character(ALICE).await;
     app.state.repo.mark_needs_relogin(ALICE).await.unwrap();
 
@@ -72,13 +70,13 @@ async fn a_character_needing_relogin_is_stale_links_to_login_and_keeps_its_order
     assert!(html.contains(r#"id="order-5001""#));
 }
 
-#[sqlx::test]
-async fn a_character_whose_last_success_is_too_old_is_stale(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
+#[tokio::test]
+async fn a_character_whose_last_success_is_too_old_is_stale() {
+    let (app, browser) = setup().await;
     let now = OffsetDateTime::now_utc();
     // Twice the 20-minute interval is 40 minutes.
     seed_sync(
-        &pool,
+        &app,
         Some(now - Duration::minutes(45)),
         now + Duration::minutes(1),
     )
@@ -91,12 +89,12 @@ async fn a_character_whose_last_success_is_too_old_is_stale(pool: PgPool) {
     assert!(!strip.contains("Log in again"));
 }
 
-#[sqlx::test]
-async fn the_threshold_is_twice_the_refresh_interval(pool: PgPool) {
-    let (app, browser) = setup(pool.clone()).await;
+#[tokio::test]
+async fn the_threshold_is_twice_the_refresh_interval() {
+    let (app, browser) = setup().await;
     let now = OffsetDateTime::now_utc();
     seed_sync(
-        &pool,
+        &app,
         Some(now - Duration::minutes(39)),
         now + Duration::minutes(1),
     )
@@ -107,9 +105,9 @@ async fn the_threshold_is_twice_the_refresh_interval(pool: PgPool) {
     assert!(!strip(&html).contains("Stale"));
 }
 
-#[sqlx::test]
-async fn a_newly_linked_character_waits_for_its_first_update(pool: PgPool) {
-    let (app, browser) = setup(pool).await;
+#[tokio::test]
+async fn a_newly_linked_character_waits_for_its_first_update() {
+    let (app, browser) = setup().await;
 
     let html = orders_page(&app, &browser).await;
     let strip = strip(&html);
@@ -118,9 +116,9 @@ async fn a_newly_linked_character_waits_for_its_first_update(pool: PgPool) {
     assert!(strip.contains("Stale"), "never polled counts as stale");
 }
 
-#[sqlx::test]
-async fn the_freshness_fragment_is_the_strip_alone(pool: PgPool) {
-    let (app, browser) = setup(pool).await;
+#[tokio::test]
+async fn the_freshness_fragment_is_the_strip_alone() {
+    let (app, browser) = setup().await;
     app.state.poller.poll_character(ALICE).await;
 
     let res = browser.get(&app.url("/orders/freshness")).await;
@@ -132,9 +130,9 @@ async fn the_freshness_fragment_is_the_strip_alone(pool: PgPool) {
     assert!(!html.contains(r#"id="sell-orders""#));
 }
 
-#[sqlx::test]
-async fn the_freshness_has_no_toggle_and_no_warning_count(pool: PgPool) {
-    let (app, browser) = setup(pool).await;
+#[tokio::test]
+async fn the_freshness_has_no_toggle_and_no_warning_count() {
+    let (app, browser) = setup().await;
     app.state.poller.poll_character(ALICE).await;
     app.state.repo.mark_needs_relogin(ALICE).await.unwrap();
 

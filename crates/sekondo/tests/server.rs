@@ -2,26 +2,24 @@ mod common;
 
 use std::io::{Read, Write};
 
-use sqlx::PgPool;
-
-#[sqlx::test]
-async fn healthz_returns_200_over_tls(pool: PgPool) {
-    let app = common::spawn(pool).await;
+#[tokio::test]
+async fn healthz_returns_200_over_tls() {
+    let app = common::spawn().await;
     let res = app.client.get(app.url("/healthz")).send().await.unwrap();
     assert_eq!(res.status(), 200);
 }
 
-#[sqlx::test]
-async fn certificate_is_verified_by_clients(pool: PgPool) {
-    let app = common::spawn(pool).await;
+#[tokio::test]
+async fn certificate_is_verified_by_clients() {
+    let app = common::spawn().await;
     // A client that does not trust the per-run CA must fail the handshake.
     let untrusting = reqwest::Client::new();
     assert!(untrusting.get(app.url("/healthz")).send().await.is_err());
 }
 
-#[sqlx::test]
-async fn vendored_static_files_are_served(pool: PgPool) {
-    let app = common::spawn(pool).await;
+#[tokio::test]
+async fn vendored_static_files_are_served() {
+    let app = common::spawn().await;
     for path in [
         "/static/htmx.min.js",
         "/static/pico.min.css",
@@ -44,9 +42,9 @@ async fn vendored_static_files_are_served(pool: PgPool) {
     assert!(js.contains("htmx.config.includeIndicatorStyles = false"));
 }
 
-#[sqlx::test]
-async fn plain_http_request_gets_no_response_body(pool: PgPool) {
-    let app = common::spawn(pool).await;
+#[tokio::test]
+async fn plain_http_request_gets_no_response_body() {
+    let app = common::spawn().await;
     let addr = app.addr;
     let body = tokio::task::spawn_blocking(move || {
         let mut stream = std::net::TcpStream::connect(addr).unwrap();
@@ -67,9 +65,9 @@ async fn plain_http_request_gets_no_response_body(pool: PgPool) {
     assert!(!text.contains("ok"), "got a body: {text}");
 }
 
-#[sqlx::test]
-async fn tls_1_2_is_accepted(pool: PgPool) {
-    let app = common::spawn(pool).await;
+#[tokio::test]
+async fn tls_1_2_is_accepted() {
+    let app = common::spawn().await;
     // TLS 1.2 stays supported; 1.0/1.1 are not offered by rustls at all.
     let client = reqwest::Client::builder()
         .add_root_certificate(reqwest::Certificate::from_pem(app.pki.ca_pem.as_bytes()).unwrap())
@@ -80,18 +78,18 @@ async fn tls_1_2_is_accepted(pool: PgPool) {
     assert_eq!(res.status(), 200);
 }
 
-#[sqlx::test]
-async fn healthcheck_succeeds_against_a_running_app_that_it_trusts(pool: PgPool) {
-    let app = common::spawn(pool).await;
+#[tokio::test]
+async fn healthcheck_succeeds_against_a_running_app_that_it_trusts() {
+    let app = common::spawn().await;
     sekondo::tls::install_crypto_provider();
     sekondo::app::healthcheck(&app.base_url, Some(&app.ca_path))
         .await
         .unwrap();
 }
 
-#[sqlx::test]
-async fn healthcheck_verifies_the_certificate(pool: PgPool) {
-    let app = common::spawn(pool).await;
+#[tokio::test]
+async fn healthcheck_verifies_the_certificate() {
+    let app = common::spawn().await;
     sekondo::tls::install_crypto_provider();
     // Without the CA the certificate is not trusted, so the check must fail rather than pass.
     let result = sekondo::app::healthcheck(&app.base_url, None).await;

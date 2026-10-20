@@ -16,6 +16,7 @@ use crate::{
     opportunities::{REGION_ID, STATION_ID, stats},
     pages,
     poller::PollOutcome,
+    store::{SeedHistoryRow, SeedSnapshotRow, StoreError},
     tokens::TokenError,
     wealth_poller::Kind,
 };
@@ -32,7 +33,11 @@ pub async fn refresh(
         Ok(_) => return StatusCode::NOT_FOUND.into_response(),
         Err(e) => return pages::internal_error(e),
     }
-    if let Err(e) = state.repo.expire_access_token(character_id).await {
+    if let Err(e) = state
+        .repo
+        .expire_access_token(character_id, state.clock.now() - time::Duration::hours(1))
+        .await
+    {
         return pages::internal_error(e);
     }
     match state.tokens.access_token(character_id).await {
@@ -143,19 +148,10 @@ pub async fn station_rollups(State(state): State<AppState>, _account: CurrentAcc
     let now = state.clock.now();
     let from = now - time::Duration::days(40);
     let to = now + time::Duration::hours(2);
-    for view in ["station_hourly", "station_daily"] {
-        let result = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "CALL refresh_continuous_aggregate('{view}', $1, $2)"
-        )))
-        .bind(from)
-        .bind(to)
-        .execute(&state.pool)
-        .await;
-        if let Err(e) = result {
-            return pages::internal_error(e);
-        }
+    if let Err(e) = state.stores.station.refresh_rollups(from, to).await {
+        return pages::internal_error(e);
     }
-    match stats::refresh_expansions_if_advanced(&state.pool, now).await {
+    match stats::refresh_expansions_if_advanced(&*state.stores.station, now).await {
         Ok(_) => "ok".into_response(),
         Err(e) => pages::internal_error(e),
     }
@@ -248,56 +244,50 @@ async fn insert_seed(
     state: &AppState,
     seed: &Seed,
     now: time::OffsetDateTime,
-) -> Result<(), sqlx::Error> {
-    for s in &seed.snapshots {
-        sqlx::query(
-            "INSERT INTO station_snapshots
-                 (recorded_at, region_id, station_id, type_id, best_buy, best_sell, spread,
-                  buy_near_units, buy_near_orders, sell_near_units, sell_near_orders,
-                  buy_units, sell_units, buy_taken, sell_taken)
-             VALUES ($1, $2, $3, $4, $5::float8::numeric, $6::float8::numeric,
-                     ($6::float8::numeric - $5::float8::numeric) / $5::float8::numeric,
-                     $7, $8, $9, $10, $11, $12, $13, $14)",
-        )
-        .bind(now - time::Duration::minutes(s.minutes_back))
-        .bind(REGION_ID)
-        .bind(STATION_ID)
-        .bind(s.type_id)
-        .bind(s.best_buy)
-        .bind(s.best_sell)
-        .bind(s.buy_near_units)
-        .bind(s.buy_near_orders)
-        .bind(s.sell_near_units)
-        .bind(s.sell_near_orders)
-        .bind(s.buy_units)
-        .bind(s.sell_units)
-        .bind(s.buy_taken)
-        .bind(s.sell_taken)
-        .execute(&state.pool)
+) -> Result<(), StoreError> {
+    let snapshots: Vec<SeedSnapshotRow> = seed
+        .snapshots
+        .iter()
+        .map(|s| SeedSnapshotRow {
+            recorded_at: now - time::Duration::minutes(s.minutes_back),
+            type_id: s.type_id,
+            best_buy: s.best_buy,
+            best_sell: s.best_sell,
+            buy_near_units: s.buy_near_units,
+            buy_near_orders: s.buy_near_orders,
+            sell_near_units: s.sell_near_units,
+            sell_near_orders: s.sell_near_orders,
+            buy_units: s.buy_units,
+            sell_units: s.sell_units,
+            buy_taken: s.buy_taken,
+            sell_taken: s.sell_taken,
+        })
+        .collect();
+    state
+        .stores
+        .station
+        .seed_snapshots(REGION_ID, STATION_ID, &snapshots)
         .await?;
-    }
-    for h in &seed.history {
-        sqlx::query(
-            "INSERT INTO market_history
-                 (region_id, type_id, day, average, highest, lowest, volume, order_count)
-             VALUES ($1, $2, $3, $4::float8::numeric, $5::float8::numeric, $6::float8::numeric, $7, $8)
-             ON CONFLICT (region_id, type_id, day) DO UPDATE SET
-                 average = excluded.average, highest = excluded.highest, lowest = excluded.lowest,
-                 volume = excluded.volume, order_count = excluded.order_count",
-        )
-        .bind(REGION_ID)
-        .bind(h.type_id)
-        .bind((now - time::Duration::days(h.days_back)).date())
-        .bind(h.average)
-        .bind(h.highest)
-        .bind(h.lowest)
-        .bind(h.volume)
-        .bind(h.order_count)
-        .execute(&state.pool)
+    let history: Vec<SeedHistoryRow> = seed
+        .history
+        .iter()
+        .map(|h| SeedHistoryRow {
+            type_id: h.type_id,
+            day: (now - time::Duration::days(h.days_back)).date(),
+            average: h.average,
+            highest: h.highest,
+            lowest: h.lowest,
+            volume: h.volume,
+            order_count: h.order_count,
+        })
+        .collect();
+    state
+        .stores
+        .station
+        .seed_history(REGION_ID, &history)
         .await?;
-    }
     if !seed.history.is_empty() {
-        stats::refresh_indicators(&state.pool, now).await?;
+        stats::refresh_indicators(&*state.stores.station, now).await?;
     }
     Ok(())
 }

@@ -3,7 +3,6 @@ mod common;
 use common::PollEnv;
 use sekondo::poller::PollOutcome;
 use serde_json::{Value, json};
-use sqlx::PgPool;
 use time::Duration;
 
 const ALICE: i64 = 90000001;
@@ -28,36 +27,34 @@ async fn set_orders(env: &PollEnv, character: i64, orders: Vec<Value>) {
     assert_eq!(res.status(), 204);
 }
 
-async fn current_ids(pool: &PgPool, character: i64) -> Vec<i64> {
-    sqlx::query_scalar(
-        "SELECT order_id FROM current_orders WHERE character_id = $1 ORDER BY order_id",
-    )
-    .bind(character)
-    .fetch_all(pool)
-    .await
-    .unwrap()
+async fn current_ids(env: &PollEnv, character: i64) -> Vec<i64> {
+    env.orders_of(character)
+        .await
+        .iter()
+        .map(|row| row.order_id)
+        .collect()
 }
 
-async fn linked(pool: PgPool) -> PollEnv {
-    let env = PollEnv::new(pool).await;
+async fn linked() -> PollEnv {
+    let env = PollEnv::new().await;
     let account = env.new_account().await;
     env.link(account, ALICE).await;
     env
 }
 
-#[sqlx::test]
-async fn the_orders_of_a_linked_character_become_its_current_orders(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn the_orders_of_a_linked_character_become_its_current_orders() {
+    let env = linked().await;
     set_orders(&env, ALICE, vec![order(1, 10.0, 5), order(2, 20.0, 6)]).await;
 
     assert_eq!(env.poller.poll_character(ALICE).await, PollOutcome::Updated);
 
-    assert_eq!(current_ids(&env.pool, ALICE).await, vec![1, 2]);
+    assert_eq!(current_ids(&env, ALICE).await, vec![1, 2]);
 }
 
-#[sqlx::test]
-async fn an_order_that_closes_stops_being_current(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn an_order_that_closes_stops_being_current() {
+    let env = linked().await;
     set_orders(&env, ALICE, vec![order(1, 10.0, 5), order(2, 20.0, 6)]).await;
     env.poller.poll_character(ALICE).await;
 
@@ -65,47 +62,46 @@ async fn an_order_that_closes_stops_being_current(pool: PgPool) {
     env.clock.advance(Duration::minutes(21));
     env.poller.poll_character(ALICE).await;
 
-    assert_eq!(current_ids(&env.pool, ALICE).await, vec![2]);
+    assert_eq!(current_ids(&env, ALICE).await, vec![2]);
 }
 
-#[sqlx::test]
-async fn a_changed_order_shows_its_new_price_and_volume(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_changed_order_shows_its_new_price_and_volume() {
+    let env = linked().await;
     set_orders(&env, ALICE, vec![order(1, 10.0, 5)]).await;
     env.poller.poll_character(ALICE).await;
 
     set_orders(&env, ALICE, vec![order(1, 12.34, 3)]).await;
     env.poller.poll_character(ALICE).await;
 
-    let (cents, remain): (i64, i64) = sqlx::query_as(
-        "SELECT (price * 100)::bigint, volume_remain FROM current_orders WHERE order_id = 1",
-    )
-    .fetch_one(&env.pool)
-    .await
-    .unwrap();
-    assert_eq!((cents, remain), (1234, 3));
+    let row = &env.orders_of(ALICE).await[0];
+    assert_eq!(
+        (row.order_id, row.price_cents, row.volume_remain),
+        (1, 1234, 3)
+    );
 }
 
-#[sqlx::test]
-async fn an_order_placed_for_the_corporation_is_kept_and_flagged(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn an_order_placed_for_the_corporation_is_kept_and_flagged() {
+    let env = linked().await;
     let mut corp = order(1, 10.0, 5);
     corp["is_corporation"] = json!(true);
     set_orders(&env, ALICE, vec![corp, order(2, 20.0, 6)]).await;
 
     env.poller.poll_character(ALICE).await;
 
-    let flags: Vec<(i64, bool)> =
-        sqlx::query_as("SELECT order_id, is_corporation FROM current_orders ORDER BY order_id")
-            .fetch_all(&env.pool)
-            .await
-            .unwrap();
+    let flags: Vec<(i64, bool)> = env
+        .orders_of(ALICE)
+        .await
+        .iter()
+        .map(|row| (row.order_id, row.is_corporation))
+        .collect();
     assert_eq!(flags, vec![(1, true), (2, false)]);
 }
 
-#[sqlx::test]
-async fn every_poll_records_one_snapshot_row_per_order(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn every_poll_records_one_snapshot_row_per_order() {
+    let env = linked().await;
     set_orders(
         &env,
         ALICE,
@@ -117,40 +113,41 @@ async fn every_poll_records_one_snapshot_row_per_order(pool: PgPool) {
     env.clock.advance(Duration::minutes(21));
     env.poller.poll_character(ALICE).await;
 
-    let per_poll: Vec<(i64,)> = sqlx::query_as(
-        "SELECT count(*) FROM order_snapshots WHERE character_id = $1 GROUP BY polled_at ORDER BY polled_at",
-    )
-    .bind(ALICE)
-    .fetch_all(&env.pool)
-    .await
-    .unwrap();
-    assert_eq!(per_poll, vec![(3,), (3,)]);
+    let per_poll: Vec<i64> = env
+        .stores
+        .orders
+        .snapshot_counts(ALICE)
+        .await
+        .unwrap()
+        .iter()
+        .map(|(_, count)| *count)
+        .collect();
+    assert_eq!(per_poll, vec![3, 3]);
 }
 
-#[sqlx::test]
-async fn a_poll_without_orders_records_the_poll_but_no_snapshots(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_poll_without_orders_records_the_poll_but_no_snapshots() {
+    let env = linked().await;
     set_orders(&env, ALICE, vec![]).await;
 
     assert_eq!(env.poller.poll_character(ALICE).await, PollOutcome::Updated);
 
-    let snapshots: i64 = sqlx::query_scalar("SELECT count(*) FROM order_snapshots")
-        .fetch_one(&env.pool)
+    let snapshots = env.stores.orders.snapshot_counts(ALICE).await.unwrap();
+    let synced = env
+        .stores
+        .orders
+        .order_sync(ALICE)
         .await
-        .unwrap();
-    let synced: Option<time::OffsetDateTime> =
-        sqlx::query_scalar("SELECT last_success_at FROM order_sync WHERE character_id = $1")
-            .bind(ALICE)
-            .fetch_one(&env.pool)
-            .await
-            .unwrap();
-    assert_eq!(snapshots, 0);
+        .unwrap()
+        .unwrap()
+        .last_success_at;
+    assert!(snapshots.is_empty());
     assert!(synced.is_some());
 }
 
-#[sqlx::test]
-async fn unlinking_a_character_removes_its_snapshots(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn unlinking_a_character_removes_its_snapshots() {
+    let env = linked().await;
     let account = env
         .repo
         .find_character(ALICE)
@@ -166,34 +163,39 @@ async fn unlinking_a_character_removes_its_snapshots(pool: PgPool) {
 
     env.repo.unlink_character(account, ALICE).await.unwrap();
 
-    let remaining: Vec<i64> =
-        sqlx::query_scalar("SELECT DISTINCT character_id FROM order_snapshots")
-            .fetch_all(&env.pool)
+    assert!(
+        env.stores
+            .orders
+            .snapshot_counts(ALICE)
             .await
-            .unwrap();
-    assert_eq!(remaining, vec![BOB]);
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !env.stores
+            .orders
+            .snapshot_counts(BOB)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
-#[sqlx::test]
-async fn a_successful_poll_records_when_it_happened_and_when_the_next_one_is_due(pool: PgPool) {
+#[tokio::test]
+async fn a_successful_poll_records_when_it_happened_and_when_the_next_one_is_due() {
     use sekondo::clock::Clock;
-    let env = linked(pool).await;
+    let env = linked().await;
     let polled_at = env.clock.now();
 
     env.poller.poll_character(ALICE).await;
 
-    let (last_success, next, error, expires): (
-        time::OffsetDateTime,
-        time::OffsetDateTime,
-        Option<String>,
-        Option<time::OffsetDateTime>,
-    ) = sqlx::query_as(
-        "SELECT last_success_at, next_poll_at, last_error, esi_expires_at FROM order_sync WHERE character_id = $1",
-    )
-    .bind(ALICE)
-    .fetch_one(&env.pool)
-    .await
-    .unwrap();
+    let state = env.stores.orders.order_sync(ALICE).await.unwrap().unwrap();
+    let (last_success, next, error, expires) = (
+        state.last_success_at.unwrap(),
+        state.next_poll_at,
+        state.last_error,
+        state.esi_expires_at,
+    );
     assert_eq!(last_success, polled_at);
     assert!(next >= polled_at + env.interval, "{next} vs {polled_at}");
     assert!(error.is_none());
@@ -203,7 +205,7 @@ async fn a_successful_poll_records_when_it_happened_and_when_the_next_one_is_due
 // ---- failure paths (4.2) ----
 
 async fn sync_row(
-    pool: &PgPool,
+    env: &PollEnv,
     character: i64,
 ) -> (
     Option<time::OffsetDateTime>,
@@ -211,22 +213,19 @@ async fn sync_row(
     Option<String>,
     i32,
 ) {
-    sqlx::query_as(
-        "SELECT last_success_at, next_poll_at, last_error, failures FROM order_sync WHERE character_id = $1",
-    )
-    .bind(character)
-    .fetch_one(pool)
-    .await
-    .unwrap()
-}
-
-/// Makes the stored access token look expired, so the next poll goes to SSO.
-async fn expire_token(pool: &PgPool, id: i64) {
-    sqlx::query("UPDATE character_tokens SET access_expires_at = now() - interval '1 hour' WHERE character_id = $1")
-        .bind(id)
-        .execute(pool)
+    let state = env
+        .stores
+        .orders
+        .order_sync(character)
         .await
+        .unwrap()
         .unwrap();
+    (
+        state.last_success_at,
+        state.next_poll_at,
+        state.last_error,
+        state.failures,
+    )
 }
 
 async fn needs_relogin(env: &PollEnv, id: i64) -> bool {
@@ -238,9 +237,9 @@ async fn needs_relogin(env: &PollEnv, id: i64) -> bool {
         .needs_relogin
 }
 
-#[sqlx::test]
-async fn a_character_needing_relogin_is_not_requested_and_keeps_its_orders(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_character_needing_relogin_is_not_requested_and_keeps_its_orders() {
+    let env = linked().await;
     set_orders(&env, ALICE, vec![order(1, 10.0, 5)]).await;
     env.poller.poll_character(ALICE).await;
     env.repo.mark_needs_relogin(ALICE).await.unwrap();
@@ -252,15 +251,15 @@ async fn a_character_needing_relogin_is_not_requested_and_keeps_its_orders(pool:
     assert_eq!(outcome, PollOutcome::NeedsRelogin);
     assert_eq!(env.stub.esi_calls("orders"), orders_calls);
     assert_eq!(env.stub.token_calls(), token_calls);
-    assert_eq!(current_ids(&env.pool, ALICE).await, vec![1]);
+    assert_eq!(current_ids(&env, ALICE).await, vec![1]);
 }
 
-#[sqlx::test]
-async fn a_rejected_refresh_token_marks_the_character_and_requests_no_orders(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_rejected_refresh_token_marks_the_character_and_requests_no_orders() {
+    let env = linked().await;
     set_orders(&env, ALICE, vec![order(1, 10.0, 5)]).await;
     env.poller.poll_character(ALICE).await;
-    expire_token(&env.pool, ALICE).await;
+    env.expire_token(ALICE).await;
     env.control("revoke", json!({"character_id": ALICE})).await;
     let orders_calls = env.stub.esi_calls("orders");
 
@@ -269,34 +268,34 @@ async fn a_rejected_refresh_token_marks_the_character_and_requests_no_orders(poo
     assert_eq!(outcome, PollOutcome::NeedsRelogin);
     assert!(needs_relogin(&env, ALICE).await);
     assert_eq!(env.stub.esi_calls("orders"), orders_calls);
-    assert_eq!(current_ids(&env.pool, ALICE).await, vec![1]);
+    assert_eq!(current_ids(&env, ALICE).await, vec![1]);
 }
 
-#[sqlx::test]
-async fn a_temporary_token_failure_is_recorded_and_keeps_the_orders(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_temporary_token_failure_is_recorded_and_keeps_the_orders() {
+    let env = linked().await;
     set_orders(&env, ALICE, vec![order(1, 10.0, 5)]).await;
     env.poller.poll_character(ALICE).await;
-    expire_token(&env.pool, ALICE).await;
+    env.expire_token(ALICE).await;
     env.control("fail-next-token", json!({"count": 1})).await;
 
     let outcome = env.poller.poll_character(ALICE).await;
 
     assert_eq!(outcome, PollOutcome::Failed);
     assert!(!needs_relogin(&env, ALICE).await);
-    assert_eq!(current_ids(&env.pool, ALICE).await, vec![1]);
-    let (_, _, error, failures) = sync_row(&env.pool, ALICE).await;
+    assert_eq!(current_ids(&env, ALICE).await, vec![1]);
+    let (_, _, error, failures) = sync_row(&env, ALICE).await;
     assert!(error.is_some());
     assert_eq!(failures, 1);
 }
 
-#[sqlx::test]
-async fn an_esi_server_error_keeps_the_orders_and_records_the_failure(pool: PgPool) {
+#[tokio::test]
+async fn an_esi_server_error_keeps_the_orders_and_records_the_failure() {
     use sekondo::clock::Clock;
-    let env = linked(pool).await;
+    let env = linked().await;
     set_orders(&env, ALICE, vec![order(1, 10.0, 5)]).await;
     env.poller.poll_character(ALICE).await;
-    let (success_before, ..) = sync_row(&env.pool, ALICE).await;
+    let (success_before, ..) = sync_row(&env, ALICE).await;
     set_orders(&env, ALICE, vec![order(2, 10.0, 5)]).await;
     env.clock.advance(Duration::minutes(21));
     env.control("esi-fail-next", json!({"status": 503})).await;
@@ -306,18 +305,18 @@ async fn an_esi_server_error_keeps_the_orders_and_records_the_failure(pool: PgPo
 
     assert_eq!(outcome, PollOutcome::Failed);
     assert!(!needs_relogin(&env, ALICE).await);
-    assert_eq!(current_ids(&env.pool, ALICE).await, vec![1]);
-    let (success, next, error, failures) = sync_row(&env.pool, ALICE).await;
+    assert_eq!(current_ids(&env, ALICE).await, vec![1]);
+    let (success, next, error, failures) = sync_row(&env, ALICE).await;
     assert_eq!(success, success_before, "the last success is unchanged");
     assert_eq!(failures, 1);
     assert!(error.unwrap().contains("503"));
     assert_eq!(next, failed_at + Duration::minutes(1));
 }
 
-#[sqlx::test]
-async fn retries_back_off_exponentially_up_to_the_interval(pool: PgPool) {
+#[tokio::test]
+async fn retries_back_off_exponentially_up_to_the_interval() {
     use sekondo::clock::Clock;
-    let env = linked(pool).await;
+    let env = linked().await;
     env.control("esi-fail-next", json!({"count": 10, "status": 500}))
         .await;
 
@@ -325,7 +324,7 @@ async fn retries_back_off_exponentially_up_to_the_interval(pool: PgPool) {
     for _ in 0..7 {
         let at = env.clock.now();
         assert_eq!(env.poller.poll_character(ALICE).await, PollOutcome::Failed);
-        let (_, next, ..) = sync_row(&env.pool, ALICE).await;
+        let (_, next, ..) = sync_row(&env, ALICE).await;
         waits.push((next - at).whole_seconds());
         env.clock.advance(next - at);
     }
@@ -334,10 +333,10 @@ async fn retries_back_off_exponentially_up_to_the_interval(pool: PgPool) {
     assert_eq!(waits, vec![60, 120, 240, 480, 960, 1200, 1200]);
 }
 
-#[sqlx::test]
-async fn a_poll_deferred_by_the_gate_is_rescheduled_without_a_failure(pool: PgPool) {
+#[tokio::test]
+async fn a_poll_deferred_by_the_gate_is_rescheduled_without_a_failure() {
     use sekondo::clock::Clock;
-    let env = linked(pool).await;
+    let env = linked().await;
     env.control(
         "esi-fail-next",
         json!({"status": 429, "headers": {"retry-after": "120", "x-ratelimit-group": "char-market"}}),
@@ -348,7 +347,7 @@ async fn a_poll_deferred_by_the_gate_is_rescheduled_without_a_failure(pool: PgPo
     let outcome = env.poller.poll_character(ALICE).await;
 
     assert_eq!(outcome, PollOutcome::Deferred);
-    let (_, next, error, failures) = sync_row(&env.pool, ALICE).await;
+    let (_, next, error, failures) = sync_row(&env, ALICE).await;
     assert!(next >= at + Duration::seconds(120), "{next}");
     assert!(next <= at + Duration::seconds(150), "{next}");
     assert!(error.is_none());
@@ -363,10 +362,11 @@ async fn a_poll_deferred_by_the_gate_is_rescheduled_without_a_failure(pool: PgPo
     assert_eq!(env.stub.esi_calls("orders"), calls);
 }
 
-#[sqlx::test]
-async fn a_character_unlinked_during_its_poll_is_dropped_without_error(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_character_unlinked_during_its_poll_is_dropped_without_error() {
+    let env = linked().await;
     set_orders(&env, ALICE, vec![order(1, 10.0, 5)]).await;
+    let account = env.account_of(ALICE).await;
     env.control("esi-delay", json!({"millis": 300})).await;
 
     // The character disappears while ESI is still answering the orders request.
@@ -374,22 +374,28 @@ async fn a_character_unlinked_during_its_poll_is_dropped_without_error(pool: PgP
         while env.stub.esi_calls("orders") == 0 {
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
-        sqlx::query("DELETE FROM characters WHERE character_id = $1")
-            .bind(ALICE)
-            .execute(&env.pool)
-            .await
-            .unwrap();
+        env.stores.accounts.delete_character(ALICE).await.unwrap();
     };
     let (outcome, ()) = tokio::join!(env.poller.poll_character(ALICE), unlink);
 
     assert_eq!(outcome, PollOutcome::Dropped);
-    for table in ["current_orders", "order_snapshots", "order_sync"] {
-        let rows: i64 =
-            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
-                .fetch_one(&env.pool)
-                .await
-                .unwrap();
-        assert_eq!(rows, 0, "{table}");
+    assert!(
+        env.stores
+            .orders
+            .snapshot_counts(ALICE)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(env.stores.orders.order_sync(ALICE).await.unwrap().is_none());
+    for side in [sekondo::orders::Side::Sell, sekondo::orders::Side::Buy] {
+        let listed = env
+            .stores
+            .orders
+            .list_orders(account, &[ALICE], side, Default::default())
+            .await
+            .unwrap();
+        assert!(listed.is_empty());
     }
 }
 
@@ -402,26 +408,34 @@ fn order_at(id: i64, type_id: i64, location: i64) -> Value {
     o
 }
 
-async fn names_table(pool: &PgPool) -> Vec<(i64, Option<String>)> {
-    sqlx::query_as("SELECT id, name FROM names ORDER BY id")
-        .fetch_all(pool)
+async fn names_table(env: &PollEnv) -> Vec<(i64, Option<String>)> {
+    env.stores
+        .market
+        .names_table()
         .await
         .unwrap()
+        .into_iter()
+        .map(|row| (row.id, row.name))
+        .collect()
 }
 
-async fn name_of(pool: &PgPool, id: i64) -> Option<Option<String>> {
-    sqlx::query_scalar("SELECT name FROM names WHERE id = $1")
-        .bind(id)
-        .fetch_optional(pool)
+/// `None` when the name was never looked up, `Some(None)` when ESI would not give one.
+async fn name_of(env: &PollEnv, id: i64) -> Option<Option<String>> {
+    env.stores
+        .market
+        .names_table()
         .await
         .unwrap()
+        .into_iter()
+        .find(|row| row.id == id)
+        .map(|row| row.name)
 }
 
 const STRUCTURE: i64 = 1000000000001;
 
-#[sqlx::test]
-async fn names_are_requested_from_esi_only_once(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn names_are_requested_from_esi_only_once() {
+    let env = PollEnv::new().await;
     let account = env.new_account().await;
     env.link(account, ALICE).await;
     env.link(account, BOB).await;
@@ -443,7 +457,7 @@ async fn names_are_requested_from_esi_only_once(pool: PgPool) {
         "each ID once: {requested:?}"
     );
     assert_eq!(env.stub.esi_calls("names"), 1);
-    let names = names_table(&env.pool).await;
+    let names = names_table(&env).await;
     assert_eq!(
         names,
         vec![
@@ -457,10 +471,10 @@ async fn names_are_requested_from_esi_only_once(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn a_structure_esi_refuses_to_describe_is_remembered_and_retried_after_a_day(pool: PgPool) {
+#[tokio::test]
+async fn a_structure_esi_refuses_to_describe_is_remembered_and_retried_after_a_day() {
     use sekondo::clock::Clock;
-    let env = linked(pool).await;
+    let env = linked().await;
     env.control(
         "structure-access",
         json!({"structure_id": STRUCTURE, "allowed": false}),
@@ -471,14 +485,17 @@ async fn a_structure_esi_refuses_to_describe_is_remembered_and_retried_after_a_d
 
     assert_eq!(env.poller.poll_character(ALICE).await, PollOutcome::Updated);
 
-    assert_eq!(name_of(&env.pool, STRUCTURE).await, Some(None));
-    let retry_after: time::OffsetDateTime =
-        sqlx::query_scalar("SELECT retry_after FROM names WHERE id = $1")
-            .bind(STRUCTURE)
-            .fetch_one(&env.pool)
-            .await
-            .unwrap();
-    assert_eq!(retry_after, polled_at + Duration::hours(24));
+    assert_eq!(name_of(&env, STRUCTURE).await, Some(None));
+    let retry_after = env
+        .stores
+        .market
+        .names_table()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| row.id == STRUCTURE)
+        .and_then(|row| row.retry_after);
+    assert_eq!(retry_after, Some(polled_at + Duration::hours(24)));
     assert_eq!(env.stub.esi_calls("structures"), 1);
 
     // Not asked again within the day, however often the character is polled.
@@ -496,14 +513,14 @@ async fn a_structure_esi_refuses_to_describe_is_remembered_and_retried_after_a_d
     env.poller.poll_character(ALICE).await;
     assert_eq!(env.stub.esi_calls("structures"), 2);
     assert_eq!(
-        name_of(&env.pool, STRUCTURE).await,
+        name_of(&env, STRUCTURE).await,
         Some(Some("Alpha Keepstar".to_owned()))
     );
 }
 
-#[sqlx::test]
-async fn one_invalid_id_does_not_stop_the_other_names(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn one_invalid_id_does_not_stop_the_other_names() {
+    let env = linked().await;
     set_orders(
         &env,
         ALICE,
@@ -513,23 +530,20 @@ async fn one_invalid_id_does_not_stop_the_other_names(pool: PgPool) {
 
     assert_eq!(env.poller.poll_character(ALICE).await, PollOutcome::Updated);
 
-    assert_eq!(
-        name_of(&env.pool, 34).await,
-        Some(Some("Tritanium".to_owned()))
-    );
-    assert!(name_of(&env.pool, 60003760).await.unwrap().is_some());
-    assert!(name_of(&env.pool, 10000002).await.unwrap().is_some());
+    assert_eq!(name_of(&env, 34).await, Some(Some("Tritanium".to_owned())));
+    assert!(name_of(&env, 60003760).await.unwrap().is_some());
+    assert!(name_of(&env, 10000002).await.unwrap().is_some());
     // The bad one is remembered as unresolvable instead of being asked for on every poll.
-    assert_eq!(name_of(&env.pool, 999999).await, Some(None));
+    assert_eq!(name_of(&env, 999999).await, Some(None));
     let calls = env.stub.esi_calls("names");
     env.clock.advance(Duration::minutes(21));
     env.poller.poll_character(ALICE).await;
     assert_eq!(env.stub.esi_calls("names"), calls);
 }
 
-#[sqlx::test]
-async fn a_temporary_failure_caches_nothing_and_is_retried_on_the_next_poll(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_temporary_failure_caches_nothing_and_is_retried_on_the_next_poll() {
+    let env = linked().await;
     set_orders(&env, ALICE, vec![order_at(1, 34, STRUCTURE)]).await;
     // The orders call goes through; the name lookups after it fail.
     env.control("esi-fail-next", json!({"route": "names", "status": 503}))
@@ -542,28 +556,25 @@ async fn a_temporary_failure_caches_nothing_and_is_retried_on_the_next_poll(pool
         PollOutcome::Updated,
         "the orders are stored regardless"
     );
-    assert_eq!(current_ids(&env.pool, ALICE).await, vec![1]);
-    assert!(names_table(&env.pool).await.is_empty());
+    assert_eq!(current_ids(&env, ALICE).await, vec![1]);
+    assert!(names_table(&env).await.is_empty());
 
     env.clock.advance(Duration::minutes(21));
     env.poller.poll_character(ALICE).await;
     assert_eq!(
-        name_of(&env.pool, STRUCTURE).await,
+        name_of(&env, STRUCTURE).await,
         Some(Some("Alpha Keepstar".to_owned()))
     );
-    assert_eq!(
-        name_of(&env.pool, 34).await,
-        Some(Some("Tritanium".to_owned()))
-    );
+    assert_eq!(name_of(&env, 34).await, Some(Some("Tritanium".to_owned())));
 }
 
 // ---- signals (5.1) ----
 
-#[sqlx::test]
-async fn a_poll_signals_the_account_of_the_character_and_no_other(pool: PgPool) {
+#[tokio::test]
+async fn a_poll_signals_the_account_of_the_character_and_no_other() {
     use futures_util::StreamExt;
     use sekondo::events::{Event, EventBus};
-    let env = PollEnv::new(pool).await;
+    let env = PollEnv::new().await;
     let alice_account = env.new_account().await;
     let bob_account = env.new_account().await;
     env.link(alice_account, ALICE).await;
@@ -583,11 +594,11 @@ async fn a_poll_signals_the_account_of_the_character_and_no_other(pool: PgPool) 
     assert!(tokio::time::timeout(wait, bob_stream.next()).await.is_err());
 }
 
-#[sqlx::test]
-async fn a_failed_poll_and_a_needed_relogin_signal_too_so_freshness_updates(pool: PgPool) {
+#[tokio::test]
+async fn a_failed_poll_and_a_needed_relogin_signal_too_so_freshness_updates() {
     use futures_util::StreamExt;
     use sekondo::events::EventBus;
-    let env = PollEnv::new(pool).await;
+    let env = PollEnv::new().await;
     let account = env.new_account().await;
     env.link(account, ALICE).await;
     let mut stream = env.events.subscribe(account);
@@ -615,28 +626,38 @@ fn buy_order(id: i64, escrow: f64, is_corporation: bool) -> Value {
     buy
 }
 
-/// Sell value, escrow, both corporation shares, sell and buy count of each entry, oldest first.
-type Entry = (String, String, String, String, i32, i32);
+/// Sell value, escrow, both corporation shares (in cents), sell and buy count of each entry,
+/// oldest first.
+type Entry = (i64, i64, i64, i64, i64, i64);
 
-async fn poll_totals(pool: &PgPool, character: i64) -> Vec<Entry> {
-    sqlx::query_as(
-        "SELECT sell_value::text, escrow::text, sell_corp::text, escrow_corp::text, sell_count, \
-         buy_count FROM order_poll_totals WHERE character_id = $1 ORDER BY polled_at",
-    )
-    .bind(character)
-    .fetch_all(pool)
-    .await
-    .unwrap()
+async fn poll_totals(env: &PollEnv, character: i64) -> Vec<Entry> {
+    env.stores
+        .orders
+        .poll_totals(character)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| {
+            (
+                t.sell_cents,
+                t.escrow_cents,
+                t.sell_corp_cents,
+                t.escrow_corp_cents,
+                t.sell_count,
+                t.buy_count,
+            )
+        })
+        .collect()
 }
 
-fn entry(values: [&str; 4], sell_count: i32, buy_count: i32) -> Entry {
-    let [sell, escrow, sell_corp, escrow_corp] = values.map(str::to_owned);
+fn entry(values: [i64; 4], sell_count: i64, buy_count: i64) -> Entry {
+    let [sell, escrow, sell_corp, escrow_corp] = values;
     (sell, escrow, sell_corp, escrow_corp, sell_count, buy_count)
 }
 
-#[sqlx::test]
-async fn a_poll_with_orders_records_its_totals_with_the_corporation_share(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_poll_with_orders_records_its_totals_with_the_corporation_share() {
+    let env = linked().await;
     let mut corp_sell = order(2, 20.0, 6);
     corp_sell["is_corporation"] = json!(true);
     set_orders(
@@ -654,14 +675,14 @@ async fn a_poll_with_orders_records_its_totals_with_the_corporation_share(pool: 
     env.poller.poll_character(ALICE).await;
 
     assert_eq!(
-        poll_totals(&env.pool, ALICE).await,
-        vec![entry(["170.00", "10.00", "120.00", "7.50"], 2, 2)]
+        poll_totals(&env, ALICE).await,
+        vec![entry([17_000, 1_000, 12_000, 750], 2, 2)]
     );
 }
 
-#[sqlx::test]
-async fn a_poll_without_orders_records_zeros(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_poll_without_orders_records_zeros() {
+    let env = linked().await;
     set_orders(&env, ALICE, vec![order(1, 10.0, 5)]).await;
     env.poller.poll_character(ALICE).await;
     set_orders(&env, ALICE, vec![]).await;
@@ -670,17 +691,14 @@ async fn a_poll_without_orders_records_zeros(pool: PgPool) {
     env.poller.poll_character(ALICE).await;
 
     assert_eq!(
-        poll_totals(&env.pool, ALICE).await,
-        vec![
-            entry(["50.00", "0.00", "0.00", "0.00"], 1, 0),
-            entry(["0.00", "0.00", "0.00", "0.00"], 0, 0),
-        ]
+        poll_totals(&env, ALICE).await,
+        vec![entry([5_000, 0, 0, 0], 1, 0), entry([0, 0, 0, 0], 0, 0),]
     );
 }
 
-#[sqlx::test]
-async fn a_failed_poll_records_no_entry(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_failed_poll_records_no_entry() {
+    let env = linked().await;
     set_orders(&env, ALICE, vec![order(1, 10.0, 5)]).await;
     env.poller.poll_character(ALICE).await;
     env.clock.advance(Duration::minutes(21));
@@ -688,12 +706,12 @@ async fn a_failed_poll_records_no_entry(pool: PgPool) {
 
     assert_eq!(env.poller.poll_character(ALICE).await, PollOutcome::Failed);
 
-    assert_eq!(poll_totals(&env.pool, ALICE).await.len(), 1);
+    assert_eq!(poll_totals(&env, ALICE).await.len(), 1);
 }
 
-#[sqlx::test]
-async fn unlinking_a_character_removes_its_poll_totals(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn unlinking_a_character_removes_its_poll_totals() {
+    let env = linked().await;
     let account = env
         .repo
         .find_character(ALICE)
@@ -707,25 +725,32 @@ async fn unlinking_a_character_removes_its_poll_totals(pool: PgPool) {
 
     env.repo.unlink_character(account, ALICE).await.unwrap();
 
-    assert!(poll_totals(&env.pool, ALICE).await.is_empty());
-    assert_eq!(poll_totals(&env.pool, BOB).await.len(), 1);
+    assert!(poll_totals(&env, ALICE).await.is_empty());
+    assert_eq!(poll_totals(&env, BOB).await.len(), 1);
 }
 
 // ---- remembered sell orders ----
 
-async fn remembered(pool: &PgPool) -> Vec<(i64, String, i64)> {
-    sqlx::query_as(
-        "SELECT order_id, first_issued::text, volume_total FROM sell_order_history \
-         ORDER BY order_id",
-    )
-    .fetch_all(pool)
-    .await
-    .unwrap()
+async fn remembered(env: &PollEnv) -> Vec<(i64, time::OffsetDateTime, i64)> {
+    let mut all = Vec::new();
+    for character in [ALICE, BOB] {
+        all.extend(
+            env.stores
+                .orders
+                .remembered_orders(character)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|o| (o.order_id, o.first_issued, o.volume_total)),
+        );
+    }
+    all.sort_unstable();
+    all
 }
 
-#[sqlx::test]
-async fn a_repriced_sell_order_keeps_the_issue_time_it_was_first_seen_with(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_repriced_sell_order_keeps_the_issue_time_it_was_first_seen_with() {
+    let env = linked().await;
     set_orders(&env, ALICE, vec![order(1, 10.0, 5)]).await;
     env.poller.poll_character(ALICE).await;
 
@@ -737,14 +762,14 @@ async fn a_repriced_sell_order_keeps_the_issue_time_it_was_first_seen_with(pool:
     env.poller.poll_character(ALICE).await;
 
     assert_eq!(
-        remembered(&env.pool).await,
-        [(1, "2026-10-01 12:00:00+00".to_owned(), 20)]
+        remembered(&env).await,
+        [(1, time::macros::datetime!(2026-10-01 12:00 UTC), 20)]
     );
 }
 
-#[sqlx::test]
-async fn a_closed_sell_order_stays_remembered(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn a_closed_sell_order_stays_remembered() {
+    let env = linked().await;
     set_orders(&env, ALICE, vec![order(1, 10.0, 5)]).await;
     env.poller.poll_character(ALICE).await;
 
@@ -752,13 +777,13 @@ async fn a_closed_sell_order_stays_remembered(pool: PgPool) {
     env.clock.advance(Duration::minutes(21));
     env.poller.poll_character(ALICE).await;
 
-    assert!(current_ids(&env.pool, ALICE).await.is_empty());
-    assert_eq!(remembered(&env.pool).await.len(), 1);
+    assert!(current_ids(&env, ALICE).await.is_empty());
+    assert_eq!(remembered(&env).await.len(), 1);
 }
 
-#[sqlx::test]
-async fn corporation_sell_orders_and_buy_orders_are_not_remembered(pool: PgPool) {
-    let env = linked(pool).await;
+#[tokio::test]
+async fn corporation_sell_orders_and_buy_orders_are_not_remembered() {
+    let env = linked().await;
     let mut corp = order(2, 10.0, 5);
     corp["is_corporation"] = json!(true);
     set_orders(
@@ -770,10 +795,6 @@ async fn corporation_sell_orders_and_buy_orders_are_not_remembered(pool: PgPool)
 
     env.poller.poll_character(ALICE).await;
 
-    let ids: Vec<i64> = remembered(&env.pool)
-        .await
-        .into_iter()
-        .map(|r| r.0)
-        .collect();
+    let ids: Vec<i64> = remembered(&env).await.into_iter().map(|r| r.0).collect();
     assert_eq!(ids, [1]);
 }

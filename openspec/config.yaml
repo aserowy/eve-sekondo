@@ -15,5 +15,8 @@ rules:
 operations:
   apply:
     guidance:
-      - Keep test summaries concise
       - Use the tdd skill
+      - Restrict npx playwright with `npx playwright test --workers=2`
+      - Restrict cargo test with `CARGO_BUILD_JOBS=3 RUST_TEST_THREADS=3 nice -n 19 cargo test`
+      - Keep test summaries concise
+      - Do not commit

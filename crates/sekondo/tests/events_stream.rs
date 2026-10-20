@@ -3,18 +3,13 @@ mod common;
 use std::time::Duration;
 
 use common::{AppBuilder, Browser, ManualClock, TestApp};
-use sqlx::PgPool;
 
 const ALICE: i64 = 90000001;
 const BOB: i64 = 90000002;
 const TICK: Duration = Duration::from_millis(150);
 
-async fn app(pool: PgPool) -> TestApp {
-    AppBuilder::new(pool)
-        .with_stub()
-        .sse_tick(TICK)
-        .spawn()
-        .await
+async fn app() -> TestApp {
+    AppBuilder::new().with_stub().sse_tick(TICK).spawn().await
 }
 
 async fn signed_in(app: &TestApp, character: i64) -> Browser {
@@ -43,9 +38,9 @@ async fn read_for(res: &mut reqwest::Response, window: Duration) -> (String, boo
     }
 }
 
-#[sqlx::test]
-async fn a_poll_sends_the_orders_updated_signal(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn a_poll_sends_the_orders_updated_signal() {
+    let app = app().await;
     let browser = signed_in(&app, ALICE).await;
     let mut stream = open_stream(&app, &browser).await;
 
@@ -55,9 +50,9 @@ async fn a_poll_sends_the_orders_updated_signal(pool: PgPool) {
     assert!(text.contains("event: orders-updated"), "{text:?}");
 }
 
-#[sqlx::test]
-async fn a_wallet_poll_sends_the_wealth_updated_signal_to_its_account_only(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn a_wallet_poll_sends_the_wealth_updated_signal_to_its_account_only() {
+    let app = app().await;
     let alice = signed_in(&app, ALICE).await;
     let bob = signed_in(&app, BOB).await;
     let mut alice_stream = open_stream(&app, &alice).await;
@@ -77,9 +72,9 @@ async fn a_wallet_poll_sends_the_wealth_updated_signal_to_its_account_only(pool:
     assert!(!bob_text.contains("wealth-updated"), "{bob_text:?}");
 }
 
-#[sqlx::test]
-async fn an_assets_poll_sends_the_wealth_updated_signal(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn an_assets_poll_sends_the_wealth_updated_signal() {
+    let app = app().await;
     let alice = signed_in(&app, ALICE).await;
     let mut stream = open_stream(&app, &alice).await;
 
@@ -92,9 +87,9 @@ async fn an_assets_poll_sends_the_wealth_updated_signal(pool: PgPool) {
     assert!(text.contains("event: wealth-updated"), "{text:?}");
 }
 
-#[sqlx::test]
-async fn a_price_refresh_signals_each_account_with_assets_once(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn a_price_refresh_signals_each_account_with_assets_once() {
+    let app = app().await;
     let alice = signed_in(&app, ALICE).await;
     let bob = signed_in(&app, BOB).await;
     let carol = signed_in(&app, 90000003).await;
@@ -120,9 +115,9 @@ async fn a_price_refresh_signals_each_account_with_assets_once(pool: PgPool) {
     assert_eq!(counts, [1, 1, 0], "Carol has no assets");
 }
 
-#[sqlx::test]
-async fn signals_stay_within_the_account(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn signals_stay_within_the_account() {
+    let app = app().await;
     let alice = signed_in(&app, ALICE).await;
     let bob = signed_in(&app, BOB).await;
     let mut alice_stream = open_stream(&app, &alice).await;
@@ -137,9 +132,9 @@ async fn signals_stay_within_the_account(pool: PgPool) {
     assert!(!ended);
 }
 
-#[sqlx::test]
-async fn an_unauthenticated_request_opens_no_stream(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn an_unauthenticated_request_opens_no_stream() {
+    let app = app().await;
 
     let res = app.browser().get(&app.url("/events")).await;
 
@@ -152,9 +147,9 @@ async fn an_unauthenticated_request_opens_no_stream(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn signals_carry_nothing_but_their_name(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn signals_carry_nothing_but_their_name() {
+    let app = app().await;
     let browser = signed_in(&app, ALICE).await;
     let mut stream = open_stream(&app, &browser).await;
 
@@ -175,9 +170,9 @@ async fn signals_carry_nothing_but_their_name(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
-async fn the_stream_sends_keep_alives(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn the_stream_sends_keep_alives() {
+    let app = app().await;
     let browser = signed_in(&app, ALICE).await;
     let mut stream = open_stream(&app, &browser).await;
 
@@ -187,9 +182,9 @@ async fn the_stream_sends_keep_alives(pool: PgPool) {
     assert!(text.matches(": keep-alive").count() >= 2, "{text:?}");
 }
 
-#[sqlx::test]
-async fn signing_out_elsewhere_closes_the_stream_and_reconnecting_fails(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn signing_out_elsewhere_closes_the_stream_and_reconnecting_fails() {
+    let app = app().await;
     let browser = signed_in(&app, ALICE).await;
     let mut stream = open_stream(&app, &browser).await;
     let cookie = browser.cookie().unwrap();
@@ -228,10 +223,10 @@ async fn signing_out_elsewhere_closes_the_stream_and_reconnecting_fails(pool: Pg
     assert_eq!(replay.get(&app.url("/events")).await.status(), 401);
 }
 
-#[sqlx::test]
-async fn the_stream_closes_when_the_session_outlives_its_lifetime(pool: PgPool) {
+#[tokio::test]
+async fn the_stream_closes_when_the_session_outlives_its_lifetime() {
     let clock = ManualClock::new();
-    let app = AppBuilder::new(pool)
+    let app = AppBuilder::new()
         .with_stub()
         .clock(clock.clone())
         .sse_tick(TICK)
@@ -249,9 +244,9 @@ async fn the_stream_closes_when_the_session_outlives_its_lifetime(pool: PgPool) 
     assert!(ended);
 }
 
-#[sqlx::test]
-async fn a_skills_poll_that_changes_a_fee_sends_fees_updated_without_any_data(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn a_skills_poll_that_changes_a_fee_sends_fees_updated_without_any_data() {
+    let app = app().await;
     let alice = signed_in(&app, ALICE).await;
     app.state.poller.poll_character(ALICE).await;
     let mut stream = open_stream(&app, &alice).await;
@@ -274,9 +269,9 @@ async fn a_skills_poll_that_changes_a_fee_sends_fees_updated_without_any_data(po
     }
 }
 
-#[sqlx::test]
-async fn a_skills_poll_that_changes_nothing_sends_no_fees_updated(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn a_skills_poll_that_changes_nothing_sends_no_fees_updated() {
+    let app = app().await;
     let alice = signed_in(&app, ALICE).await;
     app.state.poller.poll_character(ALICE).await;
     app.state
@@ -294,9 +289,9 @@ async fn a_skills_poll_that_changes_nothing_sends_no_fees_updated(pool: PgPool) 
     assert!(!text.contains("fees-updated"), "{text:?}");
 }
 
-#[sqlx::test]
-async fn fees_updated_stays_within_the_account(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn fees_updated_stays_within_the_account() {
+    let app = app().await;
     let alice = signed_in(&app, ALICE).await;
     let bob = signed_in(&app, BOB).await;
     app.state.poller.poll_character(ALICE).await;
@@ -326,11 +321,9 @@ fn one_purchase() -> serde_json::Value {
     })
 }
 
-#[sqlx::test]
-async fn a_transactions_poll_that_stores_a_purchase_sends_orders_updated_and_not_wealth(
-    pool: PgPool,
-) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn a_transactions_poll_that_stores_a_purchase_sends_orders_updated_and_not_wealth() {
+    let app = app().await;
     let alice = signed_in(&app, ALICE).await;
     app.stub_control("transactions", one_purchase()).await;
     let mut stream = open_stream(&app, &alice).await;
@@ -356,9 +349,9 @@ fn one_sale() -> serde_json::Value {
     })
 }
 
-#[sqlx::test]
-async fn a_new_sale_sends_trades_updated_and_no_orders_updated(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn a_new_sale_sends_trades_updated_and_no_orders_updated() {
+    let app = app().await;
     let alice = signed_in(&app, ALICE).await;
     app.stub_control("transactions", one_sale()).await;
     let mut stream = open_stream(&app, &alice).await;
@@ -374,9 +367,9 @@ async fn a_new_sale_sends_trades_updated_and_no_orders_updated(pool: PgPool) {
     assert!(!text.contains("wealth-updated"), "{text:?}");
 }
 
-#[sqlx::test]
-async fn a_new_purchase_sends_trades_updated_and_orders_updated(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn a_new_purchase_sends_trades_updated_and_orders_updated() {
+    let app = app().await;
     let alice = signed_in(&app, ALICE).await;
     app.stub_control("transactions", one_purchase()).await;
     let mut stream = open_stream(&app, &alice).await;
@@ -391,9 +384,9 @@ async fn a_new_purchase_sends_trades_updated_and_orders_updated(pool: PgPool) {
     assert!(text.contains("event: orders-updated"), "{text:?}");
 }
 
-#[sqlx::test]
-async fn trades_updated_stays_within_the_account(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn trades_updated_stays_within_the_account() {
+    let app = app().await;
     let alice = signed_in(&app, ALICE).await;
     let bob = signed_in(&app, BOB).await;
     app.stub_control("transactions", one_sale()).await;
@@ -411,9 +404,9 @@ async fn trades_updated_stays_within_the_account(pool: PgPool) {
     assert!(!bob_text.contains("trades-updated"), "{bob_text:?}");
 }
 
-#[sqlx::test]
-async fn a_transactions_poll_that_stores_nothing_new_sends_no_signal(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn a_transactions_poll_that_stores_nothing_new_sends_no_signal() {
+    let app = app().await;
     let alice = signed_in(&app, ALICE).await;
     app.stub_control("transactions", one_purchase()).await;
     app.state
@@ -450,9 +443,9 @@ async fn tradable_book(app: &TestApp) {
     assert_eq!(res.status(), 204);
 }
 
-#[sqlx::test]
-async fn a_book_refresh_signals_every_account(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn a_book_refresh_signals_every_account() {
+    let app = app().await;
     let alice = signed_in(&app, ALICE).await;
     let bob = signed_in(&app, BOB).await;
     let mut alice_stream = open_stream(&app, &alice).await;
@@ -471,9 +464,9 @@ async fn a_book_refresh_signals_every_account(pool: PgPool) {
     }
 }
 
-#[sqlx::test]
-async fn a_failed_book_refresh_signals_nobody(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn a_failed_book_refresh_signals_nobody() {
+    let app = app().await;
     let alice = signed_in(&app, ALICE).await;
     let mut stream = open_stream(&app, &alice).await;
     tradable_book(&app).await;
@@ -490,22 +483,31 @@ async fn a_failed_book_refresh_signals_nobody(pool: PgPool) {
 }
 
 async fn tradable_in_the_database(app: &TestApp) {
-    for (id, buy) in [(1, true), (2, false)] {
-        sqlx::query(
-            "INSERT INTO station_orders (region_id, station_id, order_id, type_id, is_buy_order, price, volume_remain)
-             VALUES (10000002, 60003760, $1, 34, $2, 10, 5)",
+    let order = |order_id, is_buy_order| sekondo::store::StationOrder {
+        order_id,
+        type_id: 34,
+        is_buy_order,
+        price_cents: 1_000,
+        volume_remain: 5,
+    };
+    let now = app.state.clock.now();
+    app.stores
+        .station
+        .replace_station_book(
+            10000002,
+            60003760,
+            now,
+            &[order(1, true), order(2, false)],
+            now,
+            None,
         )
-        .bind(id)
-        .bind(buy)
-        .execute(&app.state.pool)
         .await
         .unwrap();
-    }
 }
 
-#[sqlx::test]
-async fn a_history_pass_that_stored_rows_signals_once_and_an_empty_one_does_not(pool: PgPool) {
-    let app = app(pool).await;
+#[tokio::test]
+async fn a_history_pass_that_stored_rows_signals_once_and_an_empty_one_does_not() {
+    let app = app().await;
     let alice = signed_in(&app, ALICE).await;
     let mut stream = open_stream(&app, &alice).await;
     tradable_in_the_database(&app).await;
@@ -526,8 +528,10 @@ async fn a_history_pass_that_stored_rows_signals_once_and_an_empty_one_does_not(
         serde_json::json!({"region_id": 10000002, "type_id": 34, "days": [day(2), day(1)]}),
     )
     .await;
-    sqlx::query("UPDATE history_sync SET next_poll_at = now() - interval '1 minute'")
-        .execute(&app.state.pool)
+    let now = app.state.clock.now();
+    app.stores
+        .station
+        .schedule_history(10000002, 34, now, now - time::Duration::minutes(1))
         .await
         .unwrap();
 

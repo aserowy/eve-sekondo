@@ -7,7 +7,6 @@ use axum::{
     http::Uri,
     response::{IntoResponse, Redirect, Response},
 };
-use sqlx::PgPool;
 use time::OffsetDateTime;
 use tower_sessions::Session;
 use uuid::Uuid;
@@ -15,14 +14,13 @@ use uuid::Uuid;
 use crate::{
     account::CurrentAccount,
     app::AppState,
-    csrf,
-    fees::{self, FEE_RATES_SQL},
-    format,
-    freshness::{FreshnessView, freshness_view, list_freshness},
+    csrf, fees, format,
+    freshness::{FreshnessView, freshness_view},
     kpi::{Kpi, KpiLink},
     pages::{self, Nav, Page},
     pagination::{Link, PageView, Paging, paginate},
     selection::{CharacterSelection, ViewQuery},
+    store::StoreError,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,44 +73,6 @@ impl SortKey {
             Self::Amount => "amount",
             Self::Margin => "margin",
             Self::TimeLeft => "left",
-        }
-    }
-
-    /// The SQL `ORDER BY` terms for a direction. Only these literals ever reach the query text.
-    /// The standing and the gap put orders without a standing last in both directions, so the
-    /// first term does not follow the direction.
-    fn order_by(self, direction: &str) -> String {
-        match self {
-            // `undercut > 0` is false for "Top", so it comes first in ascending order.
-            Self::Standing => format!(
-                "(st.undercut IS NULL), (st.undercut > 0) {direction}, st.undercut {direction}"
-            ),
-            // A top order has no best price to differ from: it counts as no difference.
-            Self::Gap => format!(
-                "(st.undercut IS NULL), COALESCE(abs(st.best_price - o.price), 0) {direction}"
-            ),
-            Self::UndercutVolume => {
-                format!("(st.undercut IS NULL), COALESCE(st.undercut_volume, 0) {direction}")
-            }
-            Self::Margin => {
-                format!("({MARGIN_CENTS}) IS NULL, ({MARGIN_CENTS}) {direction}")
-            }
-            other => format!("{} {direction}", other.expression()),
-        }
-    }
-
-    fn expression(self) -> &'static str {
-        match self {
-            Self::Item => "lower(COALESCE(tn.name, '#' || o.type_id))",
-            Self::Price => "o.price",
-            Self::Volume => "o.volume_remain",
-            Self::Amount => {
-                "CASE WHEN o.is_buy_order THEN COALESCE(o.escrow, 0) ELSE o.price * o.volume_remain END"
-            }
-            Self::TimeLeft => "o.issued + o.duration * interval '1 day'",
-            Self::Standing | Self::Gap | Self::UndercutVolume | Self::Margin => {
-                unreachable!("ordered by `order_by`")
-            }
         }
     }
 }
@@ -222,128 +182,6 @@ impl OrderRow {
     pub fn expires_at(&self) -> OffsetDateTime {
         self.issued + time::Duration::days(i64::from(self.duration))
     }
-}
-
-/// Joins `st` to the current orders `o`: how many other public orders undercut each of them and
-/// the best of those prices and their remaining volume, or NULL when there is no standing (design §5). The listing and the
-/// change detection both use it, so a signal is sent exactly when what is shown changes.
-///
-/// A standing exists only when the order's pair was refreshed once, the order is not in a player
-/// structure and, for a buy order, its own row in the market data tells its solar system.
-/// A sell order is compared at its station. A buy order is compared at its station with the buy
-/// orders that reach it: any order there, a `region` range, and a `solarsystem` or jump range
-/// from the same solar system. The own range is not read.
-pub(crate) const STANDING_JOIN: &str = "LEFT JOIN LATERAL (
-        SELECT CASE WHEN a.available THEN c.undercut END AS undercut,
-               CASE WHEN a.available THEN c.best_price END AS best_price,
-               CASE WHEN a.available THEN c.undercut_volume END AS undercut_volume
-        FROM (SELECT o.location_id < 100000000
-                 AND EXISTS (SELECT 1 FROM market_sync s
-                             WHERE s.region_id = o.region_id AND s.type_id = o.type_id
-                               AND s.last_success_at IS NOT NULL)
-                 AND (NOT o.is_buy_order
-                      OR EXISTS (SELECT 1 FROM market_orders own WHERE own.order_id = o.order_id))
-                 AS available) a,
-        LATERAL (
-            SELECT count(*) AS undercut,
-                   CASE WHEN o.is_buy_order THEN max(m.price) ELSE min(m.price) END AS best_price,
-                   sum(m.volume_remain)::bigint AS undercut_volume
-            FROM market_orders m
-            WHERE m.region_id = o.region_id AND m.type_id = o.type_id
-              AND m.order_id <> o.order_id
-              AND CASE WHEN o.is_buy_order THEN
-                    m.is_buy_order AND m.price > o.price
-                    AND (m.location_id = o.location_id
-                         OR m.range = 'region'
-                         OR (m.range <> 'station'
-                             AND m.system_id = (SELECT own.system_id FROM market_orders own
-                                                WHERE own.order_id = o.order_id)))
-                  ELSE
-                    NOT m.is_buy_order AND m.price < o.price AND m.location_id = o.location_id
-                  END
-        ) c
-    ) st ON true";
-
-/// The per-unit difference to the best price in cents, for an order that is undercut. Needs
-/// `STANDING_JOIN` (`st`) and the current order (`o`).
-pub(crate) const GAP_CENTS: &str =
-    "CASE WHEN st.undercut > 0 THEN (abs(st.best_price - o.price) * 100)::bigint END";
-
-/// The margin of a sell order in cents (design §6). Needs the cost row `sc`, the fee rates `f` and
-/// the current order `o`. The cost per unit is the whole known cost over the total volume, so a
-/// part that was sold already carries its share.
-const MARGIN_CENTS: &str = "CASE WHEN NOT o.is_buy_order AND NOT o.is_corporation
-          AND sc.covered_units = o.volume_total
-          AND f.sales_tax IS NOT NULL AND f.broker_fee IS NOT NULL
-     THEN (round(o.volume_remain * o.price * (1 - f.sales_tax / 100 - f.broker_fee / 100)
-                 - o.volume_remain * sc.cost / o.volume_total, 2) * 100)::bigint
-END";
-
-/// The purchase cost of the remaining volume in cents, for an order whose cost covers its whole
-/// volume.
-const COST_CENTS: &str = "CASE WHEN sc.covered_units = o.volume_total AND o.volume_total > 0
-     THEN (round(o.volume_remain * sc.cost / o.volume_total, 2) * 100)::bigint
-END";
-
-/// The average cost per unit in cents, for an order whose cost covers its whole volume.
-const COST_PER_UNIT_CENTS: &str =
-    "CASE WHEN sc.covered_units = o.volume_total AND o.volume_total > 0
-     THEN round(sc.cost * 100 / o.volume_total)::bigint
-END";
-
-/// The current orders of the selected characters, restricted to the account in the query itself
-/// so a selection can never reach another account's data.
-pub async fn list_orders(
-    pool: &PgPool,
-    account_id: Uuid,
-    selection: &CharacterSelection,
-    side: Side,
-    sort: Sort,
-) -> Result<Vec<OrderRow>, sqlx::Error> {
-    let direction = match sort.dir {
-        Dir::Asc => "ASC",
-        Dir::Desc => "DESC",
-    };
-    let sql = format!(
-        "SELECT o.order_id, o.character_id, c.name AS character_name,
-                o.type_id, tn.name AS type_name,
-                o.region_id, rn.name AS region_name,
-                o.location_id, ln.name AS location_name, (ln.id IS NOT NULL) AS location_known,
-                o.is_corporation,
-                (o.price * 100)::bigint AS price_cents,
-                o.volume_remain, o.volume_total,
-                (o.price * o.volume_remain * 100)::bigint AS value_cents,
-                (o.escrow * 100)::bigint AS escrow_cents,
-                o.issued, o.duration,
-                st.undercut,
-                (st.best_price * 100)::bigint AS best_price_cents,
-                {GAP_CENTS} AS gap_cents,
-                st.undercut_volume,
-                CASE WHEN NOT o.is_buy_order AND NOT o.is_corporation THEN sc.covered_units END
-                    AS covered_units,
-                {MARGIN_CENTS} AS margin_cents,
-                {COST_PER_UNIT_CENTS} AS cost_per_unit_cents,
-                CASE WHEN NOT o.is_buy_order AND NOT o.is_corporation THEN {COST_CENTS} END
-                    AS cost_cents
-         FROM current_orders o
-         JOIN characters c ON c.character_id = o.character_id
-         LEFT JOIN names tn ON tn.id = o.type_id
-         LEFT JOIN names rn ON rn.id = o.region_id
-         LEFT JOIN names ln ON ln.id = o.location_id
-         {STANDING_JOIN}
-         LEFT JOIN sell_order_costs sc ON sc.order_id = o.order_id
-         LEFT JOIN ({FEE_RATES_SQL}) f
-                ON f.character_id = o.character_id AND f.location_id = o.location_id
-         WHERE c.account_id = $2 AND o.character_id = ANY($1) AND o.is_buy_order = $3
-         ORDER BY {}, o.order_id",
-        sort.key.order_by(direction)
-    );
-    sqlx::query_as(sqlx::AssertSqlSafe(sql))
-        .bind(selection.ids())
-        .bind(account_id)
-        .bind(side == Side::Buy)
-        .fetch_all(pool)
-        .await
 }
 
 // ---- KPIs ----
@@ -820,14 +658,14 @@ async fn build_view(
     account_id: Uuid,
     side: Side,
     query: &ViewQuery,
-) -> Result<Option<(OrdersView, CharacterSelection)>, sqlx::Error> {
+) -> Result<Option<(OrdersView, CharacterSelection)>, StoreError> {
     let characters = state
         .repo
         .list_characters(account_id)
         .await
         .map_err(|e| match e {
             crate::repo::RepoError::Db(e) => e,
-            other => sqlx::Error::Protocol(other.to_string()),
+            other => StoreError::Backend(other.to_string()),
         })?;
     if characters.is_empty() {
         return Ok(None);
@@ -848,9 +686,17 @@ async fn build_view(
     } else {
         view_state.buy
     };
-    let rows = list_orders(&state.pool, account_id, &selection, side, sort).await?;
-    let freshness = list_freshness(&state.pool, account_id, &selection).await?;
-    let cards = fees::fee_cards(&state.pool, account_id, selection.ids()).await?;
+    let rows = state
+        .stores
+        .orders
+        .list_orders(account_id, selection.ids(), side, sort)
+        .await?;
+    let freshness = state
+        .stores
+        .orders
+        .list_freshness(account_id, selection.ids())
+        .await?;
+    let cards = fees::fee_cards(&state.stores, account_id, selection.ids()).await?;
 
     // The KPIs cover every order of the side; the table shows the requested page of them.
     let mut kpis = order_kpis(side, &rows);

@@ -1,8 +1,9 @@
 //! The filters of one account: what they default to, how a submitted form is validated, and how
 //! they are stored.
 
-use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::store::{OpportunityStore, StoreError};
 
 /// The longest item name search that is accepted.
 pub const SEARCH_MAX: usize = 100;
@@ -117,41 +118,17 @@ fn plain(value: f64) -> String {
 }
 
 impl Settings {
-    pub async fn load(pool: &PgPool, account_id: Uuid) -> Result<Self, sqlx::Error> {
-        let row: Option<(f64, f64, String, f64)> = sqlx::query_as(
-            "SELECT min_margin::float8, min_isk_per_day::float8, search, capital::float8
-             FROM opportunity_settings WHERE account_id = $1",
-        )
-        .bind(account_id)
-        .fetch_optional(pool)
-        .await?;
-        Ok(row.map_or_else(
-            Self::default,
-            |(min_margin, min_isk_per_day, search, capital)| Self {
-                min_margin,
-                min_isk_per_day,
-                search,
-                capital,
-            },
-        ))
+    /// The account's saved filters, or the defaults when it never saved any.
+    pub async fn load(store: &dyn OpportunityStore, account_id: Uuid) -> Result<Self, StoreError> {
+        Ok(store.load_settings(account_id).await?.unwrap_or_default())
     }
 
-    pub async fn save(&self, pool: &PgPool, account_id: Uuid) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            "INSERT INTO opportunity_settings (account_id, min_margin, min_isk_per_day, search, capital)
-             VALUES ($1, $2::float8::numeric, $3::float8::numeric, $4, $5::float8::numeric)
-             ON CONFLICT (account_id) DO UPDATE SET
-                 min_margin = excluded.min_margin, min_isk_per_day = excluded.min_isk_per_day,
-                 search = excluded.search, capital = excluded.capital",
-        )
-        .bind(account_id)
-        .bind(self.min_margin)
-        .bind(self.min_isk_per_day)
-        .bind(&self.search)
-        .bind(self.capital)
-        .execute(pool)
-        .await?;
-        Ok(())
+    pub async fn save(
+        &self,
+        store: &dyn OpportunityStore,
+        account_id: Uuid,
+    ) -> Result<(), StoreError> {
+        store.save_settings(account_id, self).await
     }
 }
 

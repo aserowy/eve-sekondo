@@ -14,7 +14,7 @@ use crate::{
     account::CurrentAccount,
     app::AppState,
     csrf, format,
-    freshness::{WealthFreshnessView, list_wealth_freshness, wealth_freshness_view},
+    freshness::{WealthFreshnessView, wealth_freshness_view},
     kpi::Kpi,
     names::STRUCTURE_ID_MIN,
     orders::{Dir, FilterEntry},
@@ -22,6 +22,7 @@ use crate::{
     pagination::{Link, PageView, Paging, paginate},
     range::Range,
     selection::{CharacterSelection, ViewQuery},
+    store::StoreError,
     wealth::{self, InventoryRow, InventorySort, InventorySortKey, WealthPoint},
     wealth_poller::ASSETS_INTERVAL,
 };
@@ -336,14 +337,14 @@ async fn build_view(
     state: &AppState,
     account_id: Uuid,
     query: &ViewQuery,
-) -> Result<Option<(WealthView, CharacterSelection)>, sqlx::Error> {
+) -> Result<Option<(WealthView, CharacterSelection)>, StoreError> {
     let characters = state
         .repo
         .list_characters(account_id)
         .await
         .map_err(|e| match e {
             crate::repo::RepoError::Db(e) => e,
-            other => sqlx::Error::Protocol(other.to_string()),
+            other => StoreError::Backend(other.to_string()),
         })?;
     if characters.is_empty() {
         return Ok(None);
@@ -352,17 +353,34 @@ async fn build_view(
     let selection = query.selection(&ids);
     let now = state.clock.now();
     let order_interval: Duration = state.config.order_poll_interval;
-    let freshness = list_wealth_freshness(&state.pool, account_id, &selection).await?;
+    let freshness = state
+        .stores
+        .wealth
+        .list_wealth_freshness(account_id, selection.ids())
+        .await?;
     let mut view_state = ViewState {
         chars: selection.param(),
         sort: InventorySort::parse(query.sort.as_deref(), query.dir.as_deref()),
         range: Range::parse(query.range.as_deref()),
         paging: query.paging(),
     };
-    let inventory = wealth::inventory(&state.pool, account_id, &selection, view_state.sort).await?;
-    let points =
-        wealth::history(&state.pool, account_id, &selection, view_state.range, now).await?;
-    let current = wealth::current(&state.pool, account_id, &selection).await?;
+    let inventory = wealth::inventory(
+        &*state.stores.wealth,
+        account_id,
+        &selection,
+        view_state.sort,
+    )
+    .await?;
+    let points = state
+        .stores
+        .wealth
+        .history(account_id, selection.ids(), view_state.range, now)
+        .await?;
+    let current = state
+        .stores
+        .wealth
+        .current(account_id, selection.ids())
+        .await?;
 
     let link_to = |paging: Paging| {
         let query = view_state.with_paging(paging).query(true);

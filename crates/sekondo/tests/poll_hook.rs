@@ -4,7 +4,6 @@
 mod common;
 
 use common::{AppBuilder, Browser, TestApp};
-use sqlx::PgPool;
 
 const ALICE: i64 = 90000001;
 const BOB: i64 = 90000002;
@@ -37,17 +36,31 @@ async fn poll(app: &TestApp, browser: &Browser, token: &str, id: i64) -> reqwest
         .await
 }
 
-async fn order_count(pool: &PgPool, character: i64) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM current_orders WHERE character_id = $1")
-        .bind(character)
-        .fetch_one(pool)
+async fn order_count(app: &TestApp, character: i64) -> i64 {
+    let account = app
+        .state
+        .repo
+        .find_character(character)
         .await
         .unwrap()
+        .unwrap()
+        .account_id;
+    let mut count = 0;
+    for side in [sekondo::orders::Side::Sell, sekondo::orders::Side::Buy] {
+        count += app
+            .stores
+            .orders
+            .list_orders(account, &[character], side, Default::default())
+            .await
+            .unwrap()
+            .len() as i64;
+    }
+    count
 }
 
-#[sqlx::test]
-async fn it_polls_a_character_of_the_signed_in_account(pool: PgPool) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+#[tokio::test]
+async fn it_polls_a_character_of_the_signed_in_account() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let browser = app.browser();
     browser.sso_round_trip(&app, "/auth/login", ALICE).await;
     let token = token(&app, &browser).await;
@@ -57,12 +70,12 @@ async fn it_polls_a_character_of_the_signed_in_account(pool: PgPool) {
     assert_eq!(res.status(), 200);
     assert_eq!(res.text().await.unwrap(), "updated");
     // The stub's fixture gives Alice three orders.
-    assert_eq!(order_count(&pool, ALICE).await, 3);
+    assert_eq!(order_count(&app, ALICE).await, 3);
 }
 
-#[sqlx::test]
-async fn it_answers_404_for_the_character_of_another_account(pool: PgPool) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+#[tokio::test]
+async fn it_answers_404_for_the_character_of_another_account() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let alice = app.browser();
     alice.sso_round_trip(&app, "/auth/login", ALICE).await;
     let bob = app.browser();
@@ -72,7 +85,7 @@ async fn it_answers_404_for_the_character_of_another_account(pool: PgPool) {
     let res = poll(&app, &alice, &token, BOB).await;
 
     assert_eq!(res.status(), 404);
-    assert_eq!(order_count(&pool, BOB).await, 0);
+    assert_eq!(order_count(&app, BOB).await, 0);
     assert_eq!(app.stub().esi_calls("orders"), 0);
 }
 
@@ -87,11 +100,9 @@ async fn market_poll(app: &TestApp, browser: &Browser, token: Option<&str>) -> r
     browser.send(request).await
 }
 
-#[sqlx::test]
-async fn the_market_poll_refreshes_the_tracked_pairs_of_the_account_only_after_a_poll(
-    pool: PgPool,
-) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+#[tokio::test]
+async fn the_market_poll_refreshes_the_tracked_pairs_of_the_account_only_after_a_poll() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let browser = app.browser();
     browser.sso_round_trip(&app, "/auth/login", ALICE).await;
     let token = token(&app, &browser).await;
@@ -108,17 +119,31 @@ async fn the_market_poll_refreshes_the_tracked_pairs_of_the_account_only_after_a
     // The stub's fixture gives Alice orders for three items in The Forge, due or not.
     assert_eq!(after.text().await.unwrap(), "3");
     assert_eq!(app.stub().esi_calls("market"), 3);
-    let synced: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM market_sync WHERE last_success_at IS NOT NULL")
-            .fetch_one(&pool)
+    let account = app
+        .state
+        .repo
+        .find_character(ALICE)
+        .await
+        .unwrap()
+        .unwrap()
+        .account_id;
+    let mut synced = 0;
+    for (region, type_id) in app.stores.market.account_pairs(account).await.unwrap() {
+        let state = app
+            .stores
+            .market
+            .pair_sync(region, type_id)
             .await
+            .unwrap()
             .unwrap();
+        synced += i64::from(state.last_success_at.is_some());
+    }
     assert_eq!(synced, 3);
 }
 
-#[sqlx::test]
-async fn the_market_poll_leaves_the_pairs_of_other_accounts_alone(pool: PgPool) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+#[tokio::test]
+async fn the_market_poll_leaves_the_pairs_of_other_accounts_alone() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let alice = app.browser();
     alice.sso_round_trip(&app, "/auth/login", ALICE).await;
     let bob = app.browser();
@@ -135,9 +160,9 @@ async fn the_market_poll_leaves_the_pairs_of_other_accounts_alone(pool: PgPool) 
     assert_eq!(app.stub().esi_calls("market"), 1);
 }
 
-#[sqlx::test]
-async fn the_market_poll_needs_the_csrf_token_and_a_session(pool: PgPool) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+#[tokio::test]
+async fn the_market_poll_needs_the_csrf_token_and_a_session() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let browser = app.browser();
     browser.sso_round_trip(&app, "/auth/login", ALICE).await;
     let token = token(&app, &browser).await;
@@ -170,11 +195,9 @@ async fn wealth_poll(
         .await
 }
 
-#[sqlx::test]
-async fn the_wealth_poll_polls_the_wallet_and_the_assets_of_a_character_of_the_account(
-    pool: PgPool,
-) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+#[tokio::test]
+async fn the_wealth_poll_polls_the_wallet_and_the_assets_of_a_character_of_the_account() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let browser = app.browser();
     browser.sso_round_trip(&app, "/auth/login", ALICE).await;
     let token = token(&app, &browser).await;
@@ -184,20 +207,34 @@ async fn the_wealth_poll_polls_the_wallet_and_the_assets_of_a_character_of_the_a
 
     assert_eq!(wallet.text().await.unwrap(), "updated");
     assert_eq!(assets.text().await.unwrap(), "updated");
-    let balances: i64 = sqlx::query_scalar("SELECT count(*) FROM wallet_balances")
-        .fetch_one(&pool)
+    let account = app
+        .state
+        .repo
+        .find_character(ALICE)
+        .await
+        .unwrap()
+        .unwrap()
+        .account_id;
+    let wallet = app
+        .stores
+        .wealth
+        .wealth_sync(ALICE, sekondo::wealth_poller::Kind::Wallet)
+        .await
+        .unwrap()
+        .unwrap();
+    let items = app
+        .stores
+        .wealth
+        .inventory_rows(account, &[ALICE], Default::default())
         .await
         .unwrap();
-    let items: i64 = sqlx::query_scalar("SELECT count(*) FROM current_assets")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!((balances, items), (1, 2));
+    assert!(wallet.last_success_at.is_some());
+    assert_eq!(items.len(), 2);
 }
 
-#[sqlx::test]
-async fn the_wealth_poll_polls_the_transactions_of_a_character_of_the_account(pool: PgPool) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+#[tokio::test]
+async fn the_wealth_poll_polls_the_transactions_of_a_character_of_the_account() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let browser = app.browser();
     browser.sso_round_trip(&app, "/auth/login", ALICE).await;
     let token = token(&app, &browser).await;
@@ -214,16 +251,31 @@ async fn the_wealth_poll_polls_the_transactions_of_a_character_of_the_account(po
     let res = wealth_poll(&app, &browser, &token, ALICE, "transactions").await;
 
     assert_eq!(res.text().await.unwrap(), "updated");
-    let purchases: i64 = sqlx::query_scalar("SELECT count(*) FROM purchases")
-        .fetch_one(&pool)
+    let account = app
+        .state
+        .repo
+        .find_character(ALICE)
+        .await
+        .unwrap()
+        .unwrap()
+        .account_id;
+    let trades = app
+        .stores
+        .trades
+        .list_trades(
+            account,
+            &[ALICE],
+            time::macros::datetime!(2026-01-01 0:00 UTC),
+            time::macros::datetime!(2027-01-01 0:00 UTC),
+        )
         .await
         .unwrap();
-    assert_eq!(purchases, 1);
+    assert_eq!(trades.len(), 1);
 }
 
-#[sqlx::test]
-async fn the_wealth_poll_refuses_other_accounts_and_unknown_kinds(pool: PgPool) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+#[tokio::test]
+async fn the_wealth_poll_refuses_other_accounts_and_unknown_kinds() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let alice = app.browser();
     alice.sso_round_trip(&app, "/auth/login", ALICE).await;
     let bob = app.browser();
@@ -245,9 +297,9 @@ async fn the_wealth_poll_refuses_other_accounts_and_unknown_kinds(pool: PgPool) 
     assert_eq!(app.stub().esi_calls("wallet"), 0);
 }
 
-#[sqlx::test]
-async fn the_price_refresh_fetches_the_prices_and_revalues_the_inventory(pool: PgPool) {
-    let app = AppBuilder::new(pool.clone()).with_stub().spawn().await;
+#[tokio::test]
+async fn the_price_refresh_fetches_the_prices_and_revalues_the_inventory() {
+    let app = AppBuilder::new().with_stub().spawn().await;
     let browser = app.browser();
     browser.sso_round_trip(&app, "/auth/login", ALICE).await;
     let token = token(&app, &browser).await;

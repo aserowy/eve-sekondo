@@ -11,7 +11,6 @@ use sekondo::{
     station_book::{BookPages, StationBookPoller},
 };
 use serde_json::{Value, json};
-use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 
 const FORGE: i64 = 10000002;
@@ -48,17 +47,23 @@ async fn set_book(env: &PollEnv, orders: Vec<Value>, page_size: Option<usize>) {
 }
 
 async fn book_ids(env: &PollEnv) -> Vec<i64> {
-    sqlx::query_scalar("SELECT order_id FROM station_orders ORDER BY order_id")
-        .fetch_all(&env.pool)
+    env.stores
+        .station
+        .book(FORGE, JITA_44)
         .await
         .unwrap()
+        .iter()
+        .map(|o| o.order_id)
+        .collect()
 }
 
 async fn snapshot_count(env: &PollEnv) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM station_snapshots")
-        .fetch_one(&env.pool)
+    env.stores
+        .station
+        .snapshots(FORGE, JITA_44)
         .await
         .unwrap()
+        .len() as i64
 }
 
 /// `(best buy, best sell, spread, buy near units, buy near orders, sell near units, sell near
@@ -78,19 +83,26 @@ type Snapshot = (
 );
 
 async fn latest_snapshot(env: &PollEnv, type_id: i64) -> Snapshot {
-    sqlx::query_as(
-        "SELECT best_buy::text, best_sell::text, round(spread, 4)::text, buy_near_units,
-                buy_near_orders, sell_near_units, sell_near_orders, buy_units, sell_units,
-                buy_taken, sell_taken
-         FROM station_snapshots WHERE type_id = $1 ORDER BY recorded_at DESC LIMIT 1",
+    let snapshots = env.stores.station.snapshots(FORGE, JITA_44).await.unwrap();
+    let s = snapshots
+        .into_iter()
+        .rfind(|s| s.type_id == type_id)
+        .expect("a snapshot");
+    (
+        s.best_buy,
+        s.best_sell,
+        sekondo::fees::round_half_up(&s.spread, 4),
+        s.buy_near_units,
+        s.buy_near_orders,
+        s.sell_near_units,
+        s.sell_near_orders,
+        s.buy_units,
+        s.sell_units,
+        s.buy_taken,
+        s.sell_taken,
     )
-    .bind(type_id)
-    .fetch_one(&env.pool)
-    .await
-    .unwrap()
 }
 
-#[derive(Debug, sqlx::FromRow)]
 struct Sync {
     next_poll_at: OffsetDateTime,
     last_success_at: Option<OffsetDateTime>,
@@ -99,22 +111,26 @@ struct Sync {
 }
 
 async fn book_sync(env: &PollEnv) -> Sync {
-    sqlx::query_as(
-        "SELECT next_poll_at, last_success_at, last_error, failures FROM station_sync
-         WHERE region_id = $1 AND station_id = $2 AND kind = 'book'",
-    )
-    .bind(FORGE)
-    .bind(JITA_44)
-    .fetch_one(&env.pool)
-    .await
-    .unwrap()
+    let state = env
+        .stores
+        .station
+        .station_sync_state(FORGE, JITA_44, "book")
+        .await
+        .unwrap()
+        .unwrap();
+    Sync {
+        next_poll_at: state.next_poll_at,
+        last_success_at: state.last_success_at,
+        last_error: state.last_error,
+        failures: state.failures,
+    }
 }
 
 // ---- what is kept ----
 
-#[sqlx::test]
-async fn a_refresh_keeps_exactly_the_orders_at_jita_44(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn a_refresh_keeps_exactly_the_orders_at_jita_44() {
+    let env = PollEnv::new().await;
     set_book(
         &env,
         vec![
@@ -136,9 +152,9 @@ async fn a_refresh_keeps_exactly_the_orders_at_jita_44(pool: PgPool) {
     assert_eq!(env.stub.esi_calls("market"), 1);
 }
 
-#[sqlx::test]
-async fn every_page_of_the_book_is_read_and_merged(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn every_page_of_the_book_is_read_and_merged() {
+    let env = PollEnv::new().await;
     let orders: Vec<Value> = (1..=7)
         .map(|id| at_jita(id, 34, id % 2 == 0, 10.0 + id as f64, 5))
         .collect();
@@ -150,9 +166,9 @@ async fn every_page_of_the_book_is_read_and_merged(pool: PgPool) {
     assert_eq!(env.stub.esi_calls("market"), 4, "four pages of two");
 }
 
-#[sqlx::test]
-async fn the_book_is_replaced_by_the_next_refresh(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn the_book_is_replaced_by_the_next_refresh() {
+    let env = PollEnv::new().await;
     set_book(
         &env,
         vec![at_jita(1, 34, false, 10.0, 5), at_jita(2, 34, true, 9.0, 5)],
@@ -174,9 +190,9 @@ async fn the_book_is_replaced_by_the_next_refresh(pool: PgPool) {
 
 // ---- the snapshot ----
 
-#[sqlx::test]
-async fn the_snapshot_holds_the_top_of_book_figures_of_a_tradable_item(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn the_snapshot_holds_the_top_of_book_figures_of_a_tradable_item() {
+    let env = PollEnv::new().await;
     set_book(
         &env,
         vec![
@@ -209,19 +225,13 @@ async fn the_snapshot_holds_the_top_of_book_figures_of_a_tradable_item(pool: PgP
             0
         )
     );
-    let recorded: OffsetDateTime =
-        sqlx::query_scalar("SELECT recorded_at FROM station_snapshots LIMIT 1")
-            .fetch_one(&env.pool)
-            .await
-            .unwrap();
+    let recorded = env.stores.station.snapshots(FORGE, JITA_44).await.unwrap()[0].recorded_at;
     assert_eq!(recorded, env.clock.now());
 }
 
-#[sqlx::test]
-async fn a_bait_buy_order_far_below_an_expensive_sell_is_snapshotted_with_its_huge_spread(
-    pool: PgPool,
-) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn a_bait_buy_order_far_below_an_expensive_sell_is_snapshotted_with_its_huge_spread() {
+    let env = PollEnv::new().await;
     // Real Jita books hold 0.01 ISK buy orders on items selling for billions.
     set_book(
         &env,
@@ -243,9 +253,9 @@ async fn a_bait_buy_order_far_below_an_expensive_sell_is_snapshotted_with_its_hu
     );
 }
 
-#[sqlx::test]
-async fn an_item_with_only_one_side_gets_no_snapshot(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn an_item_with_only_one_side_gets_no_snapshot() {
+    let env = PollEnv::new().await;
     set_book(
         &env,
         vec![
@@ -259,10 +269,15 @@ async fn an_item_with_only_one_side_gets_no_snapshot(pool: PgPool) {
 
     env.station.refresh().await;
 
-    let items: Vec<i64> = sqlx::query_scalar("SELECT type_id FROM station_snapshots")
-        .fetch_all(&env.pool)
+    let items: Vec<i64> = env
+        .stores
+        .station
+        .snapshots(FORGE, JITA_44)
         .await
-        .unwrap();
+        .unwrap()
+        .iter()
+        .map(|s| s.type_id)
+        .collect();
     assert_eq!(items, [35]);
     assert_eq!(
         book_ids(&env).await,
@@ -271,9 +286,9 @@ async fn an_item_with_only_one_side_gets_no_snapshot(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn units_taken_are_the_drop_in_orders_present_in_both_refreshes(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn units_taken_are_the_drop_in_orders_present_in_both_refreshes() {
+    let env = PollEnv::new().await;
     set_book(
         &env,
         vec![
@@ -305,9 +320,9 @@ async fn units_taken_are_the_drop_in_orders_present_in_both_refreshes(pool: PgPo
     assert_eq!((snapshot.9, snapshot.10), (40, 50), "buy taken, sell taken");
 }
 
-#[sqlx::test]
-async fn the_first_refresh_takes_nothing_and_a_growing_order_takes_nothing(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn the_first_refresh_takes_nothing_and_a_growing_order_takes_nothing() {
+    let env = PollEnv::new().await;
     set_book(
         &env,
         vec![
@@ -337,10 +352,10 @@ async fn the_first_refresh_takes_nothing_and_a_growing_order_takes_nothing(pool:
 
 // ---- failure ----
 
-#[sqlx::test]
-async fn a_failing_page_keeps_the_book_records_no_snapshot_and_backs_off(pool: PgPool) {
+#[tokio::test]
+async fn a_failing_page_keeps_the_book_records_no_snapshot_and_backs_off() {
     use sekondo::poller::BACKOFF_START;
-    let env = PollEnv::new(pool).await;
+    let env = PollEnv::new().await;
     let book = |first: i64| -> Vec<Value> {
         (first..first + 6)
             .map(|id| at_jita(id, 34, id % 2 == 0, 10.0 + id as f64, 5))
@@ -376,9 +391,9 @@ async fn a_failing_page_keeps_the_book_records_no_snapshot_and_backs_off(pool: P
     );
 }
 
-#[sqlx::test]
-async fn one_failing_page_among_several_fails_the_whole_refresh(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn one_failing_page_among_several_fails_the_whole_refresh() {
+    let env = PollEnv::new().await;
     let orders: Vec<Value> = (1..=6)
         .map(|id| at_jita(id, 34, id % 2 == 0, 10.0 + id as f64, 5))
         .collect();
@@ -396,9 +411,9 @@ async fn one_failing_page_among_several_fails_the_whole_refresh(pool: PgPool) {
     assert_eq!(snapshot_count(&env).await, 0);
 }
 
-#[sqlx::test]
-async fn a_rate_limited_refresh_is_deferred_without_counting_a_failure(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn a_rate_limited_refresh_is_deferred_without_counting_a_failure() {
+    let env = PollEnv::new().await;
     set_book(&env, vec![at_jita(1, 34, true, 1.0, 1)], None).await;
     env.control(
         "esi-fail-next",
@@ -417,9 +432,9 @@ async fn a_rate_limited_refresh_is_deferred_without_counting_a_failure(pool: PgP
 
 // ---- schedule ----
 
-#[sqlx::test]
-async fn the_first_tick_refreshes_at_once_and_the_next_waits_for_the_cache_expiry(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn the_first_tick_refreshes_at_once_and_the_next_waits_for_the_cache_expiry() {
+    let env = PollEnv::new().await;
     set_book(
         &env,
         vec![at_jita(1, 34, true, 1.0, 1), at_jita(2, 34, false, 2.0, 1)],
@@ -445,11 +460,9 @@ async fn the_first_tick_refreshes_at_once_and_the_next_waits_for_the_cache_expir
     assert_eq!(sync.failures, 0);
 }
 
-#[sqlx::test]
-async fn a_refresh_is_never_earlier_than_five_minutes_after_the_last_even_if_esi_expires_sooner(
-    pool: PgPool,
-) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn a_refresh_is_never_earlier_than_five_minutes_after_the_last_even_if_esi_expires_sooner() {
+    let env = PollEnv::new().await;
     set_book(&env, vec![at_jita(1, 34, true, 1.0, 1)], None).await;
     env.control("esi-expires", json!({"seconds": 30})).await;
     env.station.tick().await;
@@ -505,7 +518,7 @@ fn scripted(reads: Vec<Vec<EsiBookPage>>, env: &PollEnv) -> (StationBookPoller, 
         state: Mutex::new((0, 0)),
     });
     let poller = StationBookPoller::with_source(
-        env.pool.clone(),
+        &env.stores,
         source.clone(),
         env.events.clone(),
         env.clock.clone(),
@@ -514,9 +527,9 @@ fn scripted(reads: Vec<Vec<EsiBookPage>>, env: &PollEnv) -> (StationBookPoller, 
     (poller, source)
 }
 
-#[sqlx::test]
-async fn a_read_that_crossed_a_cache_generation_is_retried_at_once(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn a_read_that_crossed_a_cache_generation_is_retried_at_once() {
+    let env = PollEnv::new().await;
     let (poller, source) = scripted(
         vec![
             // The cache turned over between the two pages.
@@ -543,9 +556,9 @@ async fn a_read_that_crossed_a_cache_generation_is_retried_at_once(pool: PgPool)
     assert_eq!(source.page_requests(), 4);
 }
 
-#[sqlx::test]
-async fn a_book_that_never_settles_is_read_three_times_and_then_fails(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn a_book_that_never_settles_is_read_three_times_and_then_fails() {
+    let env = PollEnv::new().await;
     let mixed = || {
         vec![
             page(vec![market_order(1), market_order(2)], 2, 100),
@@ -563,10 +576,10 @@ async fn a_book_that_never_settles_is_read_three_times_and_then_fails(pool: PgPo
     assert!(book_sync(&env).await.last_error.is_some());
 }
 
-#[sqlx::test]
-async fn pages_of_one_generation_may_differ_in_their_local_expiry(pool: PgPool) {
+#[tokio::test]
+async fn pages_of_one_generation_may_differ_in_their_local_expiry() {
     // The server's Expires is the same; the local clock reading of it differs by the Date header.
-    let env = PollEnv::new(pool).await;
+    let env = PollEnv::new().await;
     let mut late = page(vec![market_order(3), market_order(4)], 2, 100);
     late.expires_at = Some(env.clock.now() + Duration::seconds(299));
     let mut early = page(vec![market_order(1), market_order(2)], 2, 100);
@@ -579,17 +592,21 @@ async fn pages_of_one_generation_may_differ_in_their_local_expiry(pool: PgPool) 
 
 // ---- names ----
 
+/// `None` when the name was never looked up, `Some(None)` when ESI would not give one.
 async fn name_of(env: &PollEnv, id: i64) -> Option<Option<String>> {
-    sqlx::query_scalar("SELECT name FROM names WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&env.pool)
+    env.stores
+        .market
+        .names_table()
         .await
         .unwrap()
+        .into_iter()
+        .find(|row| row.id == id)
+        .map(|row| row.name)
 }
 
-#[sqlx::test]
-async fn a_refresh_resolves_the_names_of_the_tradable_items_once(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn a_refresh_resolves_the_names_of_the_tradable_items_once() {
+    let env = PollEnv::new().await;
     set_book(
         &env,
         vec![
@@ -625,9 +642,9 @@ async fn a_refresh_resolves_the_names_of_the_tradable_items_once(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn names_that_cannot_be_resolved_never_fail_a_refresh(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn names_that_cannot_be_resolved_never_fail_a_refresh() {
+    let env = PollEnv::new().await;
     set_book(
         &env,
         vec![at_jita(1, 34, true, 9.0, 5), at_jita(2, 34, false, 10.0, 5)],

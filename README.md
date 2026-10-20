@@ -264,14 +264,46 @@ Run only the database (for development and tests) with `podman-compose up -d db`
 
 ## 5. Tests
 
-The tests need the database running (`podman-compose up -d db`), a `.env` as above, and the certificates.
-They never touch the app's own database: `#[sqlx::test]` creates and drops a throwaway database per test,
-and the Playwright setup recreates a dedicated `sekondo_e2e` database.
+`cargo test` needs no database, no `.env` and no running container. The app reaches its data through
+one store trait per domain (`crates/sekondo/src/store`): Postgres in production, an in-memory copy
+(`MemoryStores`, feature `memory-store`) in the tests. Only the browser tests and the checks of the
+Postgres side below need the database (`podman-compose up -d db`), a `.env` as above and the certificates
+(the Playwright ones).
 
 ```sh
-cargo test --workspace --features sekondo/test-hooks   # unit and integration tests
-cd e2e && npm install && npx playwright test           # browser tests
+cargo test --workspace --features sekondo/test-hooks   # unit and integration tests, no database
+cd e2e && npm install && npx playwright test           # browser tests, on Postgres
 ```
+
+### The in-memory store must be verified against Postgres
+
+A test on the in-memory store only means something if it behaves like Postgres. `crates/store-contract`
+holds one contract case per behavior of the stores. The cases run on the in-memory store in
+`cargo test -p store-contract --test memory`, and `store-verify` runs the same cases on a real Postgres.
+
+A fingerprint of the store sources, the migrations and the cases is committed in
+`crates/store-contract/verified-store.json`. **If any of them changes, every test of `sekondo` fails**
+with "the store changed since its last verification against PostgreSQL" until you run, with the database up
+(`podman-compose up -d db`, `DATABASE_URL` as in `.env`, with `sslmode=verify-full`):
+
+```
+cargo run -p store-contract --bin store-verify
+git add crates/store-contract/verified-store.json
+```
+
+`store-verify` creates the database `sekondo_store_verify`, migrates it, runs every case on Postgres and on
+the in-memory store, and records the fingerprint only when all of them pass. It never touches the app's own
+database. A new store method needs a Postgres implementation, an in-memory implementation and a contract
+case; a test in `store-contract` checks that every method has one.
+
+The Postgres schema and the migrations are checked on their own, in throwaway databases that
+`#[sqlx::test]` creates and drops:
+
+```sh
+cargo test -p store-contract --features postgres
+```
+
+The Playwright setup recreates a dedicated `sekondo_e2e` database.
 
 The `test-hooks` feature adds `POST /_test/refresh/{id}`, `POST /_test/poll/{id}`, `POST /_test/wealth-poll/{id}/{kind}` (`wallet`, `assets` or `transactions`) and `POST /_test/fee-poll` (a signed-in
 account's own characters only; CSRF-protected like any other POST). The first forces a token refresh, the
@@ -363,7 +395,7 @@ orders scope), `POST /universe/names` (a fixture table; one unknown ID fails the
 
 ## Database queries
 
-Queries are plain `sqlx::query` calls, checked by the integration tests, so there is no `.sqlx/` cache.
+Queries are plain `sqlx::query` calls in `crates/sekondo/src/store/pg`, checked by `store-verify` and the schema tests, so there is no `.sqlx/` cache.
 If you add `query!` macros, run `cargo sqlx prepare --workspace` and commit `.sqlx/`. The Dockerfile builds
 with `SQLX_OFFLINE=true`, so a stale or missing cache fails the image build. CI should run
 `cargo sqlx prepare --workspace --check`.
@@ -376,6 +408,7 @@ with `SQLX_OFFLINE=true`, so a stale or missing cache fails the image build. CI 
 | `crates/eve-stub` | a stand-in for EVE SSO and the ESI routes the app uses, for tests and local development |
 | `crates/esi-contract` | contracts for the calls to ESI and SSO, the stub fingerprint and the gate |
 | `crates/esi-verify` | `cargo run -p esi-verify`: verifies the contracts against real EVE |
+| `crates/store-contract` | contract cases for the stores, the fingerprint and the gate, `store-verify`: runs them on Postgres |
 | `e2e/` | Playwright tests |
 | `docker/` | database and app container support files |
 | `openspec/` | specs, designs and tasks |

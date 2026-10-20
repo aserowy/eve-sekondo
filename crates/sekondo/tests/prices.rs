@@ -3,7 +3,6 @@ mod common;
 use common::PollEnv;
 use sekondo::{market::RefreshOutcome, wealth_poller::Kind};
 use serde_json::{Value, json};
-use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 
 const ALICE: i64 = 90000001;
@@ -11,8 +10,8 @@ const BOB: i64 = 90000002;
 
 /// Alice and Bob on two accounts, each with the stub's default assets already polled:
 /// Alice 1000 of type 34 and 50 of type 35, Bob 20 of type 34.
-async fn two_accounts(pool: PgPool) -> PollEnv {
-    let env = PollEnv::new(pool).await;
+async fn two_accounts() -> PollEnv {
+    let env = PollEnv::new().await;
     for character in [ALICE, BOB] {
         let account = env.new_account().await;
         env.link(account, character).await;
@@ -24,22 +23,18 @@ async fn two_accounts(pool: PgPool) -> PollEnv {
 }
 
 async fn prices(env: &PollEnv) -> Vec<(i64, Option<i64>)> {
-    sqlx::query_as(
-        "SELECT type_id, (average_price * 100)::bigint FROM item_prices ORDER BY type_id",
-    )
-    .fetch_all(&env.pool)
-    .await
-    .unwrap()
+    env.stores.market.prices_table().await.unwrap()
 }
 
 async fn inventory(env: &PollEnv, character: i64) -> Vec<i64> {
-    sqlx::query_scalar(
-        "SELECT (value * 100)::bigint FROM inventory_values WHERE character_id = $1 ORDER BY recorded_at",
-    )
-    .bind(character)
-    .fetch_all(&env.pool)
-    .await
-    .unwrap()
+    env.stores
+        .wealth
+        .inventory_values(character)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, value)| value)
+        .collect()
 }
 
 async fn set_prices(env: &PollEnv, prices: Value) {
@@ -48,15 +43,18 @@ async fn set_prices(env: &PollEnv, prices: Value) {
 }
 
 async fn sync_row(env: &PollEnv) -> (Option<OffsetDateTime>, OffsetDateTime, Option<String>, i32) {
-    sqlx::query_as("SELECT last_success_at, next_poll_at, last_error, failures FROM price_sync")
-        .fetch_one(&env.pool)
-        .await
-        .unwrap()
+    let state = env.stores.market.price_sync().await.unwrap().unwrap();
+    (
+        state.last_success_at,
+        state.next_poll_at,
+        state.last_error,
+        state.failures,
+    )
 }
 
-#[sqlx::test]
-async fn one_fetch_prices_the_inventories_of_every_account(pool: PgPool) {
-    let env = two_accounts(pool).await;
+#[tokio::test]
+async fn one_fetch_prices_the_inventories_of_every_account() {
+    let env = two_accounts().await;
 
     assert_eq!(env.prices.refresh().await, RefreshOutcome::Updated);
 
@@ -74,9 +72,9 @@ async fn one_fetch_prices_the_inventories_of_every_account(pool: PgPool) {
     assert_eq!(inventory(&env, BOB).await, [0, 11_000]);
 }
 
-#[sqlx::test]
-async fn a_failed_refresh_keeps_the_prices_and_records_no_entry(pool: PgPool) {
-    let env = two_accounts(pool).await;
+#[tokio::test]
+async fn a_failed_refresh_keeps_the_prices_and_records_no_entry() {
+    let env = two_accounts().await;
     env.prices.refresh().await;
     let (success_before, ..) = sync_row(&env).await;
     set_prices(&env, json!([{"type_id": 34, "average_price": 99.0}])).await;
@@ -99,9 +97,9 @@ async fn a_failed_refresh_keeps_the_prices_and_records_no_entry(pool: PgPool) {
     assert_eq!(next, failed_at + Duration::minutes(1));
 }
 
-#[sqlx::test]
-async fn doubled_prices_double_the_inventory_entry_at_the_refresh_time(pool: PgPool) {
-    let env = two_accounts(pool).await;
+#[tokio::test]
+async fn doubled_prices_double_the_inventory_entry_at_the_refresh_time() {
+    let env = two_accounts().await;
     env.prices.refresh().await;
     set_prices(
         &env,
@@ -114,20 +112,23 @@ async fn doubled_prices_double_the_inventory_entry_at_the_refresh_time(pool: PgP
     assert_eq!(env.prices.refresh().await, RefreshOutcome::Updated);
 
     assert_eq!(inventory(&env, ALICE).await, [0, 601_250, 1_202_500]);
-    let last: OffsetDateTime =
-        sqlx::query_scalar("SELECT max(recorded_at) FROM inventory_values WHERE character_id = $1")
-            .bind(ALICE)
-            .fetch_one(&env.pool)
-            .await
-            .unwrap();
+    let last = env
+        .stores
+        .wealth
+        .inventory_values(ALICE)
+        .await
+        .unwrap()
+        .last()
+        .unwrap()
+        .0;
     assert_eq!(last, refreshed_at);
     // An item without a price any more is dropped from the copy.
     assert_eq!(prices(&env).await, [(34, Some(1100)), (35, Some(2050))]);
 }
 
-#[sqlx::test]
-async fn blueprint_copies_and_unpriced_items_add_nothing(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn blueprint_copies_and_unpriced_items_add_nothing() {
+    let env = PollEnv::new().await;
     let account = env.new_account().await;
     env.link(account, ALICE).await;
     let item = |id: i64, type_id: i64, copy: bool| {
@@ -155,18 +156,18 @@ async fn blueprint_copies_and_unpriced_items_add_nothing(pool: PgPool) {
     assert_eq!(inventory(&env, ALICE).await.last(), Some(&5500));
 }
 
-#[sqlx::test]
-async fn a_character_without_assets_gets_no_entry_from_a_refresh(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn a_character_without_assets_gets_no_entry_from_a_refresh() {
+    let env = PollEnv::new().await;
     let account = env.new_account().await;
     env.link(account, 90000003).await;
     env.prices.refresh().await;
     assert!(inventory(&env, 90000003).await.is_empty());
 }
 
-#[sqlx::test]
-async fn the_refresh_is_daily_and_waits_for_esis_expiry_when_later(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn the_refresh_is_daily_and_waits_for_esis_expiry_when_later() {
+    let env = PollEnv::new().await;
     let at = sekondo::clock::Clock::now(&*env.clock);
     env.prices.refresh().await;
     let (_, next, ..) = sync_row(&env).await;
@@ -181,9 +182,9 @@ async fn the_refresh_is_daily_and_waits_for_esis_expiry_when_later(pool: PgPool)
     assert!(next >= at + Duration::days(3), "{next}");
 }
 
-#[sqlx::test]
-async fn the_scheduler_fetches_the_first_prices_at_once_and_then_once_a_day(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn the_scheduler_fetches_the_first_prices_at_once_and_then_once_a_day() {
+    let env = PollEnv::new().await;
 
     assert_eq!(env.prices.tick().await, 1);
     assert_eq!(env.prices.tick().await, 0);
@@ -194,9 +195,9 @@ async fn the_scheduler_fetches_the_first_prices_at_once_and_then_once_a_day(pool
     assert_eq!(env.stub.esi_calls("prices"), 2);
 }
 
-#[sqlx::test]
-async fn an_esi_pause_defers_the_refresh_without_counting_a_failure(pool: PgPool) {
-    let env = PollEnv::new(pool).await;
+#[tokio::test]
+async fn an_esi_pause_defers_the_refresh_without_counting_a_failure() {
+    let env = PollEnv::new().await;
     env.prices.refresh().await;
     env.control(
         "esi-fail-next",

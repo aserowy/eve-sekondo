@@ -14,14 +14,15 @@ use crate::{
     account::CurrentAccount,
     app::AppState,
     csrf, format,
-    freshness::{FreshnessView, freshness_view, list_transactions_freshness},
+    freshness::{FreshnessView, freshness_view},
     kpi::Kpi,
     orders::FilterEntry,
     pages::{self, Nav, Page},
     pagination::{Link, PageView, Paging, paginate},
     range::Range,
     selection::{CharacterSelection, ViewQuery},
-    trades::{self, TradeRow},
+    store::StoreError,
+    trades::TradeRow,
     wealth_poller::TRANSACTIONS_INTERVAL,
 };
 
@@ -236,14 +237,14 @@ async fn build_view(
     state: &AppState,
     account_id: Uuid,
     query: &ViewQuery,
-) -> Result<Option<(TradesView, CharacterSelection)>, sqlx::Error> {
+) -> Result<Option<(TradesView, CharacterSelection)>, StoreError> {
     let characters = state
         .repo
         .list_characters(account_id)
         .await
         .map_err(|e| match e {
             crate::repo::RepoError::Db(e) => e,
-            other => sqlx::Error::Protocol(other.to_string()),
+            other => StoreError::Backend(other.to_string()),
         })?;
     if characters.is_empty() {
         return Ok(None);
@@ -256,20 +257,24 @@ async fn build_view(
         range: Range::parse(query.range.as_deref()),
         paging: query.paging(),
     };
-    let listed = trades::list(
-        &state.pool,
-        account_id,
-        &selection,
-        now - view_state.range.span(),
-        now,
-    )
-    .await?;
-    let freshness: Vec<FreshnessView> =
-        list_transactions_freshness(&state.pool, account_id, &selection)
-            .await?
-            .iter()
-            .map(|r| freshness_view(r, now, TRANSACTIONS_INTERVAL))
-            .collect();
+    let listed = state
+        .stores
+        .trades
+        .list_trades(
+            account_id,
+            selection.ids(),
+            now - view_state.range.span(),
+            now,
+        )
+        .await?;
+    let freshness: Vec<FreshnessView> = state
+        .stores
+        .trades
+        .list_transactions_freshness(account_id, selection.ids())
+        .await?
+        .iter()
+        .map(|r| freshness_view(r, now, TRANSACTIONS_INTERVAL))
+        .collect();
     let link_to = |paging: Paging| {
         let query = view_state.with_paging(paging).query(true, true);
         Link {

@@ -10,12 +10,27 @@ use sekondo::{
     app::{self, App, AppState},
     clock::{Clock, SystemClock},
     config::{Config, SecretKey},
+    store::{Stores, memory::MemoryStores},
 };
-use sqlx::PgPool;
 use tempfile::TempDir;
 use url::Url;
 
 pub use eve_stub::pki::TestPki;
+
+/// The certificates are generated once per test binary: it takes a moment, and no test depends on
+/// having its own.
+pub fn pki() -> &'static TestPki {
+    static PKI: std::sync::OnceLock<TestPki> = std::sync::OnceLock::new();
+    PKI.get_or_init(TestPki::generate)
+}
+
+/// The in-memory stores for a test. They keep the database's time, which is the wall clock and not
+/// the clock a test moves: a session record expires by it, as it did in PostgreSQL. Fails right
+/// here, before anything starts, while the store changed since PostgreSQL last verified it.
+pub fn stores() -> Stores {
+    store_contract::gate::require_verified_store();
+    MemoryStores::new(Arc::new(SystemClock)).stores()
+}
 
 pub const CLIENT_ID: &str = "test-client";
 pub const CLIENT_SECRET: &str = "test-secret";
@@ -26,10 +41,11 @@ pub struct TestApp {
     pub addr: SocketAddr,
     pub base_url: String,
     pub client: reqwest::Client,
-    pub pki: TestPki,
+    pub pki: &'static TestPki,
     pub ca_path: PathBuf,
     pub stub: Option<Stub>,
     pub state: AppState,
+    pub stores: Stores,
     handle: Handle<SocketAddr>,
     _dir: TempDir,
 }
@@ -92,7 +108,7 @@ pub fn test_config(pki: &TestPki, dir: &TempDir, port: u16, sso_base_url: &str) 
 
 /// Builds and starts the full app over HTTPS on a random loopback port.
 pub struct AppBuilder {
-    pool: PgPool,
+    stores: Option<Stores>,
     clock: Arc<dyn Clock>,
     routes: Router<AppState>,
     with_stub: bool,
@@ -100,14 +116,20 @@ pub struct AppBuilder {
 }
 
 impl AppBuilder {
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new() -> Self {
         Self {
-            pool,
+            stores: None,
             clock: Arc::new(SystemClock),
             routes: Router::new(),
             with_stub: false,
             sse_tick: None,
         }
+    }
+
+    /// Runs on stores that already exist, as a restarted app finds them.
+    pub fn stores(mut self, stores: Stores) -> Self {
+        self.stores = Some(stores);
+        self
     }
 
     pub fn clock(mut self, clock: Arc<dyn Clock>) -> Self {
@@ -133,7 +155,7 @@ impl AppBuilder {
     }
 
     pub async fn spawn(self) -> TestApp {
-        let pki = TestPki::generate();
+        let pki = pki();
         let dir = TempDir::new().unwrap();
 
         let stub = if self.with_stub {
@@ -159,13 +181,14 @@ impl AppBuilder {
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let config = test_config(&pki, &dir, addr.port(), &sso);
+        let config = test_config(pki, &dir, addr.port(), &sso);
         let ca_path = config.tls_extra_ca_path.clone().unwrap();
         let mut options = app::Options::default();
         if let Some(tick) = self.sse_tick {
             options.sse_tick = tick;
         }
-        let app = App::new_with_options(config, self.pool, self.clock, self.routes, options)
+        let stores = self.stores.unwrap_or_else(stores);
+        let app = App::new_with_options(config, stores.clone(), self.clock, self.routes, options)
             .await
             .unwrap();
         let state = app.state.clone();
@@ -181,23 +204,20 @@ impl AppBuilder {
             ca_path,
             stub,
             state,
+            stores,
             handle,
             _dir: dir,
         }
     }
 }
 
-pub async fn spawn(pool: PgPool) -> TestApp {
-    AppBuilder::new(pool).spawn().await
+pub async fn spawn() -> TestApp {
+    AppBuilder::new().spawn().await
 }
 
 /// Like [`spawn`], with an injected clock and extra routes.
-pub async fn spawn_with(
-    pool: PgPool,
-    clock: Arc<dyn Clock>,
-    extra_routes: Router<AppState>,
-) -> TestApp {
-    AppBuilder::new(pool)
+pub async fn spawn_with(clock: Arc<dyn Clock>, extra_routes: Router<AppState>) -> TestApp {
+    AppBuilder::new()
         .clock(clock)
         .routes(extra_routes)
         .spawn()
@@ -346,7 +366,7 @@ pub struct EsiHarness {
 }
 
 pub async fn esi_harness_with(contact: Option<&str>) -> EsiHarness {
-    let pki = TestPki::generate();
+    let pki = pki();
     let dir = TempDir::new().unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let stub = eve_stub::Stub::start(
@@ -357,7 +377,7 @@ pub async fn esi_harness_with(contact: Option<&str>) -> EsiHarness {
     )
     .await
     .unwrap();
-    let mut config = test_config(&pki, &dir, 8443, &stub.base_url);
+    let mut config = test_config(pki, &dir, 8443, &stub.base_url);
     config.esi_contact = contact.map(str::to_owned);
     let http = sekondo::tls::http_client(config.tls_extra_ca_path.as_deref()).unwrap();
     let clock = ManualClock::new();
@@ -400,7 +420,7 @@ impl EsiHarness {
 /// background poller.
 pub struct PollEnv {
     pub stub: eve_stub::Stub,
-    pub pool: PgPool,
+    pub stores: Stores,
     pub repo: sekondo::repo::Repo,
     pub clock: Arc<ManualClock>,
     pub tokens: Arc<sekondo::tokens::TokenService>,
@@ -414,20 +434,20 @@ pub struct PollEnv {
     pub prices: Arc<sekondo::prices::PricePoller>,
     pub events: Arc<sekondo::events::InProcessBus>,
     sso: Arc<sekondo::sso::SsoClient>,
-    pki: TestPki,
+    pki: &'static TestPki,
     http: reqwest::Client,
     pub interval: time::Duration,
     _dir: TempDir,
 }
 
 impl PollEnv {
-    pub async fn new(pool: PgPool) -> Self {
-        Self::with_interval(pool, time::Duration::minutes(20)).await
+    pub async fn new() -> Self {
+        Self::with_interval(time::Duration::minutes(20)).await
     }
 
-    pub async fn with_interval(pool: PgPool, interval: time::Duration) -> Self {
+    pub async fn with_interval(interval: time::Duration) -> Self {
         sekondo::tls::install_crypto_provider();
-        let pki = TestPki::generate();
+        let pki = pki();
         let dir = TempDir::new().unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let stub = eve_stub::Stub::start(
@@ -438,13 +458,14 @@ impl PollEnv {
         )
         .await
         .unwrap();
-        let config = test_config(&pki, &dir, 8443, &stub.base_url);
+        let config = test_config(pki, &dir, 8443, &stub.base_url);
         let http = sekondo::tls::http_client(config.tls_extra_ca_path.as_deref()).unwrap();
+        let clock = ManualClock::new();
+        let stores = stores();
         let repo = sekondo::repo::Repo::new(
-            pool.clone(),
+            stores.accounts.clone(),
             sekondo::crypto::TokenCipher::new(&SecretKey(ENCRYPTION_KEY)),
         );
-        let clock = ManualClock::new();
         let sso = Arc::new(sekondo::sso::SsoClient::new(
             http.clone(),
             Url::parse(&stub.base_url).unwrap(),
@@ -464,7 +485,7 @@ impl PollEnv {
         ));
         let events = Arc::new(sekondo::events::InProcessBus::new());
         let poller = Arc::new(sekondo::poller::Poller::new(
-            pool.clone(),
+            &stores,
             tokens.clone(),
             esi.clone(),
             events.clone(),
@@ -472,27 +493,27 @@ impl PollEnv {
             interval,
         ));
         let market = Arc::new(sekondo::market::MarketPoller::new(
-            pool.clone(),
+            &stores,
             esi.clone(),
             events.clone(),
             clock.clone(),
             time::Duration::minutes(5),
         ));
         let station = Arc::new(sekondo::station_book::StationBookPoller::new(
-            pool.clone(),
+            &stores,
             esi.clone(),
             events.clone(),
             clock.clone(),
             time::Duration::minutes(5),
         ));
         let history = Arc::new(sekondo::station_history::StationHistoryPoller::new(
-            pool.clone(),
+            &stores,
             esi.clone(),
             events.clone(),
             clock.clone(),
         ));
         let wealth = Arc::new(sekondo::wealth_poller::WealthPoller::new(
-            pool.clone(),
+            &stores,
             tokens.clone(),
             esi.clone(),
             events.clone(),
@@ -500,21 +521,21 @@ impl PollEnv {
             interval,
         ));
         let fees = Arc::new(sekondo::fee_poller::FeePoller::new(
-            pool.clone(),
+            &stores,
             tokens.clone(),
             esi.clone(),
             events.clone(),
             clock.clone(),
         ));
         let prices = Arc::new(sekondo::prices::PricePoller::new(
-            pool.clone(),
+            &stores,
             esi.clone(),
             events.clone(),
             clock.clone(),
         ));
         Self {
             stub,
-            pool,
+            stores,
             repo,
             clock,
             tokens,
@@ -543,6 +564,45 @@ impl PollEnv {
             .send()
             .await
             .unwrap()
+    }
+
+    /// The account of a linked character.
+    pub async fn account_of(&self, character_id: i64) -> uuid::Uuid {
+        self.repo
+            .find_character(character_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .account_id
+    }
+
+    /// The current orders of a character, sells and buys, by order ID.
+    pub async fn orders_of(&self, character_id: i64) -> Vec<sekondo::orders::OrderRow> {
+        let account = self.account_of(character_id).await;
+        let mut rows = Vec::new();
+        for side in [sekondo::orders::Side::Sell, sekondo::orders::Side::Buy] {
+            rows.extend(
+                self.stores
+                    .orders
+                    .list_orders(account, &[character_id], side, Default::default())
+                    .await
+                    .unwrap(),
+            );
+        }
+        rows.sort_by_key(|row| row.order_id);
+        rows
+    }
+
+    /// Makes the stored access token look expired on the real clock, so the next poll goes to SSO.
+    pub async fn expire_token(&self, character_id: i64) {
+        self.stores
+            .accounts
+            .seed_access_expiry(
+                character_id,
+                time::OffsetDateTime::now_utc() - time::Duration::hours(1),
+            )
+            .await
+            .unwrap();
     }
 
     /// Links a character through the stub's real authorization code flow.

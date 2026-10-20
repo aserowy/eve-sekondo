@@ -3,7 +3,6 @@ mod common;
 use axum::{Router, extract::State, routing::get};
 use common::{ManualClock, TestApp, cookie_pair};
 use sekondo::{app::AppState, session};
-use sqlx::PgPool;
 use time::Duration;
 use tower_sessions::Session;
 
@@ -44,9 +43,9 @@ async fn value(app: &TestApp, cookie: &str) -> String {
         .unwrap()
 }
 
-#[sqlx::test]
-async fn cookie_has_host_prefix_and_hardened_attributes(pool: PgPool) {
-    let app = common::spawn_with(pool, ManualClock::new(), session_routes()).await;
+#[tokio::test]
+async fn cookie_has_host_prefix_and_hardened_attributes() {
+    let app = common::spawn_with(ManualClock::new(), session_routes()).await;
     let res = app.client.get(app.url("/test/login")).send().await.unwrap();
     let set_cookie = res
         .headers()
@@ -70,22 +69,29 @@ async fn cookie_has_host_prefix_and_hardened_attributes(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn session_value_survives_a_router_rebuild(pool: PgPool) {
+#[tokio::test]
+async fn session_value_survives_a_router_rebuild() {
     let clock = ManualClock::new();
-    let first = common::spawn_with(pool.clone(), clock.clone(), session_routes()).await;
+    let first = common::spawn_with(clock.clone(), session_routes()).await;
     let cookie = login(&first).await;
     assert_eq!(value(&first, &cookie).await, "hello");
+    let first_stores = first.stores.clone();
     drop(first);
 
-    let second = common::spawn_with(pool, clock, session_routes()).await;
+    // The store outlives the app, as the database does.
+    let second = common::AppBuilder::new()
+        .stores(first_stores)
+        .clock(clock)
+        .routes(session_routes())
+        .spawn()
+        .await;
     assert_eq!(value(&second, &cookie).await, "hello");
 }
 
-#[sqlx::test]
-async fn session_expires_after_seven_idle_days(pool: PgPool) {
+#[tokio::test]
+async fn session_expires_after_seven_idle_days() {
     let clock = ManualClock::new();
-    let app = common::spawn_with(pool, clock.clone(), session_routes()).await;
+    let app = common::spawn_with(clock.clone(), session_routes()).await;
     let cookie = login(&app).await;
 
     clock.advance(Duration::days(7) - Duration::seconds(1));
@@ -95,10 +101,10 @@ async fn session_expires_after_seven_idle_days(pool: PgPool) {
     assert_eq!(value(&app, &cookie).await, "none");
 }
 
-#[sqlx::test]
-async fn activity_keeps_the_session_alive_within_the_absolute_limit(pool: PgPool) {
+#[tokio::test]
+async fn activity_keeps_the_session_alive_within_the_absolute_limit() {
     let clock = ManualClock::new();
-    let app = common::spawn_with(pool, clock.clone(), session_routes()).await;
+    let app = common::spawn_with(clock.clone(), session_routes()).await;
     let cookie = login(&app).await;
 
     for _ in 0..2 {
@@ -107,10 +113,10 @@ async fn activity_keeps_the_session_alive_within_the_absolute_limit(pool: PgPool
     }
 }
 
-#[sqlx::test]
-async fn session_expires_after_thirty_days_even_when_active(pool: PgPool) {
+#[tokio::test]
+async fn session_expires_after_thirty_days_even_when_active() {
     let clock = ManualClock::new();
-    let app = common::spawn_with(pool, clock.clone(), session_routes()).await;
+    let app = common::spawn_with(clock.clone(), session_routes()).await;
     let cookie = login(&app).await;
 
     for _ in 0..5 {
@@ -121,9 +127,9 @@ async fn session_expires_after_thirty_days_even_when_active(pool: PgPool) {
     assert_eq!(value(&app, &cookie).await, "none");
 }
 
-#[sqlx::test]
-async fn cycling_the_id_invalidates_the_old_cookie(pool: PgPool) {
-    let app = common::spawn_with(pool, ManualClock::new(), session_routes()).await;
+#[tokio::test]
+async fn cycling_the_id_invalidates_the_old_cookie() {
+    let app = common::spawn_with(ManualClock::new(), session_routes()).await;
     let first = login(&app).await;
 
     let res = app
