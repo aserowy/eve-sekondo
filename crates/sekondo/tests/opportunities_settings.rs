@@ -188,10 +188,10 @@ async fn saving_stores_the_settings_per_account_and_answers_the_tables() {
     let html = res.text().await.unwrap();
     assert!(html.contains(r#"id="classic""#), "the table is answered");
     assert!(!html.contains("<html"), "a fragment");
-    // Out of band: the context text. An accepted form marks no field invalid and says nothing.
-    assert!(html.contains(r#"id="filter-context""#), "{html}");
+    // Out of band: the Fees group. An accepted form marks no field invalid and says nothing.
+    assert!(html.contains(r#"<form id="fee-filter""#), "{html}");
     assert!(
-        !html.contains("aria-invalid") && !html.contains("<small"),
+        !html.contains("aria-invalid") && !html.contains(r#"-error">"#),
         "{html}"
     );
     assert_eq!(
@@ -285,10 +285,7 @@ async fn a_capital_of_zero_is_rejected_with_a_message_and_the_stored_settings_st
         html.contains(r#"id="capital" type="text" inputmode="decimal" name="capital" value="0" aria-invalid="true" aria-describedby="capital-error""#),
         "{html}"
     );
-    assert!(
-        html.contains(r#"<small id="capital-error">"#),
-        "{html}"
-    );
+    assert!(html.contains(r#"<small id="capital-error">"#), "{html}");
     assert_eq!(html.matches("aria-invalid").count(), 1, "{html}");
     assert_eq!(html.matches("<small").count(), 1, "{html}");
     assert!(html.contains(r#"name="min_margin" value="9""#), "{html}");
@@ -465,7 +462,8 @@ async fn the_answer_keeps_the_selection_and_the_sorting_of_the_view() {
 }
 
 #[tokio::test]
-async fn the_live_content_answer_brings_the_context_and_the_sub_menu_but_leaves_the_filter_form() {
+async fn the_live_content_answer_brings_the_fees_group_and_the_sub_menu_but_leaves_the_filter_form()
+{
     let app = AppBuilder::new().with_stub().spawn().await;
     let browser = signed_in(&app, ALICE).await;
     item(&app, 34, "Tritanium", 10_000_000.0).await;
@@ -477,7 +475,7 @@ async fn the_live_content_answer_brings_the_context_and_the_sub_menu_but_leaves_
         .await
         .unwrap();
 
-    assert!(html.contains(r#"id="filter-context""#), "{html}");
+    assert!(html.contains(r#"<form id="fee-filter""#), "{html}");
     assert!(
         !html.contains(r#"id="opportunity-filters""#) && !html.contains("aria-invalid"),
         "{html}"

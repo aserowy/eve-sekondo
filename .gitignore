@@ -25,3 +25,6 @@ target
 # Local dev certificates and settings
 certs/
 .env
+
+# Playwright output
+test-results/

@@ -145,7 +145,7 @@ async fn the_page_shows_the_fees_the_prices_and_how_the_figures_follow() {
         "{html}"
     );
     assert!(
-        html.contains("base rates"),
+        html.contains("Base rates"),
         "the fees used are named: {html}"
     );
     assert!(!html.contains("No longer listed"));
@@ -168,7 +168,7 @@ async fn the_page_shows_the_fees_the_prices_and_how_the_figures_follow() {
 }
 
 #[tokio::test]
-async fn the_page_names_the_character_whose_fees_are_used() {
+async fn the_page_checks_the_character_whose_fees_are_used() {
     let (app, browser) = setup().await;
     item(&app, 34, "Tritanium", "130.00", 100_000_000.0).await;
     let now = OffsetDateTime::now_utc();
@@ -190,7 +190,8 @@ async fn the_page_names_the_character_whose_fees_are_used() {
         .unwrap();
 
     assert!(
-        html.contains("Alice Alpha") && html.contains("broker fee 1.50%"),
+        html.contains(r#"name="fee_character" value="90000001" checked"#)
+            && html.contains("Broker fee 1.50%"),
         "{html}"
     );
     assert_eq!(figure(&html, "cost"), "101.50");
@@ -354,7 +355,7 @@ async fn the_detail_page_is_a_full_page_with_the_filter_box_the_sub_menu_and_the
         "the item names the page"
     );
     assert!(html.contains(r#"id="filter-box""#) && html.contains(r#"id="character-filter""#));
-    assert!(html.contains(r#"id="filter-context""#) && html.contains("base rates"));
+    assert!(html.contains(r#"<form id="fee-filter""#) && html.contains("Base rates"));
     // The sub-menu leads back with the selection and sorting, then to the rows of the page.
     assert!(
         html.contains(
@@ -381,7 +382,7 @@ async fn the_detail_page_is_a_full_page_with_the_filter_box_the_sub_menu_and_the
 }
 
 #[tokio::test]
-async fn the_detail_fragment_brings_the_sub_menu_and_the_context_text_out_of_band() {
+async fn the_detail_fragment_brings_the_sub_menu_and_the_fees_group_out_of_band() {
     let (app, browser) = setup().await;
     item(&app, 34, "Tritanium", "130.00", 100_000_000.0).await;
 
@@ -393,7 +394,7 @@ async fn the_detail_fragment_brings_the_sub_menu_and_the_context_text_out_of_ban
 
     assert!(!html.contains("<html"), "a fragment");
     assert!(
-        html.contains(r#"id="section-nav""#) && html.contains(r#"id="filter-context""#),
+        html.contains(r#"id="section-nav""#) && html.contains(r#"<form id="fee-filter""#),
         "{html}"
     );
     assert_eq!(html.matches(r#"hx-swap-oob="true""#).count(), 2, "{html}");

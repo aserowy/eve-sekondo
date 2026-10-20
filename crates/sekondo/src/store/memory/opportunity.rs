@@ -41,15 +41,38 @@ impl OpportunityStore for MemOpportunityStore {
         if !tables.accounts.contains_key(&account_id) {
             return Err(crate::store::StoreError::MissingParent);
         }
-        tables.opportunity_settings.insert(
-            account_id,
-            SettingsRow {
-                min_margin: Numeric::from_f64(settings.min_margin),
-                min_isk_per_day: Numeric::from_f64(settings.min_isk_per_day),
-                search: settings.search.clone(),
-                capital: Numeric::from_f64(settings.capital),
-            },
-        );
+        let fee_character_id = tables
+            .opportunity_settings
+            .get(&account_id)
+            .and_then(|row| row.fee_character_id);
+        tables
+            .opportunity_settings
+            .insert(account_id, SettingsRow::of(settings, fee_character_id));
+        Ok(())
+    }
+
+    async fn load_fee_character(&self, account_id: Uuid) -> StoreResult<Option<i64>> {
+        let tables = self.shared.lock();
+        Ok(tables
+            .opportunity_settings
+            .get(&account_id)
+            .and_then(|row| row.fee_character_id))
+    }
+
+    async fn save_fee_character(
+        &self,
+        account_id: Uuid,
+        character_id: Option<i64>,
+    ) -> StoreResult<()> {
+        let mut tables = self.shared.lock();
+        if !tables.accounts.contains_key(&account_id) {
+            return Err(crate::store::StoreError::MissingParent);
+        }
+        tables
+            .opportunity_settings
+            .entry(account_id)
+            .or_insert_with(|| SettingsRow::of(&Settings::default(), None))
+            .fee_character_id = character_id;
         Ok(())
     }
 

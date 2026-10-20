@@ -5,3 +5,6 @@ members = ["crates/sekondo", "crates/eve-stub", "crates/esi-contract", "crates/e
 [workspace.package]
 edition = "2024"
 publish = false
+
+[profile.dev]
+debug = "line-tables-only"

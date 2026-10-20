@@ -1,0 +1,11 @@
+<form id="fee-filter" class="fee-filter" data-view-state hx-post="/opportunities/fee-character" hx-trigger="change"{% if let Some(type_id) = fees.type_id %} hx-target="#opportunity-detail-content" hx-sync="#opportunity-detail-content:replace" hx-swap="innerHTML"{% else %} hx-target="#content" hx-sync="#content:replace" hx-swap="innerHTML show:#content:top"{% endif %}{% if oob %} hx-swap-oob="true"{% endif %}>
+  <input type="hidden" name="table" value="{{ fees.table }}">
+  {% if let Some(type_id) = fees.type_id %}<input type="hidden" name="type_id" value="{{ type_id }}">{% endif %}
+  <fieldset>
+    <legend>Fees</legend>
+    {% for radio in fees.radios %}
+    <label><input type="radio" name="fee_character" value="{{ radio.id }}"{% if radio.checked %} checked{% endif %}> {{ radio.name }}</label>
+    {% endfor %}
+  </fieldset>
+  <small id="fee-note">{{ fees.note }}</small>
+</form>

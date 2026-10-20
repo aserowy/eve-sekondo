@@ -31,7 +31,7 @@ async function setFilter(page: Page, label: string, value: string) {
   await input.press('Tab');
 }
 
-test('the page is titled by its one table, and its filter section holds the filters and the context', async ({ page }) => {
+test('the page is titled by its one table, and its filter section holds the filters and the fee character', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openOpportunities(page);
 
@@ -46,8 +46,8 @@ test('the page is titled by its one table, and its filter section holds the filt
     await expect(box.getByLabel(label)).toBeVisible();
   }
   await expect(box.locator('[aria-invalid="true"]')).toHaveCount(0);
-  await expect(box.locator('#filter-context')).toContainText('Jita IV - Moon 4 - Caldari Navy Assembly Plant');
-  await expect(box.locator('#filter-context')).toContainText('Fees of Alice Alpha');
+  await expect(box.locator('#fee-filter').getByRole('radio', { name: 'Alice Alpha' })).toBeChecked();
+  await expect(box.locator('#fee-note')).toContainText('Broker fee 1.41%');
   await expect(page.getByRole('button', { name: 'Apply' })).toHaveCount(0);
   await expect(page.locator('#main-nav #character-filter')).toHaveCount(0);
 });
@@ -109,33 +109,34 @@ test('a rejected filter value is reported inside the filter section and leaves t
 
   const capital = page.locator('#opportunity-filters').getByLabel('Capital per item (ISK)');
   await expect(capital).toHaveAttribute('aria-invalid', 'true');
-  const error = filterBox(page).locator('small');
+  const error = page.locator('#opportunity-filters small');
   await expect(error).toContainText('capital');
   await expect(error).toContainText('positive');
   await expect(capital).toHaveValue('0');
   await expect(page.locator('#classic tbody tr')).toHaveCount(1);
 
   await setFilter(page, 'Capital per item (ISK)', '50000000');
-  await expect(filterBox(page).locator('small')).toHaveCount(0);
+  await expect(page.locator('#opportunity-filters small')).toHaveCount(0);
   await expect(capital).not.toHaveAttribute('aria-invalid', 'true');
   await expect(page.locator('#classic tbody tr')).toHaveCount(1);
 });
 
-test('deselecting a character updates the fees text in the filter section', async ({ page }) => {
+test('deselecting a character updates the Fees group in the filter section', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openOpportunities(page);
   await openCharacters(page);
   await page.getByRole('button', { name: 'Add character' }).click();
   await page.getByRole('link', { name: 'Bob Bravo' }).click();
   await page.goto('/opportunities/classic');
-  const context = filterBox(page).locator('#filter-context');
-  await expect(context).toContainText('Fees of Alice Alpha');
+  const fees = filterBox(page).locator('#fee-filter');
+  await expect(fees.getByRole('radio', { name: 'Alice Alpha' })).toBeChecked();
 
   await filterBox(page).getByRole('checkbox', { name: 'Alice Alpha' }).uncheck();
 
   await expect(page).toHaveURL(/\/opportunities\/classic\?chars=90000002/);
-  await expect(context).not.toContainText('Fees of Alice Alpha');
-  await expect(context).toContainText('base rates');
+  await expect(fees.getByRole('radio', { name: 'Alice Alpha' })).toHaveCount(0);
+  await expect(fees.getByRole('radio', { name: 'Bob Bravo' })).toBeChecked();
+  await expect(fees.locator('#fee-note')).toContainText('Base rates');
   await expect(page.locator('nav.sub-menu a')).toHaveCount(4);
   await expect(page.locator('nav.sub-menu a').first()).toHaveAttribute('href', /chars=90000002/);
 });
@@ -172,8 +173,10 @@ test('the filter section wraps in a narrow window and the page does not scroll s
   await page.setViewportSize({ width: 1024, height: 700 });
   await openOpportunities(page);
   await openCharacters(page);
-  await page.getByRole('button', { name: 'Add character' }).click();
-  await page.getByRole('link', { name: 'Bob Bravo' }).click();
+  for (const name of ['Bob Bravo', 'Carol Charlie']) {
+    await page.getByRole('button', { name: 'Add character' }).click();
+    await page.getByRole('link', { name }).click();
+  }
   await page.goto('/opportunities/classic');
 
   expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);

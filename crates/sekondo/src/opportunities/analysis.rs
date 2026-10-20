@@ -66,9 +66,16 @@ pub fn min_margin(fees: Fees) -> f64 {
     (1.0 + fees.broker) / (1.0 - fees.broker - fees.tax) - 1.0
 }
 
-/// The fees of the selected character with the lowest minimum margin. A character whose fees are
-/// not known counts with the base rates. The first character wins a tie.
-pub fn choose_fees(characters: &[(i64, Option<Fees>)]) -> (Fees, FeeSource) {
+/// The fees of the preferred character when it is among the characters, otherwise those of the
+/// character with the lowest minimum margin. A character whose fees are not known counts with the
+/// base rates. The first character wins a tie.
+pub fn choose_fees(
+    characters: &[(i64, Option<Fees>)],
+    preferred: Option<i64>,
+) -> (Fees, FeeSource) {
+    if let Some((id, fees)) = characters.iter().find(|(id, _)| Some(*id) == preferred) {
+        return (fees.unwrap_or(BASE_FEES), FeeSource::Character(*id));
+    }
     let mut best: Option<(Fees, i64)> = None;
     for (id, fees) in characters {
         let fees = fees.unwrap_or(BASE_FEES);

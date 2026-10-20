@@ -158,3 +158,37 @@ test('the pagination keeps its place after a page change', async ({ page }) => {
   expect(footer.y - (pager.y + pager.height)).toBeLessThan(40);
   expect(footer.y + footer.height).toBeCloseTo(1080, 0);
 });
+
+test('the station is a dimmed subtitle in body size below the title of the opportunity pages', async ({ page }) => {
+  await aliceTrained(page);
+  await fill(page, bookOf(34, 100, 130, 10), crossed(34, 1.1));
+  for (const path of ['/opportunities/trend', '/opportunities/trend/34']) {
+    await page.goto(path);
+    const subtitle = page.getByText('Jita IV - Moon 4 - Caldari Navy Assembly Plant', { exact: true });
+    await expect(subtitle, path).toHaveCount(1);
+    await expect(page.getByRole('heading', { level: 1 }), path).toHaveCount(1);
+    await expect(page.locator('main').getByRole('heading', { level: 1 })).toHaveCount(0);
+    const look = await page.evaluate(() => {
+      const el = [...document.querySelectorAll('.page-header p')].find((p) => p.textContent?.includes('Jita IV'))!;
+      const body = getComputedStyle(document.body).fontSize;
+      const title = document.querySelector('h1')!.getBoundingClientRect();
+      const box = el.getBoundingClientRect();
+      const filters = document.querySelector('#filter-box')!.getBoundingClientRect();
+      const headings = [...document.querySelectorAll('.page-header h1, .page-header h2, .page-header h3, .page-header h4')].length;
+      return {
+        size: getComputedStyle(el).fontSize, body, below: box.y >= title.y + title.height - 1, above: box.y + box.height <= filters.y,
+        dimmed: getComputedStyle(el).color !== getComputedStyle(document.querySelector('h1')!).color, headings,
+      };
+    });
+    expect(look.size, path).toBe(look.body);
+    expect(look.below && look.above && look.dimmed, path).toBe(true);
+    expect(look.headings, path).toBe(1);
+  }
+});
+
+test('pages other than the opportunity pages have no subtitle', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  await page.goto('/orders/sell');
+  await expect(page.locator('.page-header p')).toHaveCount(0);
+  await expect(page.locator('.page-header hgroup')).toHaveCount(0);
+});

@@ -322,12 +322,14 @@ pub struct FeeChoice {
     pub base_rates: bool,
 }
 
-/// The fees at the station of the selected characters: the lowest minimum margin wins, and a
-/// character whose fees are not known yet counts with the base rates.
+/// The fees at the station of the selected characters: the preferred character wins when it is
+/// selected, otherwise the lowest minimum margin does. A character whose fees are not known yet
+/// counts with the base rates.
 pub async fn choose_station_fees(
     store: &dyn FeeStore,
     account_id: Uuid,
     character_ids: &[i64],
+    preferred: Option<i64>,
 ) -> Result<FeeChoice, StoreError> {
     let rows = store
         .at_location(account_id, character_ids, STATION_ID)
@@ -346,7 +348,7 @@ pub async fn choose_station_fees(
             (row.character_id, fees)
         })
         .collect();
-    let (fees, source) = choose_fees(&characters);
+    let (fees, source) = choose_fees(&characters, preferred);
     let base_rates = match source {
         FeeSource::Base => true,
         FeeSource::Character(id) => characters

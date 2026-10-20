@@ -89,7 +89,7 @@ fn the_character_with_the_lowest_minimum_margin_gives_the_fees() {
     };
     assert!(min_margin(cheap) < min_margin(dear));
 
-    let (fees, source) = choose_fees(&[(2, Some(dear)), (1, Some(cheap))]);
+    let (fees, source) = choose_fees(&[(2, Some(dear)), (1, Some(cheap))], None);
 
     assert_eq!(fees, cheap);
     assert_eq!(source, FeeSource::Character(1));
@@ -102,18 +102,70 @@ fn a_character_without_known_fees_counts_with_base_rates() {
         broker: 0.05,
         tax: 0.075,
     };
-    let (fees, source) = choose_fees(&[(1, Some(awful)), (2, None)]);
+    let (fees, source) = choose_fees(&[(1, Some(awful)), (2, None)], None);
     assert_eq!(fees, BASE_FEES);
     assert_eq!(source, FeeSource::Character(2));
 }
 
 #[test]
 fn nobody_selected_or_nobody_known_means_base_rates() {
-    assert_eq!(choose_fees(&[]), (BASE_FEES, FeeSource::Base));
+    assert_eq!(choose_fees(&[], None), (BASE_FEES, FeeSource::Base));
     assert_eq!(
-        choose_fees(&[(1, None)]),
+        choose_fees(&[(1, None)], None),
         (BASE_FEES, FeeSource::Character(1))
     );
+}
+
+#[test]
+fn the_preferred_character_wins_over_a_better_one() {
+    let cheap = Fees {
+        broker: 0.0141,
+        tax: 0.03375,
+    };
+    let dear = Fees {
+        broker: 0.03,
+        tax: 0.075,
+    };
+
+    let (fees, source) = choose_fees(&[(1, Some(cheap)), (2, Some(dear))], Some(2));
+
+    assert_eq!(fees, dear);
+    assert_eq!(source, FeeSource::Character(2));
+}
+
+#[test]
+fn a_preferred_character_with_unknown_fees_gets_base_rates() {
+    let cheap = Fees {
+        broker: 0.0141,
+        tax: 0.03375,
+    };
+
+    let (fees, source) = choose_fees(&[(1, Some(cheap)), (2, None)], Some(2));
+
+    assert_eq!(fees, BASE_FEES);
+    assert_eq!(source, FeeSource::Character(2));
+}
+
+#[test]
+fn a_preferred_character_that_is_not_selected_falls_back_to_the_best_one() {
+    let cheap = Fees {
+        broker: 0.0141,
+        tax: 0.03375,
+    };
+    let dear = Fees {
+        broker: 0.03,
+        tax: 0.075,
+    };
+
+    let (fees, source) = choose_fees(&[(2, Some(dear)), (1, Some(cheap))], Some(9));
+
+    assert_eq!(fees, cheap);
+    assert_eq!(source, FeeSource::Character(1));
+}
+
+#[test]
+fn a_preferred_character_with_nobody_selected_means_base_rates() {
+    assert_eq!(choose_fees(&[], Some(1)), (BASE_FEES, FeeSource::Base));
 }
 
 // ---- cost, revenue, margin, order size ----

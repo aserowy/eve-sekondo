@@ -909,6 +909,17 @@ pub trait OpportunityStore: Send + Sync {
 
     async fn save_settings(&self, account_id: Uuid, settings: &Settings) -> StoreResult<()>;
 
+    /// The character whose fees the account's analyses prefer, or none when it never chose one.
+    async fn load_fee_character(&self, account_id: Uuid) -> StoreResult<Option<i64>>;
+
+    /// Saves the choice, or clears it. Leaves the saved filters alone; an account without any
+    /// gets the default filters.
+    async fn save_fee_character(
+        &self,
+        account_id: Uuid,
+        character_id: Option<i64>,
+    ) -> StoreResult<()>;
+
     async fn station_sync(&self, region_id: i64, station_id: i64) -> StoreResult<Vec<SyncRow>>;
 
     /// Days with an own snapshot, counted on the item with the oldest snapshot.

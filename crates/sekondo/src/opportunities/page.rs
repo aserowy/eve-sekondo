@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use super::{
     REGION_ID, STATION_ID, STATION_NAME,
-    analysis::{self, FeeSource, Fees},
+    analysis::{self, FeeSource},
     charts,
     settings::{FieldError, Form, Settings},
     tables::{
@@ -158,8 +158,7 @@ pub struct OpportunitiesView {
     pub content_path: String,
     pub sub_menu: Vec<SubMenuLink>,
     pub freshness: FreshnessView,
-    /// Which fees the analyses use.
-    pub fees_note: String,
+    pub fees: FeeGroupView,
     pub table: TableView,
     pub pager: PageView,
 }
@@ -299,13 +298,6 @@ impl Environment {
             now: self.now,
         }
     }
-
-    fn character_name(&self, id: i64) -> String {
-        self.characters
-            .iter()
-            .find(|(character, _)| *character == id)
-            .map_or_else(|| id.to_string(), |(_, name)| name.clone())
-    }
 }
 
 async fn environment(
@@ -329,7 +321,17 @@ async fn environment(
     let view_state = ViewState::from_query(&selection, query);
     Ok(Some(Environment {
         settings: Settings::load(&*state.stores.opportunities, account_id).await?,
-        fee_choice: choose_station_fees(&*state.stores.fees, account_id, selection.ids()).await?,
+        fee_choice: choose_station_fees(
+            &*state.stores.fees,
+            account_id,
+            selection.ids(),
+            state
+                .stores
+                .opportunities
+                .load_fee_character(account_id)
+                .await?,
+        )
+        .await?,
         own: load_own_orders(&*state.stores.opportunities, account_id, selection.ids()).await?,
         stats: state
             .stores
@@ -417,29 +419,59 @@ async fn build_view(
             })
             .into(),
         freshness: freshness(&*state.stores.opportunities, env.now).await?,
-        fees_note: fees_note(&env.fee_choice, |id| env.character_name(id)),
+        fees: fee_group(&env, table, None),
         table: table_view,
         pager,
     };
     Ok(Some((view, env.selection.clone())))
 }
 
-fn fees_note(choice: &tables::FeeChoice, name: impl Fn(i64) -> String) -> String {
-    let rates = |fees: Fees| {
-        format!(
-            "broker fee {}, sales tax {}",
-            format::percent(fees.broker),
-            format::percent(fees.tax)
-        )
-    };
-    match (choice.source, choice.base_rates) {
-        (FeeSource::Character(id), false) => {
-            format!("Fees of {}: {}", name(id), rates(choice.fees))
+/// One radio button of the Fees group.
+pub struct FeeRadio {
+    pub id: i64,
+    pub name: String,
+    pub checked: bool,
+}
+
+/// The Fees group of the filter section: a radio button per selected character with the fee
+/// character checked, the rates in use, and what the form posts along.
+pub struct FeeGroupView {
+    pub radios: Vec<FeeRadio>,
+    pub note: String,
+    /// The table of the page that saves, and the item of a detail page.
+    pub table: &'static str,
+    pub type_id: Option<i64>,
+}
+
+fn fee_group(env: &Environment, table: Table, type_id: Option<i64>) -> FeeGroupView {
+    let choice = &env.fee_choice;
+    let rates = format!(
+        "broker fee {}, sales tax {}",
+        format::percent(choice.fees.broker),
+        format::percent(choice.fees.tax)
+    );
+    let note = match (choice.source, choice.base_rates) {
+        (FeeSource::Character(_), false) => {
+            let mut note = rates;
+            note[..1].make_ascii_uppercase();
+            note
         }
-        _ => format!(
-            "Fees: base rates ({}) until a character's skills and standings are known",
-            rates(choice.fees)
-        ),
+        (FeeSource::Character(_), true) | (FeeSource::Base, _) => format!("Base rates: {rates}"),
+    };
+    FeeGroupView {
+        radios: env
+            .characters
+            .iter()
+            .filter(|(id, _)| env.selection.contains(*id))
+            .map(|(id, name)| FeeRadio {
+                id: *id,
+                name: name.clone(),
+                checked: choice.source == FeeSource::Character(*id),
+            })
+            .collect(),
+        note,
+        table: table.id(),
+        type_id,
     }
 }
 
@@ -761,6 +793,69 @@ pub async fn save_settings(
     }
 }
 
+/// Saves the fee character the Fees group chose. The form carries the view state like the filter
+/// form: the answer is page 1 of the table the user is looking at, or, with an item, that item's
+/// detail fragment. A character that is not linked to the account is rejected and nothing is stored.
+pub async fn save_fee_character(
+    State(state): State<AppState>,
+    account: CurrentAccount,
+    session: Session,
+    body: String,
+) -> Response {
+    let pairs: Vec<(String, String)> = url::form_urlencoded::parse(body.as_bytes())
+        .into_owned()
+        .collect();
+    let field = |name: &str| {
+        pairs
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    };
+    // Saving starts over on the first page.
+    let query = ViewQuery {
+        page: None,
+        ..ViewQuery::parse(Some(&body))
+    };
+    let characters = match state.repo.list_characters(account.id).await {
+        Ok(characters) => characters,
+        Err(e) => return pages::internal_error(e),
+    };
+    let Some(character) = field("fee_character")
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|id| characters.iter().any(|c| c.character_id == *id))
+    else {
+        return StatusCode::UNPROCESSABLE_ENTITY.into_response();
+    };
+    if let Err(e) = state
+        .stores
+        .opportunities
+        .save_fee_character(account.id, Some(character))
+        .await
+    {
+        return pages::internal_error(e);
+    }
+    let table_id = field("table").unwrap_or(Table::Expansion.id());
+    if let Some(type_id) = field("type_id").and_then(|value| value.parse::<i64>().ok()) {
+        return match build_detail(&state, account, &session, table_id, type_id, &query).await {
+            Ok((view, _)) => pages::render(&DetailFragment { view }),
+            Err(response) => *response,
+        };
+    }
+    let table = Table::from_id(table_id).unwrap_or(Table::Expansion);
+    match load(&state, account, &session, table, &query).await {
+        Ok((view, _)) => {
+            // The address bar goes back to the first page of what the user was reading.
+            let url = view.content_url.replacen("/content", "", 1);
+            let mut response = pages::render(&ContentFragment { view });
+            if let Ok(value) = url.parse() {
+                response.headers_mut().insert("HX-Replace-Url", value);
+            }
+            response
+        }
+        Err(response) => *response,
+    }
+}
+
 // ---- the detail page ----
 
 pub struct FigureView {
@@ -801,7 +896,7 @@ pub struct DetailView {
     pub next_occurrences: Vec<String>,
     /// Why the table does not list the item (right now); `None` while it does.
     pub reason: Option<String>,
-    pub fees_note: String,
+    pub fees: FeeGroupView,
     pub figures: Vec<FigureView>,
     /// Where this page's content loads from, so a live refresh can fetch it again.
     pub refresh_url: String,
@@ -1227,7 +1322,7 @@ async fn build_detail(
     let page_query = env.view_state.query(false);
     let refresh_path = format!("/opportunities/detail/{}/{type_id}", table.id());
     let refresh_url = format!("{refresh_path}{page_query}");
-    let fees_note = fees_note(&env.fee_choice, |id| env.character_name(id));
+    let fees = fee_group(&env, table, Some(type_id));
     let (name, charts, next_occurrences, reason, figures) =
         match tables::detail(table, type_id, &env.stats, &context, sort) {
             Some(detail) => {
@@ -1294,7 +1389,7 @@ async fn build_detail(
         charts,
         next_occurrences,
         reason,
-        fees_note,
+        fees,
         figures,
         refresh_url,
         refresh_path,

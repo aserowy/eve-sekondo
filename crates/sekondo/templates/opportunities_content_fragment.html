@@ -1,5 +1,6 @@
 {% include "opportunities_content.html" %}
 {% let oob = true %}
-{% include "opportunities_filter_context.html" %}
+{% let fees = view.fees %}
+{% include "opportunities_fee_filter.html" %}
 {# The sub-menu's links carry every sorting, so a sorting changes them. #}
 {% include "opportunities_sub_menu.html" %}

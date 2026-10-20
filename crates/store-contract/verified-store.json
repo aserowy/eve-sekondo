@@ -1,6 +1,6 @@
 {
-  "fingerprint": "680b6b62f706795f5330374276e5ad61901e3754a1e92e4c6711cd36f1c3996e",
-  "verified_at": "2026-10-20T07:13:01.723472689Z",
+  "fingerprint": "ec5c3e61de52234467ccfabb2bc4e38917bc09357fe3632659c8a910cba17e87",
+  "verified_at": "2026-10-20T10:44:39.748276723Z",
   "cases": [
     "accounts/tokens-round-trip-as-ciphertext",
     "accounts/an-account-lists-its-characters-in-link-order",
@@ -73,6 +73,9 @@
     "opportunities/an-account-without-filters-has-none-stored",
     "opportunities/saved-filters-come-back-and-are-replaced",
     "opportunities/filters-belong-to-their-account",
+    "opportunities/a-saved-fee-character-comes-back-and-is-replaced-or-cleared",
+    "opportunities/a-fee-character-belongs-to-its-account",
+    "opportunities/filters-and-the-fee-character-are-saved-independently",
     "opportunities/the-station-sync-lists-what-ran",
     "opportunities/own-orders-at-the-station-are-the-items-the-characters-trade",
     "opportunities/stats-without-book-fields-are-not-listed",

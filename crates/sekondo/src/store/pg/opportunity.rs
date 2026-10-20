@@ -56,6 +56,32 @@ impl OpportunityStore for PgOpportunityStore {
         Ok(())
     }
 
+    async fn load_fee_character(&self, account_id: Uuid) -> StoreResult<Option<i64>> {
+        let row: Option<(Option<i64>,)> = sqlx::query_as(
+            "SELECT fee_character_id FROM opportunity_settings WHERE account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|(id,)| id))
+    }
+
+    async fn save_fee_character(
+        &self,
+        account_id: Uuid,
+        character_id: Option<i64>,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "INSERT INTO opportunity_settings (account_id, fee_character_id) VALUES ($1, $2)
+             ON CONFLICT (account_id) DO UPDATE SET fee_character_id = excluded.fee_character_id",
+        )
+        .bind(account_id)
+        .bind(character_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn station_sync(&self, region_id: i64, station_id: i64) -> StoreResult<Vec<SyncRow>> {
         Ok(sqlx::query_as(
             "SELECT kind, last_success_at, last_error FROM station_sync

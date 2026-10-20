@@ -16,7 +16,10 @@ operations:
   apply:
     guidance:
       - Use the tdd skill
-      - Restrict npx playwright with `npx playwright test --workers=2`
+      - Set ports on testing to leave the dev running
+      - Restrict npx playwright with `npx playwright test --workers=1`
       - Restrict cargo test with `CARGO_BUILD_JOBS=3 RUST_TEST_THREADS=3 nice -n 19 cargo test`
+      - Run tests sequentially always
+      - All tests must be green
       - Keep test summaries concise
       - Do not commit

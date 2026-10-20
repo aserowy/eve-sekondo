@@ -171,3 +171,53 @@ test('the groups of the filter section have no divider line or border', async ({
     expect(widths, selector).toEqual(['0px', '0px', '0px', '0px']);
   }
 });
+
+const top = async (page: Page, selector: string) => (await page.locator(selector).first().boundingBox())!.y;
+
+test('the groups of the trend page share their top edge', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await twoCharacters(page);
+  await page.goto('/opportunities/trend');
+
+  const legend = await top(page, '#character-filter legend');
+  const margin = (await page.locator('#opportunity-filters').getByText('Minimum margin (%)').boundingBox())!.y;
+  const fees = await top(page, '#fee-filter legend');
+  expect(Math.abs(legend - margin)).toBeLessThanOrEqual(1);
+  expect(Math.abs(fees - margin)).toBeLessThanOrEqual(1);
+});
+
+test('the character legend is level with the range label', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await twoCharacters(page);
+  await page.goto('/trades');
+
+  const legend = await top(page, '#character-filter legend');
+  const range = await top(page, '#trades-range-control > span');
+  expect(Math.abs(legend - range)).toBeLessThanOrEqual(1);
+});
+
+test('wrapped opportunity fields do not move the character filter', async ({ page }) => {
+  await page.setViewportSize({ width: 1100, height: 900 });
+  await twoCharacters(page);
+  await page.goto('/opportunities/trend');
+
+  const margin = (await page.locator('#opportunity-filters').getByText('Minimum margin (%)').boundingBox())!.y;
+  const item = (await page.locator('#opportunity-filters').getByText('Item name').boundingBox())!.y;
+  const legend = await top(page, '#character-filter legend');
+  expect(item, 'the fields wrap onto a second row').toBeGreaterThan(margin + 20);
+  expect(Math.abs(legend - margin)).toBeLessThanOrEqual(1);
+  expect(Math.abs((await top(page, '#fee-filter legend')) - margin)).toBeLessThanOrEqual(1);
+});
+
+test('an error under a field does not move the character filter', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await twoCharacters(page);
+  await page.goto('/opportunities/trend');
+  const before = await top(page, '#character-filter legend');
+
+  await page.locator('#opportunity-filters').getByLabel('Minimum margin (%)').fill('-1');
+  await page.locator('#opportunity-filters').getByLabel('Minimum margin (%)').blur();
+  await expect(page.locator('#opportunity-filters [aria-invalid="true"]')).toHaveCount(1);
+
+  expect(await top(page, '#character-filter legend')).toBeCloseTo(before, 0);
+});

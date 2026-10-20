@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block title %}{{ view.name }} · Opportunities · Sekondo{% endblock %}
-{% block page_title %}{{ view.name }}{% endblock %}
+{% block page_heading %}<hgroup><h1>{{ view.name }}</h1><p>{{ view.station_name }}</p></hgroup>{% endblock %}
 
 {% block head %}
 <script src="/static/chart.umd.min.js"></script>
@@ -22,7 +22,8 @@
   <input type="hidden" name="{{ name }}" value="{{ value }}">
   {% endfor %}
 </form>
-{% include "opportunities_filter_context.html" %}
+{% let fees = view.fees %}
+{% include "opportunities_fee_filter.html" %}
 </div>
 {% endblock %}
 

@@ -43,7 +43,8 @@
 /* #content takes main's spare height, so the pagination (margin-top: auto) sits just above the footer on a short page. */
 .page > main > #content { flex: 1 0 auto; display: flex; flex-direction: column; }
 /* Headings: a modest page title, and section titles a step below it. */
-.page-header h1 { --pico-font-size: 1.5rem; margin-top: 0; margin-bottom: calc(var(--pico-spacing) * 0.75); }
+.page-header h1 { --pico-font-size: 1.5rem; margin-top: 0; margin-bottom: 0; }
+.page-header > h1, .page-header > hgroup { margin-bottom: calc(var(--pico-spacing) * 0.75); }
 .page main h2 { --pico-font-size: 1.125rem; margin-bottom: calc(var(--pico-spacing) * 0.5); }
 .sidebar {
   position: sticky;
@@ -164,15 +165,15 @@ table.records tr.details td { color: var(--pico-muted-color); font-size: 0.8125r
 
 /* Filter section: the page's filters in a wrapping row, with the page's context text at its right end.
    Fields keep Pico's form structure and size; only the layout is set here. */
-.filter-box { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.75rem 3rem; margin-bottom: var(--pico-spacing); }
+.filter-box { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 0.75rem 3rem; margin-bottom: var(--pico-spacing); }
 .filter-box form, .filter-box fieldset { margin: 0; }
 .filter-box fieldset { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; }
 .filter-box fieldset label { margin: 0; white-space: nowrap; }
 /* The opportunity filters: label-above-input fields of equal width that wrap onto further rows. */
-.filter-box #opportunity-filters { display: grid; flex: 1 1 50rem; max-width: 60rem; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0 1rem; }
+.filter-box #opportunity-filters { display: grid; flex: 1 1 12rem; min-width: 0; max-width: 60rem; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0 1rem; }
 .filter-box #opportunity-filters input { margin-bottom: 0; }
 .filter-box #opportunity-filters small { margin: calc(var(--pico-spacing) * 0.25) 0 0; }
-.filter-box #filter-context { margin-left: auto; color: var(--pico-muted-color); }
+.filter-box #fee-filter small { display: block; margin: calc(var(--pico-spacing) * 0.25) 0 0; }
 /* The time range: a label above a group of joined buttons, sharing the bottom edge of the fields beside it. */
 .range-control > span { display: block; margin-bottom: calc(var(--pico-spacing) * 0.375); }
 .range-control [role="group"] { margin-bottom: 0; }

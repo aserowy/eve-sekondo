@@ -534,7 +534,8 @@ async fn the_tables_say_which_fees_they_use() {
 
     let html = get(&app, &browser, "/opportunities/tables").await;
 
-    assert!(html.contains("base rates"), "{html}");
+    assert!(html.contains(r#"<form id="fee-filter""#), "{html}");
+    assert!(html.contains("Base rates"), "{html}");
 }
 
 #[tokio::test]
@@ -559,10 +560,10 @@ async fn the_tables_use_the_fees_of_the_selected_character_with_the_lowest_margi
     let classic = table(&html, "classic");
 
     assert!(
-        html.contains("Alice Alpha"),
-        "the page names the character: {html}"
+        html.contains(r#"<input type="radio" name="fee_character" value="90000001" checked>"#),
+        "the character is the fee character: {html}"
     );
-    assert!(!html.contains("base rates"));
+    assert!(!html.contains("Base rates"));
     // c = 100 * 1.015 = 101.50, r = 129.90 * (1 - 0.015 - 0.03375) = 123.567375, net 22.07.
     assert_eq!(cell(classic, 34, "net"), "22.07");
 }

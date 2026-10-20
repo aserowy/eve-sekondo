@@ -25,6 +25,18 @@ pub fn cases() -> Vec<Case> {
         case("opportunities/filters-belong-to-their-account", |s| {
             boxed(settings_per_account(s))
         }),
+        case(
+            "opportunities/a-saved-fee-character-comes-back-and-is-replaced-or-cleared",
+            |s| boxed(fee_character_round_trip(s)),
+        ),
+        case(
+            "opportunities/a-fee-character-belongs-to-its-account",
+            |s| boxed(fee_character_per_account(s)),
+        ),
+        case(
+            "opportunities/filters-and-the-fee-character-are-saved-independently",
+            |s| boxed(filters_and_fee_character_are_independent(s)),
+        ),
         case("opportunities/the-station-sync-lists-what-ran", |s| {
             boxed(station_sync(s))
         }),
@@ -124,6 +136,136 @@ async fn settings_per_account(stores: &Stores) {
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+async fn fee_character_round_trip(stores: &Stores) {
+    let account = account_with(stores, &[1, 2]).await;
+    assert_eq!(
+        stores
+            .opportunities
+            .load_fee_character(account)
+            .await
+            .unwrap(),
+        None
+    );
+
+    // Saving one with no filters saved yet creates the row with the default filters.
+    stores
+        .opportunities
+        .save_fee_character(account, Some(2))
+        .await
+        .unwrap();
+    assert_eq!(
+        stores
+            .opportunities
+            .load_fee_character(account)
+            .await
+            .unwrap(),
+        Some(2)
+    );
+    assert_eq!(
+        stores.opportunities.load_settings(account).await.unwrap(),
+        Some(Settings::default())
+    );
+
+    stores
+        .opportunities
+        .save_fee_character(account, Some(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        stores
+            .opportunities
+            .load_fee_character(account)
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    stores
+        .opportunities
+        .save_fee_character(account, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        stores
+            .opportunities
+            .load_fee_character(account)
+            .await
+            .unwrap(),
+        None
+    );
+
+    let unknown = stores
+        .opportunities
+        .save_fee_character(uuid::Uuid::new_v4(), Some(1))
+        .await;
+    assert!(
+        matches!(unknown, Err(StoreError::MissingParent)),
+        "{unknown:?}"
+    );
+}
+
+async fn fee_character_per_account(stores: &Stores) {
+    let mine = account_with(stores, &[1]).await;
+    let theirs = account_with(stores, &[2]).await;
+    stores
+        .opportunities
+        .save_fee_character(mine, Some(1))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        stores
+            .opportunities
+            .load_fee_character(theirs)
+            .await
+            .unwrap(),
+        None
+    );
+    // The choice goes with the account.
+    stores.accounts.delete_character(1).await.unwrap();
+    assert_eq!(
+        stores.opportunities.load_fee_character(mine).await.unwrap(),
+        None
+    );
+}
+
+async fn filters_and_fee_character_are_independent(stores: &Stores) {
+    let account = account_with(stores, &[1]).await;
+    let settings = Settings {
+        search: "pyer".to_owned(),
+        ..Settings::default()
+    };
+
+    // A fee character saved first survives saving the filters ...
+    stores
+        .opportunities
+        .save_fee_character(account, Some(1))
+        .await
+        .unwrap();
+    settings
+        .save(&*stores.opportunities, account)
+        .await
+        .unwrap();
+    assert_eq!(
+        stores
+            .opportunities
+            .load_fee_character(account)
+            .await
+            .unwrap(),
+        Some(1)
+    );
+
+    // ... and the filters saved first survive saving a fee character.
+    stores
+        .opportunities
+        .save_fee_character(account, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        stores.opportunities.load_settings(account).await.unwrap(),
+        Some(settings)
     );
 }
 

@@ -23,7 +23,7 @@ test('open the opportunities page from the orders page with a narrowed selection
 
   await expect(page).toHaveURL(/\/opportunities\/expansion\?chars=90000002$/);
   await expect(nav.getByRole('link', { name: 'Opportunities' })).toHaveAttribute('aria-current', 'page');
-  await expect(page.locator('#filter-box #filter-context')).toContainText(STATION);
+  await expect(page.locator('.page-header')).toContainText(STATION);
   const menu = page.locator('nav.sub-menu');
   await expect(menu.getByRole('link')).toHaveText(['Recurring spread expansion', 'Classic spread trade', 'Mean reversion', 'Trend']);
   await expect(menu.getByRole('link', { name: 'Recurring spread expansion' })).toHaveAttribute('aria-current', 'page');
@@ -71,8 +71,8 @@ test('a classic row shows the sell price one tick below the best sell and the cu
   await expect(classic.getByRole('columnheader', { name: 'Current best buy' })).toBeVisible();
   // Alice's fees at Jita 4-4: c = 101.41, r = 119.90 * 0.95215, so a margin of 12.58%.
   await expect(row.locator('[data-col="margin"]')).toHaveText('12.58%');
-  await expect(page.locator('#opportunity-fees')).toContainText('Alice Alpha');
-  await expect(page.locator('#opportunity-fees')).toContainText('broker fee 1.41%');
+  await expect(page.locator('#fee-filter').getByRole('radio', { name: 'Alice Alpha' })).toBeChecked();
+  await expect(page.locator('#fee-note')).toContainText('Broker fee 1.41%');
 });
 
 test('sorting the trend table by volatility keeps the classic sorting and puts both in the URL', async ({ page }) => {
@@ -333,7 +333,7 @@ test('a row click navigates to the detail page of that table and item, with no f
   await expect(page.locator('#figures h2')).toContainText('Classic spread trade');
   await expect(page.locator('#main-nav a[aria-current="page"]')).toHaveAttribute('aria-label', 'Opportunities');
   await expect(page.locator('#filter-box #character-filter')).toBeVisible();
-  await expect(page.locator('#filter-box #filter-context')).toContainText('Alice Alpha');
+  await expect(page.locator('#filter-box #fee-filter').getByRole('radio', { name: 'Alice Alpha' })).toBeChecked();
   await expect(page.locator('[data-figure="buy"] [data-value]')).toHaveText('100.00');
   await expect(page.locator('[data-figure="sell"] [data-value]')).toHaveText('129.90');
   await expect(page.locator('[data-figure="margin"]')).toContainText('(r − c) / c');
@@ -399,7 +399,7 @@ test('deselecting a character recomputes the fees on the detail page, and only t
   await page.goto('/opportunities/classic');
   await page.locator('#classic tr[data-type-id="34"]').click();
   await expect(page).toHaveURL(/\/opportunities\/classic\/34$/);
-  await expect(page.locator('#filter-context')).toContainText('Fees of Alice Alpha');
+  await expect(page.locator('#fee-filter').getByRole('radio', { name: 'Alice Alpha' })).toBeChecked();
   // Alice's skills give b 1.41%: c = 100 * 1.0141.
   await expect(page.locator('[data-figure="cost"] [data-value]')).toHaveText('101.41');
   await page.evaluate(() => ((window as unknown as { marker: string }).marker = 'same page'));
@@ -407,7 +407,7 @@ test('deselecting a character recomputes the fees on the detail page, and only t
   await page.locator('#filter-box').getByRole('checkbox', { name: 'Alice Alpha' }).uncheck();
 
   await expect(page).toHaveURL(/\/opportunities\/classic\/34\?chars=90000002$/);
-  await expect(page.locator('#filter-context')).toContainText('base rates');
+  await expect(page.locator('#fee-note')).toContainText('Base rates');
   await expect(page.locator('[data-figure="cost"] [data-value]')).toHaveText('103.00');
   expect(await page.evaluate(() => (window as unknown as { marker: string }).marker)).toBe('same page');
 });
@@ -609,4 +609,92 @@ test('text typed into another field while a save is in flight is kept', async ({
   await expect(form.locator('[aria-invalid="true"]')).toHaveCount(0);
   await expect(form.locator('small')).toHaveCount(0);
   await expect(search).toHaveValue('pyer');
+});
+
+// ---- the fee character ----
+
+/** Tritanium with Alice (trained, b 1.41%) and Bob (fees unknown: the base rates 3% and 7.5%) on one account. */
+async function withTwoCharacters(page: Page, table: 'classic' | 'trend' = 'classic') {
+  await withTritanium(page, table);
+  await openCharacters(page);
+  await page.getByRole('button', { name: 'Add character' }).click();
+  await page.getByRole('link', { name: 'Bob Bravo' }).click();
+  await expect(page).toHaveURL(/\/characters$/);
+  await page.goto(`/opportunities/${table}`);
+}
+
+test('with two characters the one with the lowest margin is checked, and the groups share their top edge with the fees', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await withTwoCharacters(page);
+
+  const fees = page.locator('#fee-filter');
+  await expect(fees.getByRole('group', { name: 'Fees' })).toBeVisible();
+  await expect(fees.getByRole('radio')).toHaveCount(2);
+  await expect(fees.getByRole('radio', { name: 'Alice Alpha' })).toBeChecked();
+  await expect(fees.getByRole('radio', { name: 'Bob Bravo' })).not.toBeChecked();
+  const top = async (selector: string) => (await page.locator(selector).first().boundingBox())!.y;
+  const margin = (await page.locator('#opportunity-filters').getByText('Minimum margin (%)').boundingBox())!.y;
+  expect(Math.abs((await top('#fee-filter legend')) - margin)).toBeLessThanOrEqual(1);
+  expect(Math.abs((await top('#character-filter legend')) - margin)).toBeLessThanOrEqual(1);
+});
+
+test('choosing another character recomputes the table and the helper text, and the choice is kept', async ({ page }) => {
+  await withTwoCharacters(page);
+  const row = page.locator('#classic tr[data-type-id="34"]');
+  await expect(row.locator('[data-col="margin"]')).toHaveText('21.96%');
+  await page.evaluate(() => ((window as unknown as { marker: string }).marker = 'same page'));
+
+  await page.locator('#fee-filter').getByRole('radio', { name: 'Bob Bravo' }).check();
+
+  await expect(page.locator('#fee-filter').getByRole('radio', { name: 'Bob Bravo' })).toBeChecked();
+  await expect(page.locator('#fee-note')).toContainText('Base rates');
+  // c = 100 * 1.03 = 103, r = 129.90 * 0.895 = 116.2605: a margin of 12.87%.
+  await expect(row.locator('[data-col="margin"]')).toHaveText('12.87%');
+  expect(await page.evaluate(() => (window as unknown as { marker: string }).marker)).toBe('same page');
+
+  // Another table page and a fresh load use it as well.
+  await page.goto('/opportunities/trend');
+  await expect(page.locator('#fee-filter').getByRole('radio', { name: 'Bob Bravo' })).toBeChecked();
+  await page.goto('/opportunities/classic');
+  await expect(page.locator('#fee-filter').getByRole('radio', { name: 'Bob Bravo' })).toBeChecked();
+  await expect(page.locator('#classic tr[data-type-id="34"] [data-col="margin"]')).toHaveText('12.87%');
+});
+
+test('the chosen character gives way when it is deselected, and comes back when it is selected again', async ({ page }) => {
+  await withTwoCharacters(page);
+  const fees = page.locator('#fee-filter');
+  await fees.getByRole('radio', { name: 'Bob Bravo' }).check();
+  await expect(fees.getByRole('radio', { name: 'Bob Bravo' })).toBeChecked();
+
+  await page.locator('#character-filter').getByRole('checkbox', { name: 'Bob Bravo' }).uncheck();
+  await expect(fees.getByRole('radio')).toHaveCount(1);
+  await expect(fees.getByRole('radio', { name: 'Alice Alpha' })).toBeChecked();
+
+  await page.locator('#character-filter').getByRole('checkbox', { name: 'Bob Bravo' }).check();
+  await expect(fees.getByRole('radio', { name: 'Bob Bravo' })).toBeChecked();
+});
+
+test('the fee character is chosen on the detail page too, which keeps its address', async ({ page }) => {
+  await withTwoCharacters(page);
+  await page.locator('#classic tr[data-type-id="34"]').click();
+  await expect(page).toHaveURL(/\/opportunities\/classic\/34$/);
+  const fees = page.locator('#fee-filter');
+  await expect(fees.getByRole('radio', { name: 'Alice Alpha' })).toBeChecked();
+  await expect(page.locator('[data-figure="cost"] [data-value]')).toHaveText('101.41');
+
+  await fees.getByRole('radio', { name: 'Bob Bravo' }).check();
+
+  await expect(page).toHaveURL(/\/opportunities\/classic\/34$/);
+  await expect(page.locator('[data-figure="cost"] [data-value]')).toHaveText('103.00');
+  await expect(fees.getByRole('radio', { name: 'Bob Bravo' })).toBeChecked();
+  await page.goto('/opportunities/classic');
+  await expect(page.locator('#fee-filter').getByRole('radio', { name: 'Bob Bravo' })).toBeChecked();
+});
+
+test('a character without fee data counts with the base rates and the helper text says so', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  await page.goto('/opportunities/classic');
+
+  await expect(page.locator('#fee-filter').getByRole('radio', { name: 'Alice Alpha' })).toBeChecked();
+  await expect(page.locator('#fee-note')).toContainText('Base rates');
 });

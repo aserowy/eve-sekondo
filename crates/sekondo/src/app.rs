@@ -238,6 +238,10 @@ pub fn router(state: AppState, extra_routes: Router<AppState>) -> Router {
             post(opportunities::page::save_settings),
         )
         .route(
+            "/opportunities/fee-character",
+            post(opportunities::page::save_fee_character),
+        )
+        .route(
             "/opportunities/{table}/{type_id}",
             get(opportunities::page::detail_page),
         )
