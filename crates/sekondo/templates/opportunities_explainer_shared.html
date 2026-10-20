@@ -1,0 +1,11 @@
+<h3>Shared figures</h3>
+<p>Every table works out the same figures from B and S, with the broker fee b and the sales tax t of the fee character and your capital per item. These are not columns:</p>
+<ul>
+  <li><strong>c</strong>, the cost per unit: <code>c = B × (1 + b)</code>.</li>
+  <li><strong>r</strong>, the revenue per unit: <code>r = S × (1 − b − t)</code>.</li>
+  <li><strong>U</strong>, the order size: <code>U = ⌊capital per item / c⌋</code>.</li>
+  <li><strong>Market share</strong> of a side: <code>1/(n + 1)</code>, with n the other orders within 1% of that side's best price.</li>
+  <li><strong>ρ</strong>, the buy side ratio: the share of the units taken from buy orders over 30 days of snapshots, 0.5 when none were taken.</li>
+  <li><strong>q_buy</strong> and <strong>q_sell</strong>, the daily capture of each side: <code>q_buy = 1/(n + 1) × V × ρ</code> and <code>q_sell = 1/(n + 1) × V × (1 − ρ)</code>, with V the daily volume of 7 days.</li>
+</ul>
+<p>An item is in no table when its Net is not positive, not even one unit fits the capital, there are fewer than 10 daily returns for σ, its daily volume is 0, or T_fill exceeds T_max, which is the same as V below V_min. Your minimum margin and minimum ISK/day then narrow the tables further.</p>

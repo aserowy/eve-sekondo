@@ -1,4 +1,4 @@
-import { expect, loginWith, openCharacters, test } from '../support/fixtures';
+import { expect, liveSettled, loginWith, openCharacters, test } from '../support/fixtures';
 
 test('the sidebar lists the pages in order, navigates between them, and signs out at the bottom', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
@@ -24,6 +24,7 @@ test('the sidebar lists the pages in order, navigates between them, and signs ou
     await expect(nav.getByRole('link', { name })).toHaveAttribute('aria-current', 'page');
     await expect(nav.locator('[aria-current="page"]')).toHaveCount(1);
   }
+  await liveSettled(page);
 
   // Sign out sits at the bottom of the sidebar, below every other entry.
   const bottom = (await nav.getByRole('button', { name: 'Sign out' }).boundingBox())!;

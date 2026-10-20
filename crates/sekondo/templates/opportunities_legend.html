@@ -1,0 +1,6 @@
+<dl class="legend">
+  {% for e in legend %}
+  <dt>{{ e.short }}</dt>
+  <dd><strong>{{ e.name }}.</strong> {{ e.meaning }}{% if let Some(formula) = e.formula %} <code>{{ e.short }} = {{ formula }}</code>{% endif %}</dd>
+  {% endfor %}
+</dl>

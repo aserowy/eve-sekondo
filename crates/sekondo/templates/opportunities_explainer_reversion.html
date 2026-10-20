@@ -1,0 +1,39 @@
+<h3>Signal</h3>
+<p>An item is listed when its price fell unusually far and is expected to return to its average. The Bollinger bands are the SMA 20 of the daily averages ± 2 standard deviations of the last 20 daily averages. %B tells where the latest daily average sits in them: 0 on the lower band, 1 on the upper band, below 0 under the lower band. RSI 14 weighs the rises of the last 14 days against the falls, from 0 to 100. The item counts as oversold when %B is below 0 or RSI is below 30. S is the SMA 20 rounded down to a valid price, the average the price is expected to return to, and must be above B.</p>
+<p>For example, with an SMA 20 of 10,537.40, %B −0.08 and RSI 27, the item is oversold and S is 10,530.00.</p>
+{% include "opportunities_explainer_shared.html" %}
+<h3>Worked example</h3>
+<p>One illustrative row, with b = 1.41%, t = 3.375%, a capital per item of 100,000,000, ρ = 0.5 and 3 buy and 1 sell orders within 1%:</p>
+<table class="example">
+  <tbody>
+    <tr><th scope="row">Item</th><td>an item that fell below its lower Bollinger band, now bought at 9,000.00</td></tr>
+    <tr><th scope="row">B</th><td>9,000.00</td></tr>
+    <tr><th scope="row">S</th><td>10,530.00, the SMA 20 10,537.40 rounded down</td></tr>
+    <tr><th scope="row">c</th><td>9,000.00 × 1.0141 = 9,126.90</td></tr>
+    <tr><th scope="row">r</th><td>10,530.00 × 0.95215 ≈ 10,026.14</td></tr>
+    <tr><th scope="row">Net</th><td>10,026.14 − 9,126.90 ≈ 899.24</td></tr>
+    <tr><th scope="row">m</th><td>899.24 / 9,126.90 ≈ 9.85%</td></tr>
+    <tr><th scope="row">U</th><td>⌊100,000,000 / 9,126.90⌋ = 10,956</td></tr>
+    <tr><th scope="row">q_buy, q_sell</th><td>1/(3 + 1) × 80,000 × 0.5 = 10,000 and 1/(1 + 1) × 80,000 × 0.5 = 20,000</td></tr>
+    <tr><th scope="row">ISK/d</th><td>899.24 × 10,956 / 1.64 days ≈ 5.99M</td></tr>
+    <tr><th scope="row">%B</th><td>−0.08, below the lower band</td></tr>
+    <tr><th scope="row">RSI</th><td>27, below 30</td></tr>
+    <tr><th scope="row">V7</th><td>80,000, the V of the formulas</td></tr>
+    <tr><th scope="row">V30</th><td>76,000, so V7 is no short spike</td></tr>
+    <tr><th scope="row">σ</th><td>3%</td></tr>
+    <tr><th scope="row">T_max</th><td>min(3, (9.85% / 6%)²) ≈ 2.70 days, below the cap of 3 days</td></tr>
+    <tr><th scope="row">T_fill</th><td>10,956 / 10,000 + 10,956 / 20,000 ≈ 1.64 days</td></tr>
+    <tr><th scope="row">V_min</th><td>≈ 48,756</td></tr>
+    <tr><th scope="row">n b/s</th><td>3 / 1</td></tr>
+    <tr><th scope="row">Outbid buy price</th><td>9,001.00, one tick above B</td></tr>
+    <tr><th scope="row">c and m after outbidding</th><td>≈ 9,127.91 and ≈ 9.84%</td></tr>
+  </tbody>
+</table>
+<p>The row passes the default filters: m ≈ 9.85% is above 5% and ≈ 5.99M ISK/d is above 5M. V7 is about 1.6 times V_min: the higher σ leaves less time to fill.</p>
+<h3>Order playbook</h3>
+<ol>
+  {% include "opportunities_explainer_playbook_common.html" %}
+  <li>Buy while %B is below 0 or RSI below 30.</li>
+  <li>Sell at S, the SMA 20 the price is expected to return to.</li>
+  <li>When the price has not recovered within T_max, or keeps falling, drop the trade instead of averaging down.</li>
+</ol>

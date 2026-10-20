@@ -133,13 +133,13 @@ fn figure(html: &str, key: &str) -> String {
     let row = &html[html
         .find(&format!(r#"data-figure="{key}""#))
         .expect("figure")..];
-    let row = &row[..row.find("</tr>").unwrap()];
+    let row = &row[..row.find("</article>").unwrap()];
     let value = row.split_once("data-value").unwrap().1;
     value
         .split_once('>')
         .unwrap()
         .1
-        .split("</td>")
+        .split("</p>")
         .next()
         .unwrap()
         .trim()
@@ -235,6 +235,9 @@ async fn choosing_on_the_detail_page_answers_the_detail_fragment() {
     assert!(html.contains(r#"id="figures""#), "{html}");
     assert!(html.contains(&radio(BOB, true)), "{html}");
     assert_eq!(figure(&html, "net"), "13.26");
+    // Bob's fees are not known: the b and t cards show the base rates.
+    assert_eq!(figure(&html, "broker"), "3.00%");
+    assert_eq!(figure(&html, "tax"), "7.50%");
     // The detail page itself carries the choice.
     let page = browser
         .get(&app.url("/opportunities/classic/34"))

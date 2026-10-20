@@ -1,0 +1,17 @@
+<article class="explainer" id="explainer">
+  <details>
+    <summary>How to read this table</summary>
+    <h3>Legend</h3>
+    {% let legend = view.legend %}
+    {% include "opportunities_legend.html" %}
+    {% if view.table.id == "expansion" %}
+    {% include "opportunities_explainer_expansion.html" %}
+    {% else if view.table.id == "classic" %}
+    {% include "opportunities_explainer_classic.html" %}
+    {% else if view.table.id == "reversion" %}
+    {% include "opportunities_explainer_reversion.html" %}
+    {% else %}
+    {% include "opportunities_explainer_trend.html" %}
+    {% endif %}
+  </details>
+</article>

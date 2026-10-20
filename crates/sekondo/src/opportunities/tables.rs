@@ -8,6 +8,7 @@ use std::{cmp::Ordering, collections::HashSet};
 use time::{Date, OffsetDateTime, Weekday};
 use uuid::Uuid;
 
+use super::legend::Term;
 use super::settings::Settings;
 use super::{
     STATION_ID,
@@ -151,28 +152,34 @@ impl SortKey {
         }
     }
 
+    /// The header: the short label of the column's term.
     pub fn label(self) -> &'static str {
+        self.term().short()
+    }
+
+    /// The legend term of the column.
+    pub fn term(self) -> Term {
         match self {
-            Self::Item => "Item",
-            Self::Buy => "Current best buy",
-            Self::Sell => "Sell at (S)",
-            Self::Net => "Net / unit",
-            Self::Margin => "Margin (m)",
-            Self::IskPerDay => "ISK/day",
-            Self::V7 => "Volume 7 d",
-            Self::V30 => "Volume 30 d",
-            Self::Sigma => "\u{03C3}",
-            Self::TMax => "T max",
-            Self::TFill => "Fill time",
-            Self::MinVolume => "Min. volume",
-            Self::Near => "Orders within 1% (buy / sell)",
-            Self::Window => "Window",
-            Self::NextStart => "Next start (EVE time)",
-            Self::PercentB => "%B",
-            Self::Rsi => "RSI 14",
-            Self::Sma5 => "SMA 5",
-            Self::Sma20 => "SMA 20",
-            Self::Cross => "Crossed on",
+            Self::Item => Term::Item,
+            Self::Buy => Term::BestBuy,
+            Self::Sell => Term::Sell,
+            Self::Net => Term::Net,
+            Self::Margin => Term::Margin,
+            Self::IskPerDay => Term::IskPerDay,
+            Self::V7 => Term::V7,
+            Self::V30 => Term::V30,
+            Self::Sigma => Term::Sigma,
+            Self::TMax => Term::TMax,
+            Self::TFill => Term::TFill,
+            Self::MinVolume => Term::MinVolume,
+            Self::Near => Term::Near,
+            Self::Window => Term::Window,
+            Self::NextStart => Term::NextStart,
+            Self::PercentB => Term::PercentB,
+            Self::Rsi => Term::Rsi,
+            Self::Sma5 => Term::Sma5,
+            Self::Sma20 => Term::Sma20,
+            Self::Cross => Term::Cross,
         }
     }
 

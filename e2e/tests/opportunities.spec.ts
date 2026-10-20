@@ -1,8 +1,9 @@
 import type { Page } from '@playwright/test';
 import { chartData, chartDrawn } from '../support/charts';
+import { horizontalOverflow } from '../support/layout';
 import { aliceTrained, bookOf, calm, crossed, fill, history } from '../support/opportunities';
 import {
-  expect, feePoll, loginWith, openCharacters, pollCharacter, stationBook, stationRollups, stationSeed, stubControl, stubMarket,
+  expect, feePoll, liveSettled, loginWith, openCharacters, pollCharacter, stationBook, stationRollups, stationSeed, stubControl, stubMarket,
   stubMarketOrder, stubTradeSkills, test, type SeedSnapshot,
 } from '../support/fixtures';
 
@@ -68,7 +69,7 @@ test('a classic row shows the sell price one tick below the best sell and the cu
   await expect(row.locator('[data-col="item"]')).toContainText('Tritanium');
   await expect(row.locator('[data-col="buy"]')).toHaveText('100.00');
   await expect(row.locator('[data-col="sell"]')).toHaveText('119.90');
-  await expect(classic.getByRole('columnheader', { name: 'Current best buy' })).toBeVisible();
+  await expect(classic.locator('th abbr', { hasText: /^B$/ })).toHaveAttribute('title', 'Current best buy, not a suggested price');
   // Alice's fees at Jita 4-4: c = 101.41, r = 119.90 * 0.95215, so a margin of 12.58%.
   await expect(row.locator('[data-col="margin"]')).toHaveText('12.58%');
   await expect(page.locator('#fee-filter').getByRole('radio', { name: 'Alice Alpha' })).toBeChecked();
@@ -108,6 +109,29 @@ test('sorting the trend table by volatility keeps the classic sorting and puts b
   await expect(page).toHaveURL(/\/opportunities\/classic\?cs=item&cd=asc&ts=sigma&td=asc$/);
   await expect(page.locator('#classic th[aria-sort="ascending"]')).toContainText('Item');
   await expect(first()).toContainText('Pyerite');
+});
+
+test('the trend headers are short labels with their full names on hover, and still sort', async ({ page }) => {
+  await aliceTrained(page);
+  await page.goto('/opportunities/trend');
+  await stubMarket([...bookOf(34, 100, 130, 1), ...bookOf(35, 100, 130, 3)]);
+  await stubControl('esi-expires', { seconds: 300 });
+  expect(await stationBook(page)).toBe('200 updated');
+  expect((await stationSeed(page, { history: [...crossed(34, 1.1), ...crossed(35, 1.2)] })).startsWith('200 ')).toBe(true);
+  await page.reload();
+
+  const trend = page.locator('#trend');
+  const labels = ['Item', 'B', 'S', 'Net', 'm', 'ISK/d', 'SMA5', 'SMA20', 'Cross', 'V7', 'V30', 'σ', 'T_max', 'T_fill', 'V_min', 'n b/s'];
+  // The sorted column adds its arrow.
+  await expect(trend.locator('thead th')).toHaveText(labels.map((l) => new RegExp(`^${l}( [▲▼])?$`)));
+  await expect(trend.locator('thead th').first().locator('abbr')).toHaveCount(0);
+  await expect(trend.locator('thead abbr')).toHaveCount(15);
+  await expect(trend.locator('thead abbr', { hasText: /^B$/ })).toHaveAttribute('title', /not a suggested price/);
+
+  await trend.getByRole('link', { name: 'σ' }).click();
+  await expect(page).toHaveURL(/ts=sigma&td=desc/);
+  await expect(trend.locator('th[aria-sort="descending"]')).toContainText('σ');
+  await expect(page.locator('tbody tr').first()).toContainText('Pyerite');
 });
 
 test('an item the account sells at the station is marked as an own sell', async ({ page }) => {
@@ -336,7 +360,32 @@ test('a row click navigates to the detail page of that table and item, with no f
   await expect(page.locator('#filter-box #fee-filter').getByRole('radio', { name: 'Alice Alpha' })).toBeChecked();
   await expect(page.locator('[data-figure="buy"] [data-value]')).toHaveText('100.00');
   await expect(page.locator('[data-figure="sell"] [data-value]')).toHaveText('129.90');
-  await expect(page.locator('[data-figure="margin"]')).toContainText('(r − c) / c');
+  // A card shows its computation with this item's numbers; the formula is in the legend.
+  await expect(page.locator('[data-figure="margin"] .detail')).toHaveText(/ \/ 101\.41$/);
+});
+
+test('a classic detail page shows its figures as cards in six groups with their detail lines', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await withTritanium(page);
+  await page.goto('/opportunities/classic/34');
+
+  const figures = page.locator('#figures');
+  await expect(figures.locator('h3')).toHaveText(['Fees', 'Prices', 'Margin', 'Size & liquidity', 'Timing & risk', 'Result']);
+  await expect(figures.locator('table')).toHaveCount(0);
+  const cost = figures.locator('[data-figure="cost"]');
+  await expect(cost.locator('.name abbr')).toHaveText('c');
+  await expect(cost.locator('.name abbr')).toHaveAttribute('title', 'Cost per unit');
+  await expect(cost.locator('[data-value]')).toHaveText('101.41');
+  await expect(cost.locator('.detail')).toHaveText('100.00 × 1.0141');
+  await expect(figures.locator('[data-figure="broker"] [data-value]')).toHaveText('1.41%');
+  await expect(figures.locator('[data-figure="broker"] .detail')).toHaveCount(0);
+  // The detail line is dimmed, like the names.
+  const [detail, value] = await cost.evaluate((card) => [
+    getComputedStyle(card.querySelector('.detail')!).color,
+    getComputedStyle(card.querySelector('[data-value]')!).color,
+  ]);
+  expect(detail).not.toBe(value);
+  expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
 });
 
 test('a row of the trend table opens the trend page, and the item name is a real link', async ({ page }) => {
@@ -357,10 +406,11 @@ test('the detail page has a sub-menu with a way back that keeps the sorting, the
   await expect(page).toHaveURL(/cs=item&cd=asc/);
   await page.locator('#classic tr[data-type-id="34"]').click();
   await expect(page).toHaveURL(/\/opportunities\/classic\/34\?.*cs=item&cd=asc/);
+  await liveSettled(page);
 
   const menu = page.locator('.page > nav.sub-menu#section-nav');
   await expect(menu.getByRole('link')).toHaveText([
-    '← Classic spread trade', 'Figures', 'Best buy and best sell', 'Spread', 'Units within 1% of the best price',
+    '← Classic spread trade', 'Figures', 'Legend', 'Best buy and best sell', 'Spread', 'Units within 1% of the best price',
   ]);
   await expect(menu.getByRole('link', { name: 'Classic spread trade' })).toHaveAttribute('href', /^\/opportunities\/classic\?.*cs=item&cd=asc/);
   expect((await menu.boundingBox())!.height).toBeLessThanOrEqual(48);
@@ -689,6 +739,74 @@ test('the fee character is chosen on the detail page too, which keeps its addres
   await expect(fees.getByRole('radio', { name: 'Bob Bravo' })).toBeChecked();
   await page.goto('/opportunities/classic');
   await expect(page.locator('#fee-filter').getByRole('radio', { name: 'Bob Bravo' })).toBeChecked();
+});
+
+// ---- the detail legend ----
+
+test('the detail legend is closed on load and lists the figures with their names and formulas', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await withTritanium(page, 'trend');
+  await page.goto('/opportunities/trend/34');
+  const legend = page.locator('article#legend');
+  await expect(legend.locator('summary')).toHaveText('Legend');
+  await expect(legend.locator('details')).not.toHaveAttribute('open', /.*/);
+  await expect(legend.locator('dl')).toBeHidden();
+  // Below the figures, above the first chart.
+  const figures = (await page.locator('#figures').boundingBox())!;
+  const card = (await legend.boundingBox())!;
+  const chart = (await page.locator('article.chart-row').first().boundingBox())!;
+  expect(card.y).toBeGreaterThanOrEqual(figures.y + figures.height - 1);
+  expect(chart.y).toBeGreaterThanOrEqual(card.y + card.height - 1);
+
+  await legend.locator('summary').click();
+  await expect(legend.locator('dt')).toHaveText([
+    'b', 't', 'B', 'Best sell', 'S', 'c', 'r', 'Net', 'm', 'U', 'V7', 'V30', 'ρ', 'q_buy', 'q_sell', 'σ', 'T_fill', 'T_max', 'V_min', 'ISK/d',
+  ]);
+  await expect(legend.locator('dd').nth(17)).toContainText('Allowed holding time');
+  await expect(legend.locator('dd').nth(17)).toContainText('min(3, (m / 2σ)²) days');
+  await expect(legend).not.toContainText('Order playbook');
+});
+
+test('the Legend entry of the sub-menu jumps to the legend with its title below the sub-menu', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 500 });
+  await withClassicCharts(page);
+  await page.goto('/opportunities/classic/34');
+  const menu = page.locator('#section-nav');
+
+  await menu.getByRole('link', { name: 'Legend' }).click();
+
+  await expect(page).toHaveURL(/#legend$/);
+  await expect(page.locator('#legend summary')).toBeInViewport();
+  await expect(async () => {
+    const nav = (await menu.boundingBox())!;
+    const title = (await page.locator('#legend summary').boundingBox())!;
+    expect(title.y).toBeGreaterThanOrEqual(nav.y + nav.height);
+  }).toPass();
+});
+
+test('an opened detail legend stays open across a live refresh, a fee character change and a character filter change', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await withTwoCharacters(page);
+  await page.goto('/opportunities/classic/34');
+  const details = page.locator('#legend details');
+  await page.locator('#legend summary').click();
+  await expect(details).toHaveAttribute('open', '');
+
+  // The book changes: the best sell is 140 now.
+  await stubMarket(bookOf(34, 100, 140, 1));
+  expect(await stationBook(page)).toBe('200 updated');
+  await expect(page.locator('[data-figure="sell"] [data-value]')).toHaveText('139.90');
+  await expect(details).toHaveAttribute('open', '');
+
+  await page.locator('#fee-filter').getByRole('radio', { name: 'Bob Bravo' }).check();
+  await expect(page.locator('[data-figure="cost"] [data-value]')).toHaveText('103.00');
+  await expect(page.locator('[data-figure="broker"] [data-value]')).toHaveText('3.00%');
+  await expect(details).toHaveAttribute('open', '');
+
+  // The character filter swaps the content through hx-select: Alice's fees come back.
+  await page.locator('#character-filter').getByRole('checkbox', { name: 'Bob Bravo' }).uncheck();
+  await expect(page.locator('[data-figure="cost"] [data-value]')).toHaveText('101.41');
+  await expect(details).toHaveAttribute('open', '');
 });
 
 test('a character without fee data counts with the base rates and the helper text says so', async ({ page }) => {

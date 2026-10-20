@@ -151,8 +151,11 @@ test('the freshness is at the end of the page, unfolded and without a warning co
   await expect(strip).toContainText('Order book');
   await expect(strip).toContainText('Market history');
 
+  // The explainer card follows the pagination; the freshness follows both.
   const pagination = (await page.locator('.pagination').boundingBox())!;
-  expect((await strip.boundingBox())!.y).toBeGreaterThanOrEqual(pagination.y + pagination.height - 1);
+  const card = (await page.locator('article.explainer').boundingBox())!;
+  expect(card.y).toBeGreaterThanOrEqual(pagination.y + pagination.height - 1);
+  expect((await strip.boundingBox())!.y).toBeGreaterThanOrEqual(card.y + card.height - 1);
   expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
 });
 
@@ -241,4 +244,76 @@ test('the item name is a plain input, shaped like the number fields beside it', 
   expect(name.padding).toEqual(margin.padding);
   expect(name.radius).toBe(margin.radius);
   expect(name.image).toBe(margin.image);
+});
+
+// ---- the explainer card ----
+
+const explainer = (page: Page) => page.locator('article.explainer');
+
+test('the explainer is closed on load and opens to the legend, signal, shared figures, example and playbook', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openOpportunities(page, 'reversion');
+  const card = explainer(page);
+  await expect(card.locator('summary')).toHaveText('How to read this table');
+  await expect(card.locator('details')).not.toHaveAttribute('open', /.*/);
+  await expect(card.getByRole('heading', { name: 'Legend' })).toBeHidden();
+
+  await card.locator('summary').click();
+  await expect(card.locator('h3')).toHaveText(['Legend', 'Signal', 'Shared figures', 'Worked example', 'Order playbook']);
+  await expect(card.locator('dl dt').first()).toHaveText('Item');
+  await expect(card).toContainText('Bollinger');
+  await expect(card.locator('table.example')).toContainText('10,530.00');
+  await expect(card.locator('table.data')).toHaveCount(0);
+  await expect(card.locator('ol')).toContainText('averaging down');
+  expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
+
+  await page.goto('/opportunities/trend');
+  await explainer(page).locator('summary').click();
+  await expect(explainer(page).locator('table.example')).toContainText('11,790.00');
+  await expect(explainer(page).locator('table.example')).not.toContainText('10,530.00');
+});
+
+test('on a short page the pagination sits above the explainer, and the explainer above the freshness', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await withItems(page, 2);
+  await expect(page.locator('#classic tbody tr')).toHaveCount(2);
+
+  const table = (await page.locator('#classic').boundingBox())!;
+  const pager = (await page.locator('nav.pagination').boundingBox())!;
+  const card = (await explainer(page).boundingBox())!;
+  const footer = (await page.locator('footer.page-footer').boundingBox())!;
+  expect(footer.y + footer.height).toBeCloseTo(1080, 0);
+  // One block gap of the main content (Pico's spacing, 16px) above the card, and main's own
+  // bottom padding below it.
+  expect(card.y - (pager.y + pager.height)).toBeCloseTo(16, 0);
+  expect(footer.y - (card.y + card.height)).toBeCloseTo(16, 0);
+  expect(pager.y - (table.y + table.height)).toBeGreaterThan(200);
+  expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
+});
+
+test('an opened explainer stays open across a live refresh, a page change, a sort change and a filter change', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await withItems(page, 60);
+  const details = explainer(page).locator('details');
+  await explainer(page).locator('summary').click();
+  await expect(details).toHaveAttribute('open', '');
+
+  const refreshed = page.waitForResponse((r) => r.url().includes('/opportunities/classic/content'));
+  expect(await stationBook(page)).toBe('200 updated');
+  await refreshed;
+  await expect(details).toHaveAttribute('open', '');
+
+  await page.locator('.pagination').getByRole('link', { name: 'Next' }).click();
+  await expect(page).toHaveURL(/page=2/);
+  await expect(details).toHaveAttribute('open', '');
+
+  await page.locator('#classic').getByRole('link', { name: 'σ' }).click();
+  await expect(page).toHaveURL(/cs=sigma/);
+  await expect(details).toHaveAttribute('open', '');
+
+  const saved = page.waitForResponse((r) => r.url().includes('/opportunities/settings'));
+  await setFilter(page, 'Minimum margin (%)', '6');
+  await saved;
+  await expect(page).not.toHaveURL(/page=/);
+  await expect(details).toHaveAttribute('open', '');
 });

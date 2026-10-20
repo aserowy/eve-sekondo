@@ -1,0 +1,37 @@
+<h3>Signal</h3>
+<p>Every item with a best buy and a best sell is a candidate: the trade lives on the spread between them. S is one tick below the current best sell, so your sell order is the cheapest one. The item is listed when the shared figures and your filters let it through.</p>
+<p>For example, with a best sell of 11,500.00, S is 11,490.00.</p>
+{% include "opportunities_explainer_shared.html" %}
+<h3>Worked example</h3>
+<p>One illustrative row, with b = 1.41%, t = 3.375%, a capital per item of 100,000,000, ρ = 0.5 and 3 buy and 1 sell orders within 1%:</p>
+<table class="example">
+  <tbody>
+    <tr><th scope="row">Item</th><td>an item with a best buy of 10,000.00 and a best sell of 11,500.00</td></tr>
+    <tr><th scope="row">B</th><td>10,000.00</td></tr>
+    <tr><th scope="row">S</th><td>11,490.00, one tick below 11,500.00</td></tr>
+    <tr><th scope="row">c</th><td>10,000.00 × 1.0141 = 10,141.00</td></tr>
+    <tr><th scope="row">r</th><td>11,490.00 × 0.95215 ≈ 10,940.20</td></tr>
+    <tr><th scope="row">Net</th><td>10,940.20 − 10,141.00 ≈ 799.20</td></tr>
+    <tr><th scope="row">m</th><td>799.20 / 10,141.00 ≈ 7.88%</td></tr>
+    <tr><th scope="row">U</th><td>⌊100,000,000 / 10,141.00⌋ = 9,860</td></tr>
+    <tr><th scope="row">q_buy, q_sell</th><td>1/(3 + 1) × 80,000 × 0.5 = 10,000 and 1/(1 + 1) × 80,000 × 0.5 = 20,000</td></tr>
+    <tr><th scope="row">ISK/d</th><td>799.20 × 9,860 / 1.48 days ≈ 5.33M</td></tr>
+    <tr><th scope="row">V7</th><td>80,000, the V of the formulas</td></tr>
+    <tr><th scope="row">V30</th><td>76,000, so V7 is no short spike</td></tr>
+    <tr><th scope="row">σ</th><td>2%</td></tr>
+    <tr><th scope="row">T_max</th><td>min(3, (7.88% / 4%)²) = min(3, ≈ 3.88) = 3 days</td></tr>
+    <tr><th scope="row">T_fill</th><td>9,860 / 10,000 + 9,860 / 20,000 ≈ 1.48 days</td></tr>
+    <tr><th scope="row">V_min</th><td>39,440</td></tr>
+    <tr><th scope="row">n b/s</th><td>3 / 1</td></tr>
+    <tr><th scope="row">Outbid buy price</th><td>10,010.00, one tick above B</td></tr>
+    <tr><th scope="row">c and m after outbidding</th><td>≈ 10,151.14 and ≈ 7.77%</td></tr>
+  </tbody>
+</table>
+<p>The row passes the default filters: m ≈ 7.88% is above 5% and ≈ 5.33M ISK/d is above 5M. V7 is about 2.0 times V_min, so the orders fill well within T_max.</p>
+<h3>Order playbook</h3>
+<ol>
+  {% include "opportunities_explainer_playbook_common.html" %}
+  <li>Place the sell order at S, one tick below the best sell, as soon as the buy order has filled.</li>
+  <li>Watch both sides: being outbid on the buy side or undercut on the sell side stops the fills.</li>
+  <li>Re-price by one tick only while m still clears your minimum margin.</li>
+</ol>

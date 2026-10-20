@@ -398,3 +398,185 @@ async fn the_navigation_carries_a_narrowed_selection_to_and_from_the_page() {
         );
     }
 }
+
+// ---- the explainer card ----
+
+/// The explainer card of a page.
+fn explainer(html: &str) -> &str {
+    let start = html
+        .find(r#"<article class="explainer""#)
+        .expect("an explainer card");
+    let rest = &html[start..];
+    &rest[..rest.find("</article>").unwrap() + "</article>".len()]
+}
+
+/// The short labels of the first legend in `html`, in order.
+fn legend_labels(html: &str) -> Vec<String> {
+    let start = html.find("<dl").expect("a legend");
+    let legend = &html[start..start + html[start..].find("</dl>").unwrap()];
+    legend
+        .split("<dt>")
+        .skip(1)
+        .map(|dt| dt[..dt.find("</dt>").unwrap()].to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn every_table_page_has_a_closed_explainer_between_the_pagination_and_the_freshness() {
+    let (app, browser) = setup().await;
+
+    for table in ["expansion", "classic", "reversion", "trend"] {
+        let html = get(&app, &browser, &format!("/opportunities/{table}")).await;
+        let at = |needle: &str| {
+            html.find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing in {table}"))
+        };
+        let (section, card, footer) = (
+            at(&format!(r#"<section id="{table}""#)),
+            at(r#"<article class="explainer""#),
+            at(r#"id="freshness""#),
+        );
+        assert!(section < card && card < footer, "{table}");
+        let card = explainer(&html);
+        assert!(card.contains("<details>"), "{table}: closed on load");
+        assert!(
+            card.contains("<summary>How to read this table</summary>"),
+            "{table}"
+        );
+        assert!(!card.contains(r#"class="data""#), "{table}: no data table");
+
+        // Outside the swapped content: the content fragment does not carry it.
+        let content = get(&app, &browser, &format!("/opportunities/{table}/content")).await;
+        assert!(!content.contains("explainer"), "{table}");
+    }
+}
+
+#[tokio::test]
+async fn the_explainer_legend_lists_the_table_columns_only() {
+    let (app, browser) = setup().await;
+
+    let html = get(&app, &browser, "/opportunities/reversion").await;
+
+    assert_eq!(
+        legend_labels(explainer(&html)),
+        [
+            "Item", "B", "S", "Net", "m", "ISK/d", "%B", "RSI", "V7", "V30", "\u{03C3}", "T_max",
+            "T_fill", "V_min", "n b/s",
+        ]
+    );
+    let classic = get(&app, &browser, "/opportunities/classic").await;
+    let labels = legend_labels(explainer(&classic));
+    assert!(
+        !labels
+            .iter()
+            .any(|l| ["Window", "SMA5", "%B"].contains(&l.as_str()))
+    );
+}
+
+#[tokio::test]
+async fn the_classic_explainer_works_through_its_example_and_playbook() {
+    let (app, browser) = setup().await;
+
+    let html = get(&app, &browser, "/opportunities/classic").await;
+    let card = explainer(&html);
+
+    for text in [
+        "11,490.00",
+        "10,141.00",
+        "7.88%",
+        "9,860",
+        "39,440",
+        "5.33M",
+        "10,010.00",
+        "7.77%",
+    ] {
+        assert!(card.contains(text), "{text} missing: {card}");
+    }
+    let parts = [
+        "Legend",
+        "Signal",
+        "Shared figures",
+        "Worked example",
+        "Order playbook",
+    ]
+    .map(|title| {
+        card.find(&format!("<h3>{title}</h3>"))
+            .unwrap_or_else(|| panic!("{title} missing"))
+    });
+    assert!(parts.windows(2).all(|w| w[0] < w[1]), "{parts:?}");
+}
+
+/// The worked example's own strings of each table.
+const EXAMPLES: [(&str, &[&str]); 4] = [
+    (
+        "expansion",
+        &["12,520.00", "17.55%", "11.87M", "daily 18:00"],
+    ),
+    ("classic", &["11,490.00", "7.88%", "5.33M", "7.77%"]),
+    (
+        "reversion",
+        &[
+            "9,000.00",
+            "10,530.00",
+            "9.85%",
+            "2.70 days",
+            "48,756",
+            "5.99M",
+            "9,001.00",
+        ],
+    ),
+    ("trend", &["11,790.00", "10.70%", "7.23M", "10.59%"]),
+];
+
+#[tokio::test]
+async fn each_explainer_shows_its_own_example_and_none_of_the_others() {
+    let (app, browser) = setup().await;
+
+    for (table, own) in EXAMPLES {
+        let html = get(&app, &browser, &format!("/opportunities/{table}")).await;
+        let card = explainer(&html);
+        for text in own {
+            assert!(card.contains(text), "{table}: {text} missing");
+        }
+        for (other, theirs) in EXAMPLES {
+            if other != table {
+                for text in theirs {
+                    assert!(!card.contains(text), "{table} shows {other}'s {text}");
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_shared_figures_are_worded_the_same_in_every_explainer() {
+    let (app, browser) = setup().await;
+
+    let mut shared = Vec::new();
+    for table in ["expansion", "classic", "reversion", "trend"] {
+        let html = get(&app, &browser, &format!("/opportunities/{table}")).await;
+        let card = explainer(&html);
+        let start = card
+            .find("<h3>Shared figures</h3>")
+            .expect("shared figures");
+        let end = card
+            .find("<h3>Worked example</h3>")
+            .expect("a worked example");
+        shared.push(card[start..end].to_owned());
+    }
+    assert!(shared.windows(2).all(|w| w[0] == w[1]), "{shared:#?}");
+}
+
+#[tokio::test]
+async fn an_empty_table_shows_no_opportunities_and_then_its_explainer() {
+    let (app, browser) = setup().await;
+
+    let html = get(&app, &browser, "/opportunities/trend").await;
+
+    let empty = html
+        .find("<p>No opportunities.</p>")
+        .expect("an empty table");
+    let card = html.find(r#"<article class="explainer""#).unwrap();
+    assert!(empty < card);
+    assert!(explainer(&html).contains("11,790.00"));
+}

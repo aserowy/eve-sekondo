@@ -149,6 +149,10 @@ table.records tbody.order:hover > tr > * { background-color: var(--pico-secondar
 }
 .kpi > a { margin-top: auto; font-size: 0.875rem; }
 .kpi.error .value { color: var(--pico-del-color); }
+/* The detail page's figures: a small heading per group, and each card's computation dimmed below its value. */
+#figures h3 { --pico-font-size: 1rem; margin-bottom: calc(var(--pico-spacing) * 0.5); color: var(--pico-muted-color); }
+#figures .kpi .detail { color: var(--pico-muted-color); font-size: 0.875rem; font-variant-numeric: tabular-nums; }
+#figures .kpi abbr { cursor: help; }
 
 /* Pagination bar under a table. */
 .pagination { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; margin: auto 0 0; }
@@ -184,6 +188,15 @@ table.records tr.details td { color: var(--pico-muted-color); font-size: 0.8125r
 .graph-row > article { min-width: 0; }
 /* A graph card: Pico's article holds the title, the chart and the empty-state text; nothing trails below the last one. */
 article.graph > :last-child { margin-bottom: 0; }
+
+/* An explainer card: #content's block gap above it and nothing trailing below it, so main's bottom
+   padding is the gap to the footer. */
+.page > main > article.explainer { flex: none; margin: 0; }
+article.explainer > details { margin-bottom: 0; }
+article.explainer table.example { margin-bottom: var(--pico-spacing); }
+article.explainer table.example th { font-weight: normal; white-space: nowrap; }
+.legend dt { font-weight: bold; }
+.legend dd { margin: 0 0 0.5rem; }
 
 /* Page footer: the page's freshness as quiet, small, dimmed lines below a divider. */
 .page-footer {

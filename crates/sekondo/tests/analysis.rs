@@ -720,3 +720,201 @@ fn the_next_start_of_a_window_is_the_first_occurrence_after_now() {
         "today's midnight has passed"
     );
 }
+
+// ---- the explainers' worked examples ----
+
+/// The inputs every explainer's worked example shares: b = 1.41%, t = 3.375%, 100,000,000
+/// capital per item, V = 80,000, ρ = 0.5, three buy and one sell order within 1%.
+fn explainer_example(best_buy_cents: i64, sell_cents: i64, sigma: f64) -> Inputs {
+    Inputs {
+        best_buy_cents,
+        sell_cents,
+        fees: Fees {
+            broker: 0.0141,
+            tax: 0.03375,
+        },
+        capital: 100_000_000.0,
+        volume: 80_000.0,
+        rho: 0.5,
+        buy_near_orders: 3,
+        sell_near_orders: 1,
+        sigma: Some(sigma),
+    }
+}
+
+/// What a worked example prints, in ISK, as fractions and in days.
+struct Printed {
+    cost: f64,
+    revenue: f64,
+    net: f64,
+    margin: f64,
+    units: i64,
+    t_fill: f64,
+    /// T_max before the cap of 3 days.
+    t_max_uncapped: f64,
+    t_max: f64,
+    min_volume: f64,
+    isk_per_day: f64,
+    outbid_cents: i64,
+    outbid_cost: f64,
+    outbid_margin: f64,
+}
+
+/// Runs a worked example through the figures and checks every number its card prints, that the
+/// row is listed and that it clears the default filters (m ≥ 5%, ISK/d ≥ 5M).
+fn check_example(input: Inputs, sigma: f64, printed: Printed) {
+    let f = evaluate(&input).expect("the worked example is listed");
+    assert_eq!(f, figures(&input, sigma));
+    close(f.cost, printed.cost, 0.005);
+    close(f.revenue, printed.revenue, 0.005);
+    close(f.net_per_unit, printed.net, 0.005);
+    close(f.margin, printed.margin, 0.00005);
+    assert_eq!(f.units, printed.units);
+    close(f.q_buy, 10_000.0, 1e-9);
+    close(f.q_sell, 20_000.0, 1e-9);
+    close(f.t_fill, printed.t_fill, 0.005);
+    close(
+        (f.margin / (2.0 * sigma)).powi(2),
+        printed.t_max_uncapped,
+        0.005,
+    );
+    close(f.t_max, printed.t_max, 0.005);
+    close(f.min_volume, printed.min_volume, 0.5);
+    close(f.isk_per_day, printed.isk_per_day, 5_000.0);
+    assert!(f.t_fill <= f.t_max);
+    assert!(f.margin >= 0.05);
+    assert!(f.isk_per_day >= 5_000_000.0);
+
+    // Outbidding: the next valid price above B, then c and m at that price.
+    let outbid = printed.outbid_cents;
+    assert_eq!(
+        round_down_valid(outbid),
+        outbid,
+        "the outbid price is valid"
+    );
+    assert_eq!(
+        tick_below(outbid),
+        input.best_buy_cents,
+        "it is one tick above B"
+    );
+    let outbid_input = Inputs {
+        best_buy_cents: outbid,
+        ..input
+    };
+    let o = figures(&outbid_input, sigma);
+    close(o.cost, printed.outbid_cost, 0.005);
+    close(o.margin, printed.outbid_margin, 0.00005);
+}
+
+#[test]
+fn the_expansion_example_reads_17_55_percent_and_11_87m_a_day() {
+    check_example(
+        explainer_example(1_000_000, 1_252_000, 0.02),
+        0.02,
+        Printed {
+            cost: 10_141.00,
+            revenue: 11_920.92,
+            net: 1_779.92,
+            margin: 0.1755,
+            units: 9_860,
+            t_fill: 1.48,
+            t_max_uncapped: 19.25,
+            t_max: 3.0,
+            min_volume: 39_440.0,
+            isk_per_day: 11_870_000.0,
+            outbid_cents: 1_001_000,
+            outbid_cost: 10_151.14,
+            outbid_margin: 0.1743,
+        },
+    );
+}
+
+#[test]
+fn the_classic_example_reads_7_88_percent_and_5_33m_a_day() {
+    check_example(
+        explainer_example(1_000_000, 1_149_000, 0.02),
+        0.02,
+        Printed {
+            cost: 10_141.00,
+            revenue: 10_940.20,
+            net: 799.20,
+            margin: 0.0788,
+            units: 9_860,
+            t_fill: 1.48,
+            t_max_uncapped: 3.88,
+            t_max: 3.0,
+            min_volume: 39_440.0,
+            isk_per_day: 5_330_000.0,
+            outbid_cents: 1_001_000,
+            outbid_cost: 10_151.14,
+            outbid_margin: 0.0777,
+        },
+    );
+}
+
+#[test]
+fn the_reversion_example_has_a_t_max_below_the_cap() {
+    check_example(
+        explainer_example(900_000, 1_053_000, 0.03),
+        0.03,
+        Printed {
+            cost: 9_126.90,
+            revenue: 10_026.14,
+            net: 899.24,
+            margin: 0.0985,
+            units: 10_956,
+            t_fill: 1.64,
+            t_max_uncapped: 2.70,
+            t_max: 2.70,
+            min_volume: 48_756.0,
+            isk_per_day: 5_990_000.0,
+            outbid_cents: 900_100,
+            outbid_cost: 9_127.91,
+            outbid_margin: 0.0984,
+        },
+    );
+}
+
+#[test]
+fn the_trend_example_reads_10_70_percent_and_7_23m_a_day() {
+    check_example(
+        explainer_example(1_000_000, 1_179_000, 0.02),
+        0.02,
+        Printed {
+            cost: 10_141.00,
+            revenue: 11_225.85,
+            net: 1_084.85,
+            margin: 0.1070,
+            units: 9_860,
+            t_fill: 1.48,
+            t_max_uncapped: 7.15,
+            t_max: 3.0,
+            min_volume: 39_440.0,
+            isk_per_day: 7_230_000.0,
+            outbid_cents: 1_001_000,
+            outbid_cost: 10_151.14,
+            outbid_margin: 0.1059,
+        },
+    );
+}
+
+#[test]
+fn the_explainers_signals_give_their_examples_sell_prices() {
+    // Classic and trend: one tick below the best sell.
+    assert_eq!(tick_below(1_150_000), 1_149_000);
+    assert_eq!(tick_below(1_180_000), 1_179_000);
+    // Mean reversion: the SMA 20 rounded down to a valid price.
+    assert_eq!(round_down_valid(1_053_740), 1_053_000);
+    // Expansion: the peaks of "daily 18:00" on 10 of the last 14 days; their 25th percentile is
+    // 12,525.00 and one tick below it is 12,520.00.
+    let peaks = [
+        12_000, 12_200, 12_500, 12_600, 12_800, 13_000, 13_100, 13_300, 13_500, 14_000,
+    ];
+    let hours = hours_of(1..=14, |back, hour| {
+        (hour == 18 && back <= 10).then(|| peaks[back as usize - 1] * 100)
+    });
+    let windows = recurring_windows(&hours, &[], now());
+    assert_eq!(windows.len(), 1, "{windows:?}");
+    assert_eq!(windows[0].kind.label(), "daily 18:00");
+    assert_eq!(windows[0].sell_cents, 1_252_000);
+}

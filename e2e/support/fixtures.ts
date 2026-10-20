@@ -273,16 +273,48 @@ export async function loginWith(page: Page, characterName: string): Promise<void
   await page.getByRole('button', { name: 'Log in with EVE Online' }).click();
   await page.getByRole('link', { name: characterName }).click();
   await expect(page).toHaveURL(/\/dashboard$/);
+  await liveSettled(page);
 }
 
 /** Follow the navigation to the characters page. */
 export async function openCharacters(page: Page): Promise<void> {
   await page.locator('#main-nav').getByRole('link', { name: 'Characters' }).click();
   await expect(page).toHaveURL(/\/characters$/);
+  await liveSettled(page);
+}
+
+/**
+ * Waits until a page that is live has opened its event stream (or failed to) and finished the refresh
+ * that opening triggers (and any other htmx request or swap). Until then that refresh may swap out
+ * the very elements a test reads. Pages without a stream are settled at once.
+ */
+export async function liveSettled(page: Page): Promise<void> {
+  await page.waitForFunction(() => (window as unknown as { liveSettled?: () => boolean }).liveSettled?.() ?? true);
 }
 
 /** Every test starts with an empty database, a reset stub, and no network access for portraits. */
 export const test = base.extend<{ cspGuard: void; cleanSlate: void }>({
+  // Navigations a test makes return once the page is live and settled (see `liveSettled`); after a
+  // navigation by a click, call `liveSettled` before measuring the page.
+  page: async ({ page }, use) => {
+    await page.addInitScript(() => {
+      // Whether the stream has opened, or failed to (a test may refuse it on purpose).
+      let tried = false;
+      for (const event of ['htmx:sseOpen', 'htmx:sseError']) document.addEventListener(event, () => (tried = true), true);
+      (window as unknown as { liveSettled: () => boolean }).liveSettled = () =>
+        !document.querySelector('[sse-connect]') ||
+        (tried && !document.querySelector('.htmx-request, .htmx-swapping, .htmx-settling'));
+    });
+    for (const name of ['goto', 'reload', 'goBack', 'goForward'] as const) {
+      const navigate = page[name].bind(page) as (...args: unknown[]) => Promise<unknown>;
+      (page as unknown as Record<string, unknown>)[name] = async (...args: unknown[]) => {
+        const response = await navigate(...args);
+        await liveSettled(page);
+        return response;
+      };
+    }
+    await use(page);
+  },
   cspGuard: [
     async ({ page }, use) => {
       const violations: string[] = [];

@@ -14,6 +14,7 @@ use super::{
     REGION_ID, STATION_ID, STATION_NAME,
     analysis::{self, FeeSource},
     charts,
+    legend::{self, LegendEntry, Term},
     settings::{FieldError, Form, Settings},
     tables::{
         self, Context, Extra, Row, Sort, SortKey, Table, choose_station_fees, load_own_orders,
@@ -80,6 +81,8 @@ pub async fn freshness(
 
 pub struct HeaderView {
     pub label: &'static str,
+    /// The full name, shown on hover; the Item header has none.
+    pub title: &'static str,
     /// The page that the sorting leads to, for the address bar.
     pub href: String,
     /// The content fragment that htmx fetches for it.
@@ -161,6 +164,8 @@ pub struct OpportunitiesView {
     pub fees: FeeGroupView,
     pub table: TableView,
     pub pager: PageView,
+    /// The legend of the explainer card: the table's columns.
+    pub legend: Vec<LegendEntry>,
 }
 
 /// The view state a URL carries: the selection, one sorting per table and the paging of the
@@ -422,6 +427,7 @@ async fn build_view(
         fees: fee_group(&env, table, None),
         table: table_view,
         pager,
+        legend: legend::entries(&legend::table_terms(table)),
     };
     Ok(Some((view, env.selection.clone())))
 }
@@ -500,6 +506,11 @@ fn headers(state: &ViewState, table: Table) -> Vec<HeaderView> {
             let query = state.with_sort(table, next).query(true);
             HeaderView {
                 label: key.label(),
+                title: if key == SortKey::Item {
+                    ""
+                } else {
+                    key.term().name()
+                },
                 href: format!("/opportunities/{}{query}", table.id()),
                 content_href: format!("/opportunities/{}/content{query}", table.id()),
                 aria_sort,
@@ -858,12 +869,19 @@ pub async fn save_fee_character(
 
 // ---- the detail page ----
 
+/// One KPI card of the figures section: the term names it, the detail line works it out with
+/// this item's numbers.
 pub struct FigureView {
     pub key: &'static str,
-    pub label: &'static str,
+    pub term: Term,
     pub value: String,
-    /// How the figure follows from the others, with this item's numbers.
-    pub how: String,
+    pub detail: Option<String>,
+}
+
+/// A labelled group of figure cards.
+pub struct FigureGroup {
+    pub title: &'static str,
+    pub figures: Vec<FigureView>,
 }
 
 /// One chart row of the page: its kind (how the script draws it), a title, and its data as JSON.
@@ -897,170 +915,213 @@ pub struct DetailView {
     /// Why the table does not list the item (right now); `None` while it does.
     pub reason: Option<String>,
     pub fees: FeeGroupView,
-    pub figures: Vec<FigureView>,
+    pub figures: Vec<FigureGroup>,
+    /// The legend card: the terms of the figures, in group order.
+    pub legend: Vec<LegendEntry>,
     /// Where this page's content loads from, so a live refresh can fetch it again.
     pub refresh_url: String,
     /// The same without a query: a live refresh asks with the address bar's query.
     pub refresh_path: String,
 }
 
-fn figure(
-    key: &'static str,
-    label: &'static str,
-    value: String,
-    how: impl Into<String>,
-) -> FigureView {
+fn figure(key: &'static str, term: Term, value: String, detail: Option<String>) -> FigureView {
     FigureView {
         key,
-        label,
+        term,
         value,
-        how: how.into(),
+        detail,
     }
 }
 
+/// How the table derives S, with its input.
+fn sell_detail(table: Table, detail: &tables::Detail<'_>) -> Option<String> {
+    let stats = detail.stats;
+    match table {
+        Table::Classic | Table::Trend => Some(format!(
+            "1 tick below {}",
+            format::isk_short(stats.best_sell_cents)
+        )),
+        Table::Reversion => stats
+            .sma20
+            .map(|sma20| format!("SMA 20 {} rounded down", isk(sma20))),
+        Table::Expansion => match &detail.extra {
+            Some(Extra::Expansion { window, .. }) => {
+                Some(format!("p25 of peaks of {}", window.label()))
+            }
+            _ => None,
+        },
+    }
+}
+
+/// The figures of the detail page in their groups. A figure that cannot be computed for the item is
+/// left out, and so is a group left empty.
 fn detail_figures(
     table: Table,
     detail: &tables::Detail<'_>,
     context: &Context<'_>,
-) -> Vec<FigureView> {
+) -> Vec<FigureGroup> {
     let stats = detail.stats;
     let fees = context.fees;
-    let mut figures = vec![
+    let group = |title, figures| FigureGroup { title, figures };
+    let mut prices = vec![
         figure(
             "buy",
-            "Current best buy",
+            Term::BestBuy,
             format::isk_short(stats.best_buy_cents),
-            "the highest buy order of the station book now",
+            None,
         ),
         figure(
             "best-sell",
-            "Current best sell",
+            Term::BestSell,
             format::isk_short(stats.best_sell_cents),
-            "the lowest sell order of the station book now",
+            None,
         ),
     ];
-    let Some(sell) = detail.sell_cents else {
-        return figures;
-    };
-    let how_sell = match table {
-        Table::Classic | Table::Trend => "one tick below the current best sell".to_owned(),
-        Table::Reversion => {
-            "the SMA 20 of the daily averages, rounded down to a valid price".to_owned()
-        }
-        Table::Expansion => format!(
-            "one tick below the 25th percentile of the peaks of the window {}",
-            detail
-                .extra
-                .as_ref()
-                .map_or_else(String::new, |extra| match extra {
-                    Extra::Expansion { window, .. } => window.label(),
-                    _ => String::new(),
-                })
-        ),
-    };
-    figures.push(figure(
-        "sell",
-        "Sell at (S)",
-        format::isk_short(sell),
-        how_sell,
-    ));
-    if let Some(sigma) = stats.sigma {
-        figures.push(figure(
-            "sigma",
-            "Volatility (\u{03C3})",
-            format::percent(sigma),
-            "sample standard deviation of the daily log returns of the average price over the last 30 days",
+    if let Some(sell) = detail.sell_cents {
+        prices.push(figure(
+            "sell",
+            Term::Sell,
+            format::isk_short(sell),
+            sell_detail(table, detail),
         ));
     }
-    let Some(f) = &detail.figures else {
-        return figures;
-    };
-    let buy = format::isk_short(stats.best_buy_cents);
-    let sell_text = format::isk_short(sell);
-    let shares = |n: i32| format!("1 / ({n} + 1)");
-    let rho = stats.rho.unwrap_or(0.5);
-    figures.extend([
-        figure(
-            "cost",
-            "Cost per unit (c)",
-            isk(f.cost),
-            format!("B \u{00D7} (1 + b) = {buy} \u{00D7} {:.4}", 1.0 + fees.broker),
-        ),
-        figure(
-            "revenue",
-            "Revenue per unit (r)",
-            isk(f.revenue),
-            format!(
-                "S \u{00D7} (1 \u{2212} b \u{2212} t) = {sell_text} \u{00D7} {:.5}",
-                1.0 - fees.broker - fees.tax
+    let mut margin = Vec::new();
+    let mut size = Vec::new();
+    let mut timing = Vec::new();
+    let mut result = Vec::new();
+    if let Some(sigma) = stats.sigma {
+        timing.push(figure("sigma", Term::Sigma, format::percent(sigma), None));
+    }
+    if let (Some(sell), Some(f)) = (detail.sell_cents, &detail.figures) {
+        let rho = stats.rho.unwrap_or(0.5);
+        let volume = stats.volume_7d.unwrap_or(0.0);
+        let (c, r, net) = (isk(f.cost), isk(f.revenue), isk(f.net_per_unit));
+        let units = format::thousands(f.units);
+        margin = vec![
+            figure(
+                "cost",
+                Term::Cost,
+                c.clone(),
+                Some(format!(
+                    "{} \u{00D7} {:.4}",
+                    format::isk_short(stats.best_buy_cents),
+                    1.0 + fees.broker
+                )),
             ),
-        ),
-        figure("net", "Net per unit", isk(f.net_per_unit), "r \u{2212} c"),
-        figure("margin", "Net margin (m)", format::percent(f.margin), "(r \u{2212} c) / c"),
-        figure(
-            "units",
-            "Order size (U)",
-            format::thousands(f.units),
-            format!(
-                "\u{230A}capital / c\u{230B} = \u{230A}{} / {}\u{230B}",
-                format::isk_short((context.settings.capital * 100.0).round() as i64),
-                isk(f.cost)
+            figure(
+                "revenue",
+                Term::Revenue,
+                r.clone(),
+                Some(format!(
+                    "{} \u{00D7} {:.5}",
+                    format::isk_short(sell),
+                    1.0 - fees.broker - fees.tax
+                )),
             ),
-        ),
-        figure(
-            "v7",
-            "Volume per day, 7 days (V)",
-            whole(stats.volume_7d.unwrap_or(0.0)),
-            "traded volume per day, averaged over the last 7 days of history",
-        ),
-        figure(
-            "v30",
-            "Volume per day, 30 days",
-            whole(stats.volume_30d.unwrap_or(0.0)),
-            "traded volume per day, averaged over the last 30 days of history",
-        ),
-        figure(
-            "rho",
-            "Buy side ratio (\u{03C1})",
-            format!("{rho:.2}"),
-            "the share of the units taken from buy orders over 30 days of snapshots; 0.5 when none were taken",
-        ),
-        figure(
-            "q-buy",
-            "Daily capture, buy side",
-            whole(f.q_buy),
-            format!("{} \u{00D7} V \u{00D7} \u{03C1}", shares(stats.buy_near_orders)),
-        ),
-        figure(
-            "q-sell",
-            "Daily capture, sell side",
-            whole(f.q_sell),
-            format!(
-                "{} \u{00D7} V \u{00D7} (1 \u{2212} \u{03C1})",
-                shares(stats.sell_near_orders)
+            figure(
+                "net",
+                Term::Net,
+                net.clone(),
+                Some(format!("{r} \u{2212} {c}")),
             ),
-        ),
-        figure("t-fill", "Fill time", format::days(f.t_fill), "U / q_buy + U / q_sell"),
-        figure(
-            "t-max",
-            "Allowed holding time (T max)",
-            format::days(f.t_max),
-            "min(3, (m / 2\u{03C3})\u{00B2}) days",
-        ),
-        figure(
-            "min-volume",
-            "Minimum daily volume",
-            whole(f.min_volume),
-            "the volume at which the fill time equals T max",
-        ),
-        figure(
+            figure(
+                "margin",
+                Term::Margin,
+                format::percent(f.margin),
+                Some(format!("{net} / {c}")),
+            ),
+        ];
+        let capture = |n: i32, share: f64| {
+            format!("1/({n} + 1) \u{00D7} {} \u{00D7} {share:.2}", whole(volume))
+        };
+        size = vec![
+            figure(
+                "units",
+                Term::Units,
+                units.clone(),
+                Some(format!(
+                    "\u{230A}{} / {c}\u{230B}",
+                    format::isk_short((context.settings.capital * 100.0).round() as i64)
+                )),
+            ),
+            figure("v7", Term::V7, whole(volume), None),
+            figure(
+                "v30",
+                Term::V30,
+                whole(stats.volume_30d.unwrap_or(0.0)),
+                None,
+            ),
+            figure("rho", Term::Rho, format!("{rho:.2}"), None),
+            figure(
+                "q-buy",
+                Term::QBuy,
+                whole(f.q_buy),
+                Some(capture(stats.buy_near_orders, rho)),
+            ),
+            figure(
+                "q-sell",
+                Term::QSell,
+                whole(f.q_sell),
+                Some(capture(stats.sell_near_orders, 1.0 - rho)),
+            ),
+        ];
+        timing.extend([
+            figure(
+                "t-fill",
+                Term::TFill,
+                format::days(f.t_fill),
+                Some(format!(
+                    "{units} / {} + {units} / {}",
+                    whole(f.q_buy),
+                    whole(f.q_sell)
+                )),
+            ),
+            figure(
+                "t-max",
+                Term::TMax,
+                format::days(f.t_max),
+                stats.sigma.map(|sigma| {
+                    format!(
+                        "min(3, ({} / {})\u{00B2})",
+                        format::percent(f.margin),
+                        format::percent(2.0 * sigma)
+                    )
+                }),
+            ),
+            figure("min-volume", Term::MinVolume, whole(f.min_volume), None),
+        ]);
+        result.push(figure(
             "isk-day",
-            "ISK/day",
+            Term::IskPerDay,
             isk(f.isk_per_day),
-            "(r \u{2212} c) \u{00D7} U / fill time",
+            Some(format!(
+                "{net} \u{00D7} {units} / {}",
+                format::days(f.t_fill)
+            )),
+        ));
+    }
+    [
+        group(
+            "Fees",
+            vec![
+                figure(
+                    "broker",
+                    Term::BrokerFee,
+                    format::percent(fees.broker),
+                    None,
+                ),
+                figure("tax", Term::SalesTax, format::percent(fees.tax), None),
+            ],
         ),
-    ]);
-    figures
+        group("Prices", prices),
+        group("Margin", margin),
+        group("Size & liquidity", size),
+        group("Timing & risk", timing),
+        group("Result", result),
+    ]
+    .into_iter()
+    .filter(|g| !g.figures.is_empty())
+    .collect()
 }
 
 /// How far back the charts and the recurrence look, in days.
@@ -1355,10 +1416,16 @@ async fn build_detail(
                 )
             }
         };
-    let mut sections = vec![SectionView {
-        id: "figures".to_owned(),
-        label: "Figures".to_owned(),
-    }];
+    let mut sections = vec![
+        SectionView {
+            id: "figures".to_owned(),
+            label: "Figures".to_owned(),
+        },
+        SectionView {
+            id: "legend".to_owned(),
+            label: "Legend".to_owned(),
+        },
+    ];
     sections.extend(charts.iter().map(|chart| SectionView {
         id: chart.kind.to_owned(),
         label: chart.title.to_owned(),
@@ -1391,6 +1458,7 @@ async fn build_detail(
         reason,
         fees,
         figures,
+        legend: legend::entries(&legend::detail_terms()),
         refresh_url,
         refresh_path,
     };

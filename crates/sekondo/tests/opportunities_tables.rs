@@ -234,8 +234,54 @@ async fn the_columns_say_that_the_buy_price_is_current_and_not_a_suggestion() {
 
     let html = get(&app, &browser, "/opportunities/tables").await;
 
-    assert!(html.contains("Current best buy"), "{html}");
+    assert!(
+        html.contains(r#"<abbr title="Current best buy, not a suggested price">B</abbr>"#),
+        "{html}"
+    );
     assert!(!html.to_lowercase().contains("suggested buy"));
+}
+
+#[tokio::test]
+async fn the_headers_are_short_labels_with_their_full_names_on_hover() {
+    let (app, browser) = setup().await;
+    Item {
+        cross_day: Some("2026-10-16"),
+        volume_rising: Some(true),
+        sma5: Some(106.0),
+        sma20: Some(105.0),
+        ..Item::new(34)
+    }
+    .insert(&app)
+    .await;
+
+    let html = get_one(&app, &browser, "/opportunities/trend").await;
+    let head = &html[html.find("<thead>").unwrap()..html.find("</thead>").unwrap()];
+
+    let labels: Vec<&str> = head
+        .split("</th>")
+        .filter_map(|th| th.split_once("<a ")?.1.split_once('>'))
+        .map(|(_, rest)| rest)
+        .collect();
+    assert_eq!(labels.len(), 16, "{head}");
+    assert!(
+        labels[0].starts_with("Item"),
+        "Item is no abbreviation: {}",
+        labels[0]
+    );
+    for (label, short) in labels[1..].iter().zip([
+        "B", "S", "Net", "m", "ISK/d", "SMA5", "SMA20", "Cross", "V7", "V30", "\u{03C3}", "T_max",
+        "T_fill", "V_min", "n b/s",
+    ]) {
+        assert!(label.starts_with("<abbr title=\""), "{label}");
+        assert!(
+            label.contains(&format!("\">{short}</abbr>")),
+            "{short}: {label}"
+        );
+    }
+    assert!(
+        head.contains(r#"<abbr title="Allowed holding time">T_max</abbr>"#),
+        "{head}"
+    );
 }
 
 #[tokio::test]

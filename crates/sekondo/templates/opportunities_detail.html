@@ -3,18 +3,27 @@
   {% if let Some(reason) = view.reason %}
   <p id="opportunity-detail-unlisted" class="alert" role="status">No longer listed in this table. {{ reason }}</p>
   {% endif %}
-  {% if !view.figures.is_empty() %}
-  <div class="table-wrap">
-    <table class="data figures">
-      <tbody>
-        {% for f in view.figures %}
-        <tr data-figure="{{ f.key }}"><th scope="row">{{ f.label }}</th><td class="num" data-value>{{ f.value }}</td><td class="how">{{ f.how }}</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
+  {% for g in view.figures %}
+  <h3>{{ g.title }}</h3>
+  <div class="kpis">
+    {% for f in g.figures %}
+    <article class="kpi" data-figure="{{ f.key }}">
+      <small class="name"><abbr title="{{ f.term.name() }}">{{ f.term.short() }}</abbr></small>
+      <p class="value" data-value>{{ f.value }}</p>
+      {% if let Some(detail) = f.detail %}<small class="detail">{{ detail }}</small>{% endif %}
+    </article>
+    {% endfor %}
   </div>
-  {% endif %}
+  {% endfor %}
 </section>
+{# Kept by htmx across every swap of its parent, so its open state stays: its content is fixed per page. #}
+<article id="legend" hx-preserve="true" class="legend-card">
+  <details>
+    <summary>Legend</summary>
+    {% let legend = view.legend %}
+    {% include "opportunities_legend.html" %}
+  </details>
+</article>
 {% for c in view.charts %}
 <article id="{{ c.kind }}" class="graph chart-row">
   <h2>{{ c.title }}</h2>

@@ -93,19 +93,43 @@ async fn detail(app: &TestApp, browser: &Browser, path: &str) -> reqwest::Respon
     browser.get(&app.url(path)).await
 }
 
-/// The text of the figure `key` of a detail fragment.
-fn figure(html: &str, key: &str) -> String {
+/// The card of the figure `key` of a detail fragment.
+fn card<'a>(html: &'a str, key: &str) -> &'a str {
     let start = html
         .find(&format!(r#"data-figure="{key}""#))
         .unwrap_or_else(|| panic!("no {key} figure in {html}"));
-    let row = &html[start..];
-    let row = &row[..row.find("</tr>").unwrap()];
-    let value = row
-        .split_once(r#"data-value"#)
-        .unwrap_or_else(|| panic!("no value cell in {row}"))
+    let card = &html[start..];
+    &card[..card.find("</article>").unwrap()]
+}
+
+/// The value of the figure `key` of a detail fragment.
+fn figure(html: &str, key: &str) -> String {
+    let card = card(html, key);
+    let value = card
+        .split_once("data-value")
+        .unwrap_or_else(|| panic!("no value in {card}"))
         .1;
     let value = value.split_once('>').unwrap().1;
-    value.split("</td>").next().unwrap().trim().to_owned()
+    value.split("</p>").next().unwrap().trim().to_owned()
+}
+
+/// The detail line of the figure `key`, if it has one.
+fn detail_line(html: &str, key: &str) -> Option<String> {
+    let card = card(html, key);
+    let (_, rest) = card.split_once(r#"class="detail""#)?;
+    let line = rest.split_once('>').unwrap().1;
+    Some(line.split("</small>").next().unwrap().trim().to_owned())
+}
+
+/// The titles of the figure groups, in order.
+fn groups(html: &str) -> Vec<String> {
+    let figures = &html[html.find(r#"id="figures""#).unwrap()..];
+    let figures = &figures[..figures.find("</section>").unwrap()];
+    figures
+        .split("<h3>")
+        .skip(1)
+        .map(|h| h[..h.find("</h3>").unwrap()].replace("&#38;", "&"))
+        .collect()
 }
 
 #[tokio::test]
@@ -131,7 +155,7 @@ async fn an_unknown_table_is_not_found() {
 }
 
 #[tokio::test]
-async fn the_page_shows_the_fees_the_prices_and_how_the_figures_follow() {
+async fn the_page_shows_the_fees_the_prices_and_the_figures() {
     let (app, browser) = setup().await;
     item(&app, 34, "Tritanium", "130.00", 100_000_000.0).await;
 
@@ -159,12 +183,81 @@ async fn the_page_shows_the_fees_the_prices_and_how_the_figures_follow() {
     assert_eq!(figure(&html, "t-max"), "3.0 d");
     assert!(!figure(&html, "t-fill").is_empty());
     assert_eq!(figure(&html, "units"), "970,873");
-    // Each figure says how it was worked out.
-    assert!(html.contains("B \u{00D7} (1 + b)"), "{html}");
+    // The fees are figures of their own.
+    assert_eq!(figure(&html, "broker"), "3.00%");
+    assert_eq!(figure(&html, "tax"), "7.50%");
+}
+
+#[tokio::test]
+async fn the_figures_are_grouped_cards_with_this_items_numbers() {
+    let (app, browser) = setup().await;
+    item(&app, 34, "Tritanium", "130.00", 100_000_000.0).await;
+
+    let html = detail(&app, &browser, "/opportunities/detail/classic/34")
+        .await
+        .text()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        groups(&html),
+        [
+            "Fees",
+            "Prices",
+            "Margin",
+            "Size & liquidity",
+            "Timing & risk",
+            "Result"
+        ]
+    );
+    assert!(!html.contains("table class=\"data figures\""), "{html}");
+    // Base rates: b = 3%, t = 7.5%.
     assert!(
-        html.contains("S \u{00D7} (1 \u{2212} b \u{2212} t)"),
+        card(&html, "cost").contains(r#"<abbr title="Cost per unit">c</abbr>"#),
         "{html}"
     );
+    assert_eq!(
+        detail_line(&html, "cost").unwrap(),
+        "100.00 \u{00D7} 1.0300"
+    );
+    assert_eq!(
+        detail_line(&html, "revenue").unwrap(),
+        "129.90 \u{00D7} 0.89500"
+    );
+    assert_eq!(detail_line(&html, "net").unwrap(), "116.26 \u{2212} 103.00");
+    assert_eq!(detail_line(&html, "margin").unwrap(), "13.26 / 103.00");
+    assert_eq!(detail_line(&html, "sell").unwrap(), "1 tick below 130.00");
+    assert_eq!(
+        detail_line(&html, "t-max").unwrap(),
+        "min(3, (12.87% / 4.00%)\u{00B2})"
+    );
+    assert!(
+        detail_line(&html, "q-buy")
+            .unwrap()
+            .starts_with("1/(1 + 1) \u{00D7} ")
+    );
+    assert!(
+        detail_line(&html, "isk-day")
+            .unwrap()
+            .starts_with("13.26 \u{00D7} 970,873 / ")
+    );
+    for key in [
+        "broker",
+        "tax",
+        "buy",
+        "best-sell",
+        "v7",
+        "v30",
+        "rho",
+        "sigma",
+    ] {
+        assert_eq!(detail_line(&html, key), None, "{key} has a detail line");
+    }
+    // The formulas are in the legend, not on the cards.
+    let figures = &html[html.find(r#"id="figures""#).unwrap()..];
+    let figures = &figures[..figures.find("</section>").unwrap()];
+    assert!(!figures.contains("B \u{00D7} (1 + b)"), "{figures}");
+    assert!(!figures.contains("(r \u{2212} c) / c"), "{figures}");
 }
 
 #[tokio::test]
@@ -195,6 +288,11 @@ async fn the_page_checks_the_character_whose_fees_are_used() {
         "{html}"
     );
     assert_eq!(figure(&html, "cost"), "101.50");
+    assert_eq!(figure(&html, "broker"), "1.50%");
+    assert_eq!(
+        detail_line(&html, "cost").unwrap(),
+        "100.00 \u{00D7} 1.0150"
+    );
 }
 
 #[tokio::test]
@@ -644,6 +742,95 @@ async fn the_expansion_window_draws_the_spreads_the_past_peaks_and_the_next_occu
     );
     assert!(html.contains("Next occurrences"), "{html}");
     assert!(html.contains(" 18:00"), "{html}");
+    assert_eq!(
+        section_nav(&html),
+        [
+            "\u{2190} Recurring spread expansion",
+            "Figures",
+            "Legend",
+            "Spread by hour of day (EVE time)",
+            "Spread by weekday",
+            "Past peaks of the window, with S",
+            "Next occurrences",
+        ]
+    );
+}
+
+/// The link texts of the detail page's sub-menu.
+fn section_nav(html: &str) -> Vec<String> {
+    let nav = &html[html.find(r#"id="section-nav""#).expect("a sub-menu")..];
+    let nav = &nav[..nav.find("</nav>").unwrap()];
+    nav.split("<a ")
+        .skip(1)
+        .map(|a| {
+            let text = a.split_once('>').unwrap().1;
+            text[..text.find("</a>").unwrap()]
+                .replace("&larr;", "\u{2190}")
+                .trim()
+                .to_owned()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_closed_legend_card_sits_between_the_figures_and_the_charts() {
+    let (app, browser) = setup().await;
+    item(&app, 34, "Tritanium", "130.00", 100_000_000.0).await;
+
+    let html = detail(&app, &browser, "/opportunities/detail/trend/34")
+        .await
+        .text()
+        .await
+        .unwrap();
+
+    let card_at = html
+        .find(r#"<article id="legend" hx-preserve="true""#)
+        .unwrap_or_else(|| panic!("no legend card: {html}"));
+    assert!(html.find(r#"id="figures""#).unwrap() < card_at);
+    if let Some(chart) = html.find(r#"class="graph chart-row""#) {
+        assert!(card_at < chart);
+    }
+    let card = &html[card_at..];
+    let card = &card[..card.find("</article>").unwrap()];
+    assert!(card.contains("<details>") && card.contains("<summary>Legend</summary>"));
+    let labels: Vec<&str> = card
+        .split("<dt>")
+        .skip(1)
+        .map(|dt| &dt[..dt.find("</dt>").unwrap()])
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            "b",
+            "t",
+            "B",
+            "Best sell",
+            "S",
+            "c",
+            "r",
+            "Net",
+            "m",
+            "U",
+            "V7",
+            "V30",
+            "\u{03C1}",
+            "q_buy",
+            "q_sell",
+            "\u{03C3}",
+            "T_fill",
+            "T_max",
+            "V_min",
+            "ISK/d",
+        ]
+    );
+    assert!(
+        card.contains("min(3, (m / 2\u{03C3})\u{00B2}) days"),
+        "{card}"
+    );
+    assert!(card.contains("Cost per unit"), "{card}");
+    for part in ["Signal", "Worked example", "Order playbook"] {
+        assert!(!card.contains(part), "{part} in the legend card");
+    }
 }
 
 #[tokio::test]

@@ -2,6 +2,7 @@
 
 pub mod analysis;
 pub mod charts;
+pub mod legend;
 pub mod page;
 pub mod settings;
 pub mod stats;

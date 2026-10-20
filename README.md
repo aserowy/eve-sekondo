@@ -209,10 +209,25 @@ sync can be switched off with `STATION_SYNC=off`.
   an item name search and the capital per item, which are saved per account as soon as one changes) also
   holds the Fees group: a "Fees" legend over one radio button per selected character, with helper text
   for the rates in use. Choosing a character saves it per account (`POST /opportunities/fee-character`)
-  and recomputes the table or the detail page. The station's name is the page's subtitle. A click on a row opens the detail page
-  `/opportunities/<table>/<type id>` with the fees, every figure and how it follows from the others, and
-  each chart of the table on a row of its own; its sub-menu leads back to the table with the selection
-  and sorting kept.
+  and recomputes the table or the detail page. The station's name is the page's subtitle.
+- **Short headers.** The columns are headed by the symbols of the formulas (B, S, Net, m, ISK/d, V7, V30,
+  σ, T_max, T_fill, V_min, n b/s, and the table's own Window, Next (UTC), %B, RSI, SMA5, SMA20, Cross),
+  each an `<abbr>` with its full name on hover; B's says it is the current best buy, not a suggested
+  price. Every label has one legend entry (full name, meaning, formula) in
+  `crates/sekondo/src/opportunities/legend.rs`, which the headers, the table legends and the detail
+  legend all read.
+- **Explainer card.** Below the pagination, every table page has a closed "How to read this table" card:
+  the table's legend, its signal and how S follows from it, the shared figures (c, r, U, market share, ρ,
+  q) with the hard exclusion, a static worked example of one row, and the table's order playbook. It sits
+  outside the swapped `#content`, so it stays open across live refreshes, paging, sorting and filter
+  changes; the open state is not stored. The example numbers are pinned by `tests/analysis.rs`.
+- **Detail page.** A click on a row opens `/opportunities/<table>/<type id>`. Its figures are KPI cards in
+  the groups Fees (b, t), Prices, Margin, Size & liquidity, Timing & risk and Result; a computed figure's
+  card has a dimmed detail line with this item's numbers (for example `100.00 × 1.0141` for c). The
+  formulas and meanings are in a closed "Legend" card below the figures (`hx-preserve`, so it stays open
+  across live refreshes and fee or character changes), followed by each chart of the table on a row of
+  its own. Its sub-menu leads back to the table with the selection and sorting kept, then to Figures,
+  Legend and the charts.
 - The owner of the station is looked up once, for every account, so a character has fees there whether or
   not it has an order in Jita.
 - The design and the specifications are in `openspec/changes/station-trading-opportunities/`.
@@ -236,8 +251,9 @@ it. The filter groups are set apart by spacing alone (3rem across, 0.75rem betwe
 no divider, and each group starts at the top of its line, so a taller group never moves its neighbours. A table page continues with the KPI cards, **one** table (cells padded 0.3rem by 0.75rem,
 text 0.875rem, header text never underlined, not even the sort links) and its pagination (page
 size 25, 50, 100 or 200, in the URL as `page` and `per_page`), and ends with the freshness as a quiet
-footer. The pagination is the last block of the main content: on a short page it sits at the bottom of
-the window directly above the footer, on a long page it follows the table. Every graph is a card of its
+footer. The pagination is the last block of the main content, except for an explainer card (the
+opportunity pages), which follows it: on a short page it sits at the bottom of the window directly above
+the explainer or the footer, on a long page it follows the table. Every graph is a card of its
 own (an `<article class="graph">`) holding its title, the chart and its empty-state text. Sorting,
 filters, ranges and pages are server-rendered and swapped in place; a live refresh keeps the page, the
 sorting and the scroll position. The orders are split into `/orders/sell` and `/orders/buy` (`/orders`
