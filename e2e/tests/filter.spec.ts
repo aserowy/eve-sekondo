@@ -116,3 +116,58 @@ test('the character filter is a group with a visible "Characters" legend over si
   const legend = (await group.locator('legend').boundingBox())!;
   expect(legend.y + legend.height).toBeLessThanOrEqual(rects[0].y + 2);
 });
+
+/** Alice and Bob on one account. */
+async function twoCharacters(page: Page) {
+  await loginWith(page, 'Alice Alpha');
+  await openCharacters(page);
+  await page.getByRole('button', { name: 'Add character' }).click();
+  await page.getByRole('link', { name: 'Bob Bravo' }).click();
+  await expect(page).toHaveURL(/\/characters$/);
+}
+
+const rem = (page: Page) => page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).fontSize));
+
+/** The horizontal gap between the character filter's right edge and the left edge of `next`. */
+async function gapAfterCharacters(page: Page, next: string) {
+  const characters = (await page.locator('#character-filter').boundingBox())!;
+  const other = (await page.locator(next).boundingBox())!;
+  return other.x - (characters.x + characters.width);
+}
+
+test('the character filter stands 3rem apart from the time range, wider than the gap between checkboxes', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await twoCharacters(page);
+  await page.goto('/trades');
+
+  const gap = await gapAfterCharacters(page, '#trades-range-control');
+  expect(gap).toBeCloseTo(3 * (await rem(page)), 0);
+  const labels = await page.locator('#character-filter fieldset label').evaluateAll((els) => els.map((e) => e.getBoundingClientRect().toJSON()));
+  expect(labels).toHaveLength(2);
+  expect(gap).toBeGreaterThan(labels[1].x - (labels[0].x + labels[0].width));
+});
+
+test('the character filter stands 3rem apart from the opportunity filters, wider than the gap between their fields', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await twoCharacters(page);
+  await page.goto('/opportunities/trend');
+
+  const margin = (await page.locator('#opportunity-filters').getByLabel('Minimum margin (%)').boundingBox())!;
+  const isk = (await page.locator('#opportunity-filters').getByLabel('Minimum ISK/day').boundingBox())!;
+  const characters = (await page.locator('#character-filter').boundingBox())!;
+  const gap = margin.x - (characters.x + characters.width);
+  expect(gap).toBeCloseTo(3 * (await rem(page)), 0);
+  expect(gap).toBeGreaterThan(isk.x - (margin.x + margin.width));
+});
+
+test('the groups of the filter section have no divider line or border', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  await page.goto('/dashboard');
+  for (const selector of ['#character-filter', '#range-control']) {
+    const widths = await page.locator(selector).evaluate((el) => {
+      const s = getComputedStyle(el);
+      return [s.borderTopWidth, s.borderRightWidth, s.borderBottomWidth, s.borderLeftWidth];
+    });
+    expect(widths, selector).toEqual(['0px', '0px', '0px', '0px']);
+  }
+});

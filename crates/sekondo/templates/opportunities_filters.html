@@ -17,7 +17,7 @@
   </div>
   <div>
     <label for="search">Item name</label>
-    <input id="search" type="search" name="search" value="{{ view.filters.form.search }}" maxlength="100"{% if view.filters.error_for("search").is_some() %} aria-invalid="true" aria-describedby="search-error"{% endif %}>
+    <input id="search" type="text" name="search" value="{{ view.filters.form.search }}" maxlength="100"{% if view.filters.error_for("search").is_some() %} aria-invalid="true" aria-describedby="search-error"{% endif %}>
     {% if let Some(message) = view.filters.error_for("search") %}<small id="search-error">{{ message }}</small>{% endif %}
   </div>
   <div>

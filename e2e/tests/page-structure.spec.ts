@@ -1,5 +1,5 @@
 import { expect, loginWith, pollCharacter, stubControl, stubOrder, test } from '../support/fixtures';
-import { aliceTrained } from '../support/opportunities';
+import { aliceTrained, bookOf, crossed, fill } from '../support/opportunities';
 
 test('every signed-in page has exactly one page title naming the page', async ({ page }) => {
   await aliceTrained(page);
@@ -19,15 +19,53 @@ test('every signed-in page has exactly one page title naming the page', async ({
   }
 });
 
-test('the page header shows the title above the sub-menu, and the sub-menu above the filter section', async ({ page }) => {
+test('the page header shows the sub-menu above the title, and the title above the filter section', async ({ page }) => {
   await loginWith(page, 'Alice Alpha');
   await page.goto('/orders/buy');
 
   const title = (await page.getByRole('heading', { level: 1 }).boundingBox())!;
   const menu = (await page.locator('nav.sub-menu').boundingBox())!;
   const filters = (await page.locator('#filter-box').boundingBox())!;
-  expect(title.y + title.height).toBeLessThanOrEqual(menu.y);
-  expect(menu.y + menu.height).toBeLessThanOrEqual(filters.y);
+  expect(menu.y + menu.height).toBeLessThanOrEqual(title.y);
+  expect(title.y + title.height).toBeLessThanOrEqual(filters.y);
+});
+
+test('the sub-menu is the topmost element of the page column on pages that have one', async ({ page }) => {
+  await aliceTrained(page);
+  await fill(page, bookOf(34, 100, 130, 10), crossed(34, 1.1));
+  for (const path of ['/dashboard', '/orders/sell', '/opportunities/trend', '/opportunities/trend/34']) {
+    await page.goto(path);
+    await expect(page.locator('nav.sub-menu'), path).toBeVisible();
+    await expect(page.getByRole('heading', { level: 1 }), path).toBeVisible();
+    // One evaluation, so a live swap cannot detach an element between two measurements.
+    const layout = await page.locator('.page').evaluate((el) => {
+      const top = (e: Element) => e.getBoundingClientRect().top;
+      const menu = el.querySelector('nav.sub-menu')!;
+      return {
+        menu: top(menu),
+        title: top(el.querySelector('h1')!),
+        column: top(el),
+        above: [...el.children].filter((c) => c.getBoundingClientRect().height > 0 && top(c) < top(menu)).length,
+      };
+    });
+    expect(layout.menu, path).toBeLessThan(layout.title);
+    expect(layout.above, path).toBe(0);
+    expect(layout.menu - layout.column, path).toBeLessThan(40);
+  }
+});
+
+test('the title is the topmost element of the page column without a sub-menu', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  await page.goto('/wealth');
+  await expect(page.locator('nav.sub-menu')).toHaveCount(0);
+  const title = (await page.getByRole('heading', { level: 1 }).boundingBox())!;
+  const column = (await page.locator('.page').boundingBox())!;
+  expect(title.y - column.y).toBeLessThan(40);
+  const above = await page.locator('.page').evaluate((el) => {
+    const top = el.querySelector('h1')!.getBoundingClientRect().top;
+    return [...el.children].filter((c) => c.getBoundingClientRect().height > 0 && c.getBoundingClientRect().top < top).length;
+  });
+  expect(above).toBe(0);
 });
 
 test('section titles are smaller than the page title', async ({ page }) => {

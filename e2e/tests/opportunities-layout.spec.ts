@@ -179,6 +179,15 @@ test('the filter section wraps in a narrow window and the page does not scroll s
   expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
   const box = (await filterBox(page).boundingBox())!;
   expect(box.width).toBeLessThanOrEqual(1024);
+
+  // The groups wrap onto more lines, 0.75rem apart.
+  const groups = await filterBox(page).locator('> *').evaluateAll((els) => els.map((e) => e.getBoundingClientRect().toJSON()));
+  const lines = groups.filter((g) => g.height > 0).sort((a, b) => a.y - b.y);
+  const next = lines.find((g) => g.y > lines[0].y + 1)!;
+  expect(next).toBeDefined();
+  const firstLineBottom = Math.max(...lines.filter((g) => Math.abs(g.y - lines[0].y) <= 1).map((g) => g.y + g.height));
+  const rem = await page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).fontSize));
+  expect(next.y - firstLineBottom).toBeCloseTo(0.75 * rem, 0);
 });
 
 test('each opportunity filter has its label above its input, and the four inputs are equally wide', async ({ page }) => {
@@ -205,4 +214,28 @@ test('each opportunity filter has its label above its input, and the four inputs
   }
   // Side by side on one row at this width.
   for (const f of fields) expect(Math.abs(f.input.top - fields[0].input.top)).toBeLessThanOrEqual(1);
+});
+
+test('the item name is a plain input, shaped like the number fields beside it', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await openOpportunities(page, 'trend');
+
+  const look = (label: string) =>
+    page.locator('#opportunity-filters').getByLabel(label).evaluate((el) => {
+      const s = getComputedStyle(el);
+      return {
+        type: (el as HTMLInputElement).type,
+        height: el.getBoundingClientRect().height,
+        padding: [s.paddingTop, s.paddingRight, s.paddingBottom, s.paddingLeft],
+        radius: s.borderRadius,
+        image: s.backgroundImage,
+      };
+    });
+  const name = await look('Item name');
+  const margin = await look('Minimum margin (%)');
+  expect(name.type).toBe('text');
+  expect(name.height).toBeCloseTo(margin.height, 1);
+  expect(name.padding).toEqual(margin.padding);
+  expect(name.radius).toBe(margin.radius);
+  expect(name.image).toBe(margin.image);
 });

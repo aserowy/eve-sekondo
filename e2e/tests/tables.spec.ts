@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import { expect, feePoll, loginWith, pollCharacter, stubControl, stubTransaction, test, wealthPoll } from '../support/fixtures';
+import { expect, feePoll, loginWith, pollCharacter, stubControl, stubOrder, stubTransaction, test, wealthPoll } from '../support/fixtures';
 import { horizontalOverflow } from '../support/layout';
 
 const ALICE = 90000001;
@@ -101,4 +101,33 @@ test('no page scrolls sideways at 1024px', async ({ page }) => {
     await page.goto(path);
     expect(await horizontalOverflow(page), path).toBeLessThanOrEqual(0);
   }
+});
+
+test('header text is not underlined, at rest or while hovering a sort link', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  await stubControl('orders', { character_id: ALICE, orders: [stubOrder(1)] });
+  expect(await pollCharacter(page, ALICE)).toBe('200 updated');
+  const refreshed = page.waitForResponse((r) => r.url().includes('/orders/sell/content'));
+  await page.goto('/orders/sell');
+  await refreshed;
+  await page.waitForTimeout(300);
+
+  const links = page.locator('#sell-orders thead th a');
+  expect(await links.count()).toBeGreaterThan(0);
+  const decorations = () => page.locator('#sell-orders thead th, #sell-orders thead th a').evaluateAll((els) => els.map((el) => getComputedStyle(el).textDecorationLine));
+
+  expect(new Set(await decorations())).toEqual(new Set(['none']));
+  await page.locator('#sell-orders thead').getByRole('link', { name: 'Item' }).hover();
+  expect(new Set(await decorations())).toEqual(new Set(['none']));
+  await page.locator('#sell-orders thead').getByRole('link', { name: 'Item' }).focus();
+  expect(new Set(await decorations())).toEqual(new Set(['none']));
+});
+
+test('the header row keeps a thicker line below it than a body row', async ({ page }) => {
+  await aliceTraded(page);
+  const widths = await page.locator('#trades').evaluate((el) => ({
+    head: parseFloat(getComputedStyle(el.querySelector('thead th')!).borderBottomWidth),
+    body: parseFloat(getComputedStyle(el.querySelector('tbody td')!).borderBottomWidth),
+  }));
+  expect(widths.head).toBeGreaterThan(widths.body);
 });
