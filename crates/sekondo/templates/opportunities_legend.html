@@ -1,6 +1,12 @@
-<dl class="legend">
-  {% for e in legend %}
-  <dt>{{ e.short }}</dt>
-  <dd><strong>{{ e.name }}.</strong> {{ e.meaning }}{% if let Some(formula) = e.formula %} <code>{{ e.short }} = {{ formula }}</code>{% endif %}</dd>
-  {% endfor %}
-</dl>
+<div class="legend-wrap">
+  <table class="explainer-table legend">
+    <thead>
+      <tr><th scope="col">Label</th><th scope="col">Name</th><th scope="col">Meaning</th><th scope="col">Formula</th></tr>
+    </thead>
+    <tbody>
+      {% for e in legend %}
+      <tr><th scope="row">{{ e.short }}</th><td>{{ e.name }}</td><td>{{ e.meaning }}</td><td>{% if let Some(formula) = e.formula %}<code>{{ formula }}</code>{% endif %}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>

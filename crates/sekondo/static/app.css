@@ -193,10 +193,15 @@ article.graph > :last-child { margin-bottom: 0; }
    padding is the gap to the footer. */
 .page > main > article.explainer { flex: none; margin: 0; }
 article.explainer > details { margin-bottom: 0; }
-article.explainer table.example { margin-bottom: var(--pico-spacing); }
-article.explainer table.example th { font-weight: normal; white-space: nowrap; }
-.legend dt { font-weight: bold; }
-.legend dd { margin: 0 0 0.5rem; }
+/* The explainer tables, the worked examples and the legends: row headers in normal weight, text
+   that wraps, labels and formulas on one line. A legend too wide for the window scrolls in its own
+   box, never the page. */
+.explainer-table { margin-bottom: var(--pico-spacing); }
+.explainer-table tbody th { font-weight: normal; }
+.explainer-table td { white-space: normal; }
+.explainer-table.legend td:last-child { white-space: nowrap; }
+.legend-wrap { max-width: 100%; margin-bottom: var(--pico-spacing); overflow-x: auto; }
+.legend-wrap > .legend { margin-bottom: 0; }
 
 /* Page footer: the page's freshness as quiet, small, dimmed lines below a divider. */
 .page-footer {

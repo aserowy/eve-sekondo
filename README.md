@@ -215,7 +215,9 @@ sync can be switched off with `STATION_SYNC=off`.
   each an `<abbr>` with its full name on hover; B's says it is the current best buy, not a suggested
   price. Every label has one legend entry (full name, meaning, formula) in
   `crates/sekondo/src/opportunities/legend.rs`, which the headers, the table legends and the detail
-  legend all read.
+  legend all read. Both legends are tables headed Label, Name, Meaning and Formula, styled like the
+  worked example: one row per entry, the formula's right-hand side in code (empty without one), the
+  meaning wrapping in a narrow window while labels and formulas stay on one line.
 - **Explainer card.** Below the pagination, every table page has a closed "How to read this table" card:
   the table's legend, its signal and how S follows from it, the shared figures (c, r, U, market share, ρ,
   q) with the hard exclusion, a static worked example of one row, and the table's order playbook. It sits

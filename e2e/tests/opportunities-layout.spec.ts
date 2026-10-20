@@ -260,7 +260,7 @@ test('the explainer is closed on load and opens to the legend, signal, shared fi
 
   await card.locator('summary').click();
   await expect(card.locator('h3')).toHaveText(['Legend', 'Signal', 'Shared figures', 'Worked example', 'Order playbook']);
-  await expect(card.locator('dl dt').first()).toHaveText('Item');
+  await expect(card.locator('table.legend tbody th').first()).toHaveText('Item');
   await expect(card).toContainText('Bollinger');
   await expect(card.locator('table.example')).toContainText('10,530.00');
   await expect(card.locator('table.data')).toHaveCount(0);
@@ -316,4 +316,34 @@ test('an opened explainer stays open across a live refresh, a page change, a sor
   await saved;
   await expect(page).not.toHaveURL(/page=/);
   await expect(details).toHaveAttribute('open', '');
+});
+
+test('in a narrow window the legend wraps its meanings, keeps labels and formulas on one line, and the page does not scroll sideways', async ({ page }) => {
+  await page.setViewportSize({ width: 600, height: 900 });
+  await openOpportunities(page, 'trend');
+  await explainer(page).locator('summary').click();
+  const legend = explainer(page).locator('table.legend');
+  await expect(legend).toBeVisible();
+
+  // How many lines the text of each cell of a column takes.
+  const lines = (column: number) =>
+    legend.locator('tbody tr').evaluateAll(
+      (rows, column) =>
+        rows.map((row) => {
+          // The line boxes of the cell's text, not the boxes of elements like <code>.
+          const tops = new Set<number>();
+          const walker = document.createTreeWalker(row.children[column], NodeFilter.SHOW_TEXT);
+          for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            for (const rect of range.getClientRects()) tops.add(Math.round(rect.top));
+          }
+          return tops.size;
+        }),
+      column,
+    );
+  expect(Math.max(...(await lines(2)))).toBeGreaterThan(1);
+  expect(Math.max(...(await lines(0)))).toBeLessThanOrEqual(1);
+  expect(Math.max(...(await lines(3)))).toBeLessThanOrEqual(1);
+  expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
 });

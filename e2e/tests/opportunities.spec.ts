@@ -750,7 +750,7 @@ test('the detail legend is closed on load and lists the figures with their names
   const legend = page.locator('article#legend');
   await expect(legend.locator('summary')).toHaveText('Legend');
   await expect(legend.locator('details')).not.toHaveAttribute('open', /.*/);
-  await expect(legend.locator('dl')).toBeHidden();
+  await expect(legend.locator('table.legend')).toBeHidden();
   // Below the figures, above the first chart.
   const figures = (await page.locator('#figures').boundingBox())!;
   const card = (await legend.boundingBox())!;
@@ -759,12 +759,36 @@ test('the detail legend is closed on load and lists the figures with their names
   expect(chart.y).toBeGreaterThanOrEqual(card.y + card.height - 1);
 
   await legend.locator('summary').click();
-  await expect(legend.locator('dt')).toHaveText([
+  await expect(legend.locator('tbody th')).toHaveText([
     'b', 't', 'B', 'Best sell', 'S', 'c', 'r', 'Net', 'm', 'U', 'V7', 'V30', 'ρ', 'q_buy', 'q_sell', 'σ', 'T_fill', 'T_max', 'V_min', 'ISK/d',
   ]);
-  await expect(legend.locator('dd').nth(17)).toContainText('Allowed holding time');
-  await expect(legend.locator('dd').nth(17)).toContainText('min(3, (m / 2σ)²) days');
+  await expect(legend.locator('tbody tr').nth(17)).toContainText('Allowed holding time');
+  await expect(legend.locator('tbody tr').nth(17)).toContainText('min(3, (m / 2σ)²) days');
   await expect(legend).not.toContainText('Order playbook');
+});
+
+test('the detail legend is a table of label, name, meaning and formula, styled like the worked example', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await withTritanium(page);
+  await page.goto('/opportunities/classic');
+  await page.locator('article.explainer summary').click();
+  const exampleWeight = await page
+    .locator('table.example tbody th')
+    .first()
+    .evaluate((th) => getComputedStyle(th).fontWeight);
+
+  await page.goto('/opportunities/classic/34');
+  const legend = page.locator('article#legend');
+  await legend.locator('summary').click();
+  const table = legend.locator('table.legend');
+  await expect(table).not.toHaveClass(/\bdata\b/);
+  await expect(table.locator('thead th')).toHaveText(['Label', 'Name', 'Meaning', 'Formula']);
+  const row = (label: string) => table.locator('tbody tr').filter({ has: page.locator('th', { hasText: new RegExp(`^${label}$`) }) });
+  await expect(row('T_max').locator('td').nth(2)).toHaveText('min(3, (m / 2σ)²) days');
+  await expect(row('T_max').locator('td code')).toHaveCount(1);
+  await expect(row('B').locator('td').nth(0)).toHaveText('Current best buy, not a suggested price');
+  await expect(row('B').locator('td').nth(2)).toHaveText('');
+  expect(await table.locator('tbody th').first().evaluate((th) => getComputedStyle(th).fontWeight)).toBe(exampleWeight);
 });
 
 test('the Legend entry of the sub-menu jumps to the legend with its title below the sub-menu', async ({ page }) => {

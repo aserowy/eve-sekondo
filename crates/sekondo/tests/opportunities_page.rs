@@ -410,15 +410,35 @@ fn explainer(html: &str) -> &str {
     &rest[..rest.find("</article>").unwrap() + "</article>".len()]
 }
 
-/// The short labels of the first legend in `html`, in order.
-fn legend_labels(html: &str) -> Vec<String> {
-    let start = html.find("<dl").expect("a legend");
-    let legend = &html[start..start + html[start..].find("</dl>").unwrap()];
-    legend
-        .split("<dt>")
+/// The cells of the first legend table in `html`: the header row, then one row per entry with
+/// the label (the row header), the name, the meaning and the formula cell's inner HTML.
+fn legend_rows(html: &str) -> Vec<Vec<String>> {
+    let start = html
+        .find(r#"<table class="explainer-table legend">"#)
+        .expect("a legend table");
+    let table = &html[start..start + html[start..].find("</table>").unwrap()];
+    assert!(!table.contains(r#"class="data""#));
+    table
+        .split("<tr>")
         .skip(1)
-        .map(|dt| dt[..dt.find("</dt>").unwrap()].to_owned())
+        .map(|row| {
+            let row = &row[..row.find("</tr>").unwrap()];
+            row.split("<t")
+                .skip(1)
+                .map(|cell| {
+                    let inner = cell.split_once('>').unwrap().1;
+                    inner[..inner.find("</t").unwrap()].trim().to_owned()
+                })
+                .collect()
+        })
         .collect()
+}
+
+/// The labels of a legend's entries, in order.
+fn legend_labels(html: &str) -> Vec<String> {
+    let rows = legend_rows(html);
+    assert_eq!(rows[0], ["Label", "Name", "Meaning", "Formula"]);
+    rows[1..].iter().map(|row| row[0].clone()).collect()
 }
 
 #[tokio::test]

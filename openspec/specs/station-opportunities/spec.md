@@ -331,6 +331,8 @@ Every short label used by the opportunity tables and the detail page SHALL have 
 
 The legend of a table lists the table's columns in their order. The legend of a detail page lists its figures in the order of the figures section.
 
+A legend SHALL be shown as a table with the header row Label, Name, Meaning and Formula, and one row per entry. The label SHALL be the row's header. The name SHALL be plain text. The Formula cell SHALL hold only the right-hand side of the formula, in code style, and SHALL be empty for an entry without a formula. A legend table SHALL look like the worked example's table and SHALL NOT be the page's data table: it is neither sortable nor a link to a detail page. In a narrow window the meaning SHALL wrap within its cell, the label and the formula SHALL stay on one line, and the page SHALL NOT scroll sideways.
+
 #### Scenario: Same wording everywhere
 - **WHEN** a user reads the legend entry of T_max on the trend page and on a trend detail page
 - **THEN** both show the same full name, meaning and formula min(3, (m / 2σ)²) days
@@ -338,6 +340,14 @@ The legend of a table lists the table's columns in their order. The legend of a 
 #### Scenario: Table legend follows the columns
 - **WHEN** a user opens the legend on the mean reversion page
 - **THEN** it lists Item, B, S, Net, m, ISK/d, V7, V30, σ, T_max, T_fill, V_min, n b/s, %B and RSI, and no entry for Window or SMA5
+
+#### Scenario: Legend as a table
+- **WHEN** a user opens the Legend card on a classic detail page
+- **THEN** it shows a table headed Label, Name, Meaning and Formula, whose row c reads c, Cost per unit, its meaning and B × (1 + b), and whose row B has an empty Formula cell
+
+#### Scenario: Legend in a narrow window
+- **WHEN** a user opens the explainer on the trend page in a window 600 pixels wide
+- **THEN** the meanings wrap within their cells, the labels and formulas stay on one line each, and the page does not scroll sideways
 
 ### Requirement: Table explainer card
 Every opportunity table page SHALL show an explainer card for its table below the pagination, or below the table when it has no rows. The card SHALL be a disclosure titled "How to read this table" that is closed when the page loads. Its open state SHALL NOT be stored, and it SHALL stay as the user left it across a live refresh, a change of page or page size, a change of sorting and a change of the opportunity filters.

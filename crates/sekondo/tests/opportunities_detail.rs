@@ -756,6 +756,67 @@ async fn the_expansion_window_draws_the_spreads_the_past_peaks_and_the_next_occu
     );
 }
 
+/// The cells of the first legend table in `html`: the header row, then one row per entry with
+/// the label (the row header), the name, the meaning and the formula cell's inner HTML.
+fn legend_rows(html: &str) -> Vec<Vec<String>> {
+    let start = html
+        .find(r#"<table class="explainer-table legend">"#)
+        .expect("a legend table");
+    let table = &html[start..start + html[start..].find("</table>").unwrap()];
+    assert!(!table.contains(r#"class="data""#));
+    table
+        .split("<tr>")
+        .skip(1)
+        .map(|row| {
+            let row = &row[..row.find("</tr>").unwrap()];
+            row.split("<t")
+                .skip(1)
+                .map(|cell| {
+                    let inner = cell.split_once('>').unwrap().1;
+                    inner[..inner.find("</t").unwrap()].trim().to_owned()
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// The labels of a legend's entries, in order.
+fn legend_labels(html: &str) -> Vec<String> {
+    let rows = legend_rows(html);
+    assert_eq!(rows[0], ["Label", "Name", "Meaning", "Formula"]);
+    rows[1..].iter().map(|row| row[0].clone()).collect()
+}
+
+#[tokio::test]
+async fn the_legend_is_a_table_of_label_name_meaning_and_formula() {
+    let (app, browser) = setup().await;
+    item(&app, 34, "Tritanium", "130.00", 100_000_000.0).await;
+
+    let html = detail(&app, &browser, "/opportunities/detail/classic/34")
+        .await
+        .text()
+        .await
+        .unwrap();
+    let card = &html[html.find(r#"<article id="legend""#).expect("a legend card")..];
+
+    let rows = legend_rows(card);
+    let row = |label: &str| {
+        rows.iter()
+            .find(|row| row[0] == label)
+            .unwrap_or_else(|| panic!("no row {label}: {rows:?}"))
+            .clone()
+    };
+    let c = row("c");
+    assert_eq!(c.len(), 4);
+    assert_eq!(c[1], "Cost per unit");
+    assert_eq!(c[2], "What one unit costs, broker fee included.");
+    assert_eq!(c[3], "<code>B \u{00D7} (1 + b)</code>");
+    assert_eq!(row("T_max")[3], "<code>min(3, (m / 2\u{03C3})\u{00B2}) days</code>");
+    let b = row("B");
+    assert_eq!(b[1], "Current best buy, not a suggested price");
+    assert_eq!(b[3], "", "no formula, an empty cell");
+}
+
 /// The link texts of the detail page's sub-menu.
 fn section_nav(html: &str) -> Vec<String> {
     let nav = &html[html.find(r#"id="section-nav""#).expect("a sub-menu")..];
@@ -793,13 +854,8 @@ async fn a_closed_legend_card_sits_between_the_figures_and_the_charts() {
     let card = &html[card_at..];
     let card = &card[..card.find("</article>").unwrap()];
     assert!(card.contains("<details>") && card.contains("<summary>Legend</summary>"));
-    let labels: Vec<&str> = card
-        .split("<dt>")
-        .skip(1)
-        .map(|dt| &dt[..dt.find("</dt>").unwrap()])
-        .collect();
     assert_eq!(
-        labels,
+        legend_labels(card),
         [
             "b",
             "t",
