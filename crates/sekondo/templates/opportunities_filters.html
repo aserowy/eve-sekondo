@@ -11,6 +11,11 @@
     {% if let Some(message) = view.filters.error_for("min_margin") %}<small id="min_margin-error">{{ message }}</small>{% endif %}
   </div>
   <div>
+    <label for="max_margin">Maximum margin (%)</label>
+    <input id="max_margin" type="text" inputmode="decimal" name="max_margin" value="{{ view.filters.form.max_margin }}"{% if view.filters.error_for("max_margin").is_some() %} aria-invalid="true" aria-describedby="max_margin-error"{% endif %}>
+    {% if let Some(message) = view.filters.error_for("max_margin") %}<small id="max_margin-error">{{ message }}</small>{% endif %}
+  </div>
+  <div>
     <label for="min_isk_per_day">Minimum ISK/day</label>
     <input id="min_isk_per_day" type="text" inputmode="decimal" name="min_isk_per_day" value="{{ view.filters.form.min_isk_per_day }}"{% if view.filters.error_for("min_isk_per_day").is_some() %} aria-invalid="true" aria-describedby="min_isk_per_day-error"{% endif %}>
     {% if let Some(message) = view.filters.error_for("min_isk_per_day") %}<small id="min_isk_per_day-error">{{ message }}</small>{% endif %}

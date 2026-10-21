@@ -238,6 +238,10 @@ pub fn router(state: AppState, extra_routes: Router<AppState>) -> Router {
             post(opportunities::page::save_settings),
         )
         .route(
+            "/opportunities/page-size",
+            post(opportunities::page::save_page_size),
+        )
+        .route(
             "/opportunities/fee-character",
             post(opportunities::page::save_fee_character),
         )

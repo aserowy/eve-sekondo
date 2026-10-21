@@ -465,17 +465,17 @@ fn transaction_ids(html: &str) -> Vec<i64> {
 }
 
 #[tokio::test]
-async fn the_totals_span_every_page_while_the_table_shows_fifty() {
+async fn the_totals_span_every_page_while_the_table_shows_twenty_five() {
     let app = app().await;
     let browser = signed_in(&app).await;
     many_sales(&app, 80).await;
 
     let html = get(&app, &browser, "/trades/table").await;
 
-    assert_eq!(transaction_ids(&html).len(), 50);
+    assert_eq!(transaction_ids(&html).len(), 25);
     let sold = kpi(&html, "kpi-sold");
     assert_eq!(sold.title, "8,000.00 ISK", "80 sales of 100.00 ISK");
-    assert!(html.contains("Page 1 of 2"));
+    assert!(html.contains("Page 1 of 4"));
 }
 
 #[tokio::test]
@@ -484,7 +484,7 @@ async fn page_three_of_120_shows_the_101st_to_the_120th_newest_trade() {
     let browser = signed_in(&app).await;
     many_sales(&app, 120).await;
 
-    let html = get(&app, &browser, "/trades/table?page=3&range=30d").await;
+    let html = get(&app, &browser, "/trades/table?page=3&range=30d&per_page=50").await;
 
     // Newest first: transaction 120 is the newest, so the third page holds 20 down to 1.
     assert_eq!(transaction_ids(&html), (1..=20).rev().collect::<Vec<_>>());
@@ -499,16 +499,16 @@ async fn a_page_past_the_end_is_the_last_page_and_the_range_links_start_on_page_
     let browser = signed_in(&app).await;
     many_sales(&app, 60).await;
 
-    let html = get(&app, &browser, "/trades/table?page=9&per_page=25").await;
+    let html = get(&app, &browser, "/trades/table?page=9&per_page=10").await;
 
-    assert!(html.contains("Page 3 of 3"));
+    assert!(html.contains("Page 6 of 6"));
     assert_eq!(transaction_ids(&html).len(), 10);
     let unescaped = html.replace("&#38;", "&");
     let range_link = unescaped
         .split("<a ")
         .find(|a| a.contains("range=30d"))
         .unwrap();
-    assert!(range_link.contains("per_page=25"), "{range_link}");
+    assert!(range_link.contains("per_page=10"), "{range_link}");
     assert!(
         !range_link.contains("&page=") && !range_link.contains("?page="),
         "a new range starts on page 1: {range_link}"

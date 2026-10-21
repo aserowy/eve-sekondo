@@ -15,6 +15,8 @@ const ISK_MAX: f64 = 1e15;
 pub struct Settings {
     /// Fraction: 0.05 is 5%.
     pub min_margin: f64,
+    /// Fraction: 0.80 is 80%.
+    pub max_margin: f64,
     pub min_isk_per_day: f64,
     pub search: String,
     pub capital: f64,
@@ -24,6 +26,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             min_margin: 0.05,
+            max_margin: 0.80,
             min_isk_per_day: 5_000_000.0,
             search: String::new(),
             capital: 100_000_000.0,
@@ -36,6 +39,7 @@ impl Default for Settings {
 pub struct Form {
     /// Percent: `5` is 5%.
     pub min_margin: String,
+    pub max_margin: String,
     pub min_isk_per_day: String,
     pub search: String,
     pub capital: String,
@@ -46,6 +50,7 @@ impl Form {
     pub fn of(settings: &Settings) -> Self {
         Self {
             min_margin: plain(settings.min_margin * 100.0),
+            max_margin: plain(settings.max_margin * 100.0),
             min_isk_per_day: plain(settings.min_isk_per_day),
             search: settings.search.clone(),
             capital: plain(settings.capital),
@@ -57,6 +62,7 @@ impl Form {
         for (key, value) in pairs {
             match key.as_str() {
                 "min_margin" => form.min_margin = value,
+                "max_margin" => form.max_margin = value,
                 "min_isk_per_day" => form.min_isk_per_day = value,
                 "search" => form.search = value,
                 "capital" => form.capital = value,
@@ -77,6 +83,20 @@ impl Form {
                     "The minimum margin must be a number of at least 0 percent",
                 )
             })?;
+        let max_margin = number(&self.max_margin)
+            .filter(|m| *m >= 0.0)
+            .ok_or_else(|| {
+                FieldError::new(
+                    Field::MaxMargin,
+                    "The maximum margin must be a number of at least 0 percent",
+                )
+            })?;
+        if max_margin < margin {
+            return Err(FieldError::new(
+                Field::MaxMargin,
+                "The maximum margin must be at least the minimum margin",
+            ));
+        }
         let min_isk = number(&self.min_isk_per_day)
             .filter(|v| *v >= 0.0)
             .ok_or_else(|| {
@@ -85,14 +105,12 @@ impl Form {
                     "The minimum ISK/day must be a number of at least 0",
                 )
             })?;
-        let capital = number(&self.capital)
-            .filter(|v| *v > 0.0)
-            .ok_or_else(|| {
-                FieldError::new(
-                    Field::Capital,
-                    "The capital per item must be a positive number of ISK",
-                )
-            })?;
+        let capital = number(&self.capital).filter(|v| *v > 0.0).ok_or_else(|| {
+            FieldError::new(
+                Field::Capital,
+                "The capital per item must be a positive number of ISK",
+            )
+        })?;
         let search = self.search.trim();
         if search.chars().count() > SEARCH_MAX {
             return Err(FieldError::new(
@@ -102,6 +120,7 @@ impl Form {
         }
         Ok(Settings {
             min_margin: margin / 100.0,
+            max_margin: max_margin / 100.0,
             min_isk_per_day: min_isk,
             search: search.to_owned(),
             capital,
@@ -109,10 +128,11 @@ impl Form {
     }
 }
 
-/// One of the four filter inputs.
+/// One of the five filter inputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
     MinMargin,
+    MaxMargin,
     MinIskPerDay,
     Search,
     Capital,
@@ -123,6 +143,7 @@ impl Field {
     pub fn name(self) -> &'static str {
         match self {
             Self::MinMargin => "min_margin",
+            Self::MaxMargin => "max_margin",
             Self::MinIskPerDay => "min_isk_per_day",
             Self::Search => "search",
             Self::Capital => "capital",
@@ -193,10 +214,59 @@ mod tests {
     fn form(margin: &str, isk: &str, search: &str, capital: &str) -> Form {
         Form {
             min_margin: margin.to_owned(),
+            max_margin: "80".to_owned(),
             min_isk_per_day: isk.to_owned(),
             search: search.to_owned(),
             capital: capital.to_owned(),
         }
+    }
+
+    fn form_with_max(margin: &str, max: &str) -> Form {
+        Form {
+            max_margin: max.to_owned(),
+            ..form(margin, "1", "", "1")
+        }
+    }
+
+    #[test]
+    fn the_default_maximum_margin_is_eighty_percent() {
+        assert_eq!(Settings::default().max_margin, 0.80);
+        assert_eq!(Form::of(&Settings::default()).max_margin, "80");
+    }
+
+    #[test]
+    fn a_valid_maximum_margin_is_a_fraction_and_may_equal_the_minimum() {
+        let settings = form_with_max("10", "150").validate().unwrap();
+        assert_eq!(settings.max_margin, 1.5);
+        assert!(form_with_max("10", "10").validate().is_ok());
+    }
+
+    #[test]
+    fn a_rejected_maximum_margin_names_its_field_and_says_what_is_wrong() {
+        for max in ["", "-1", "abc"] {
+            let err = form_with_max("10", max).validate().unwrap_err();
+            assert_eq!(err.field, Field::MaxMargin, "{max:?}");
+            assert_eq!(
+                err.message, "The maximum margin must be a number of at least 0 percent",
+                "{max:?}"
+            );
+        }
+        let err = form_with_max("10", "5").validate().unwrap_err();
+        assert_eq!(err.field, Field::MaxMargin);
+        assert_eq!(
+            err.message,
+            "The maximum margin must be at least the minimum margin"
+        );
+    }
+
+    #[test]
+    fn the_maximum_margin_is_checked_after_the_minimum_and_before_the_rest() {
+        let err = form("-1", "-1", "", "-1").validate().unwrap_err();
+        assert_eq!(err.field, Field::MinMargin);
+        let mut both = form("5", "-1", "", "-1");
+        both.max_margin = "-1".to_owned();
+        assert_eq!(both.validate().unwrap_err().field, Field::MaxMargin);
+        assert_eq!(Field::MaxMargin.name(), "max_margin");
     }
 
     #[test]
@@ -214,6 +284,7 @@ mod tests {
             Form::of(&Settings::default()),
             form("5", "5000000", "", "100000000")
         );
+        assert_eq!(Form::of(&Settings::default()).max_margin, "80");
         let odd = Settings {
             min_margin: 0.075,
             ..Settings::default()
@@ -255,7 +326,11 @@ mod tests {
             (form("5", "1", "", "NaN"), Field::Capital, "capital"),
             (form("5", "1", "", "inf"), Field::Capital, "capital"),
             (form("5", "1", "", "1.2.3"), Field::Capital, "capital"),
-            (form("5", "1", "", "99999999999999999999"), Field::Capital, "capital"),
+            (
+                form("5", "1", "", "99999999999999999999"),
+                Field::Capital,
+                "capital",
+            ),
             (form("5", "1", "", ""), Field::Capital, "capital"),
         ];
         for (input, field, word) in cases {

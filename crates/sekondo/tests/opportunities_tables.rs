@@ -401,7 +401,7 @@ async fn items_that_fail_a_hard_rule_are_in_no_table() {
 }
 
 #[tokio::test]
-async fn more_than_fifty_matches_page_through_all_of_them_by_isk_per_day() {
+async fn more_than_twenty_five_matches_page_through_all_of_them_by_isk_per_day() {
     let (app, browser) = setup().await;
     for i in 1..=80i64 {
         // A larger volume fills faster and so earns more per day.
@@ -414,16 +414,17 @@ async fn more_than_fifty_matches_page_through_all_of_them_by_isk_per_day() {
     }
 
     let first = get_one(&app, &browser, "/opportunities/classic/content").await;
-    let second = get_one(&app, &browser, "/opportunities/classic/content?page=2").await;
+    let last = get_one(&app, &browser, "/opportunities/classic/content?page=4").await;
+    assert!(first.contains("Page 1 of 4"), "{first}");
     let first = rows(table(&first, "classic"));
-    let second = rows(table(&second, "classic"));
+    let last = rows(table(&last, "classic"));
 
-    assert_eq!(first.len(), 50);
+    assert_eq!(first.len(), 25);
     assert_eq!(first[0], 1080, "highest ISK/day first");
-    assert!(first.contains(&1031) && !first.contains(&1030));
-    assert_eq!(second.len(), 30, "the other 30");
-    assert_eq!(second[0], 1030);
-    assert_eq!(second.last(), Some(&1001));
+    assert!(first.contains(&1056) && !first.contains(&1055));
+    assert_eq!(last.len(), 5, "the other 5");
+    assert_eq!(last[0], 1005);
+    assert_eq!(last.last(), Some(&1001));
 }
 
 #[tokio::test]
@@ -446,9 +447,9 @@ async fn the_page_is_applied_after_sorting_and_clamped_and_carried_by_the_contro
     .await;
     let past = get_one(&app, &browser, "/opportunities/classic/content?page=9").await;
 
-    // All items are named alike, so the tie falls to the item number: page 2 is the last 30.
-    assert_eq!(rows(table(&by_item, "classic")).len(), 30);
-    assert!(past.contains("Page 2 of 2"), "{past}");
+    // All items are named alike, so the tie falls to the item number: page 2 is the next 25.
+    assert_eq!(rows(table(&by_item, "classic")).len(), 25);
+    assert!(past.contains("Page 4 of 4"), "{past}");
     let links = unescaped(&by_item);
     let previous = links
         .split("<a ")
@@ -925,4 +926,53 @@ async fn no_table_says_that_hourly_data_is_being_collected() {
         table(&html, "expansion").contains("No opportunities."),
         "an empty table, without a note: {html}"
     );
+}
+
+/// Saves the account's maximum margin (a fraction) next to the default filters.
+async fn set_max_margin(app: &TestApp, max_margin: f64) {
+    for account in app.stores.accounts.account_ids().await.unwrap() {
+        sekondo::opportunities::settings::Settings {
+            max_margin,
+            ..Default::default()
+        }
+        .save(&*app.stores.opportunities, account)
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn an_item_above_the_maximum_margin_is_hidden_and_listed_when_the_maximum_is_raised() {
+    let (app, browser) = setup().await;
+    Item::new(1).insert(&app).await; // m 12.87%
+    Item {
+        best_sell: "250.00",
+        ..Item::new(2)
+    }
+    .insert(&app)
+    .await; // m 117%
+
+    let html = get(&app, &browser, "/opportunities/tables").await;
+    assert_eq!(rows(table(&html, "classic")), [1], "80% by default");
+
+    set_max_margin(&app, 1.5).await;
+    let html = get(&app, &browser, "/opportunities/tables").await;
+    let mut listed = rows(table(&html, "classic"));
+    listed.sort();
+    assert_eq!(listed, [1, 2]);
+}
+
+#[tokio::test]
+async fn an_item_exactly_at_the_maximum_margin_is_listed() {
+    use sekondo::opportunities::analysis::{BASE_FEES, margin};
+    let (app, browser) = setup().await;
+    Item::new(1).insert(&app).await; // buys at 100.00, sells at 129.90
+    set_max_margin(&app, margin(10_000, 12_990, BASE_FEES)).await;
+
+    let html = get(&app, &browser, "/opportunities/tables").await;
+    assert_eq!(rows(table(&html, "classic")), [1]);
+
+    set_max_margin(&app, margin(10_000, 12_990, BASE_FEES) - 0.001).await;
+    let html = get(&app, &browser, "/opportunities/tables").await;
+    assert_eq!(rows(table(&html, "classic")), Vec::<i64>::new());
 }

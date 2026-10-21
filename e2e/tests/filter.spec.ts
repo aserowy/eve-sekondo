@@ -153,7 +153,7 @@ test('the character filter stands 3rem apart from the opportunity filters, wider
   await page.goto('/opportunities/trend');
 
   const margin = (await page.locator('#opportunity-filters').getByLabel('Minimum margin (%)').boundingBox())!;
-  const isk = (await page.locator('#opportunity-filters').getByLabel('Minimum ISK/day').boundingBox())!;
+  const isk = (await page.locator('#opportunity-filters').getByLabel('Maximum margin (%)').boundingBox())!;
   const characters = (await page.locator('#character-filter').boundingBox())!;
   const gap = margin.x - (characters.x + characters.width);
   expect(gap).toBeCloseTo(3 * (await rem(page)), 0);
@@ -220,4 +220,37 @@ test('an error under a field does not move the character filter', async ({ page 
   await expect(page.locator('#opportunity-filters [aria-invalid="true"]')).toHaveCount(1);
 
   expect(await top(page, '#character-filter legend')).toBeCloseTo(before, 0);
+});
+
+test('opportunity inputs are 2rem high at the body text size', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await twoCharacters(page);
+  await page.goto('/opportunities/trend');
+
+  const rootSize = await rem(page);
+  const bodySize = await page.evaluate(() => getComputedStyle(document.body).fontSize);
+  const inputs = page.locator('#opportunity-filters input:not([type=hidden])');
+  const count = await inputs.count();
+  expect(count).toBeGreaterThan(0);
+  for (let i = 0; i < count; i++) {
+    expect((await inputs.nth(i).boundingBox())!.height).toBeCloseTo(2 * rootSize, 0);
+    expect(await inputs.nth(i).evaluate((el) => getComputedStyle(el).fontSize)).toBe(bodySize);
+  }
+});
+
+test('wrapped rows of opportunity fields are 0.75rem apart', async ({ page }) => {
+  await page.setViewportSize({ width: 1100, height: 900 });
+  await twoCharacters(page);
+  await page.goto('/opportunities/trend');
+
+  // The label's column holds the input above it: the one whose bottom edge is nearest above the label.
+  const gap = await page.evaluate(() => {
+    const filters = document.querySelector('#opportunity-filters')!;
+    const label = filters.querySelector('label[for=search]')!.getBoundingClientRect();
+    const above = [...filters.querySelectorAll('input:not([type=hidden])')]
+      .map((input) => input.getBoundingClientRect())
+      .filter((r) => r.left === label.left && r.bottom <= label.top);
+    return label.top - Math.max(...above.map((r) => r.bottom));
+  });
+  expect(gap).toBeCloseTo(0.75 * (await rem(page)), 0);
 });

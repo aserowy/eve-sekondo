@@ -1033,6 +1033,14 @@ pub trait OpportunityStore: Send + Sync {
         character_id: Option<i64>,
     ) -> StoreResult<()>;
 
+    /// The page size the account chose for the opportunity tables, or none when it never chose
+    /// one.
+    async fn load_page_size(&self, account_id: Uuid) -> StoreResult<Option<u32>>;
+
+    /// Saves the choice. Leaves the saved filters and the fee character alone; an account
+    /// without any filters gets the default ones.
+    async fn save_page_size(&self, account_id: Uuid, per_page: u32) -> StoreResult<()>;
+
     async fn station_sync(&self, region_id: i64, station_id: i64) -> StoreResult<Vec<SyncRow>>;
 
     /// Days with an own snapshot, counted on the item with the oldest snapshot.

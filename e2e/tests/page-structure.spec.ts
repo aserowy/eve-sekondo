@@ -146,7 +146,7 @@ test('the pagination of a long page follows the table and scrolls in', async ({ 
 test('the pagination keeps its place after a page change', async ({ page }) => {
   await page.setViewportSize({ width: 1920, height: 1080 });
   await loginWith(page, 'Alice Alpha');
-  await sellOrders(page, 60);
+  await sellOrders(page, 35);
   await openSell(page);
   await page.getByRole('link', { name: 'Next' }).click();
   await expect(page).toHaveURL(/page=2/);

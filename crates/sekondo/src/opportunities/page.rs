@@ -26,7 +26,7 @@ use crate::{
     csrf, format,
     orders::{Dir, FilterEntry},
     pages::{self, Nav, Page},
-    pagination::{Link, PageView, Paging, paginate},
+    pagination::{DEFAULT_PER_PAGE, Link, PER_PAGE_SIZES, PageView, Paging, paginate},
     selection::{CharacterSelection, ViewQuery},
     station_book::BOOK_INTERVAL,
     store::{OpportunityStore, StoreError},
@@ -171,10 +171,13 @@ struct ViewState {
     chars: Option<String>,
     sorts: [Sort; 4],
     paging: Paging,
+    /// The account's stored page size, or the default: what a URL without `per_page` means, so
+    /// the links leave it out.
+    stored_per_page: u32,
 }
 
 impl ViewState {
-    fn from_query(selection: &CharacterSelection, query: &ViewQuery) -> Self {
+    fn from_query(selection: &CharacterSelection, query: &ViewQuery, stored_per_page: u32) -> Self {
         let pair = |table: Table| -> (Option<&str>, Option<&str>) {
             match table {
                 Table::Expansion => (query.xs.as_deref(), query.xd.as_deref()),
@@ -190,7 +193,12 @@ impl ViewState {
         Self {
             chars: selection.param(),
             sorts,
-            paging: query.paging(),
+            paging: Paging::parse_or(
+                query.page.as_deref(),
+                query.per_page.as_deref(),
+                stored_per_page,
+            ),
+            stored_per_page,
         }
     }
 
@@ -213,6 +221,7 @@ impl ViewState {
             chars: self.chars.clone(),
             sorts,
             paging: self.paging.first(),
+            stored_per_page: self.stored_per_page,
         }
     }
 
@@ -221,6 +230,18 @@ impl ViewState {
             chars: self.chars.clone(),
             sorts: self.sorts,
             paging,
+            stored_per_page: self.stored_per_page,
+        }
+    }
+
+    /// The view after choosing `per_page` in the page-size control: page 1 of that size, which
+    /// the choice stores, so the URL does not need to carry it.
+    fn with_size_stored(&self, per_page: u32) -> Self {
+        Self {
+            chars: self.chars.clone(),
+            sorts: self.sorts,
+            paging: Paging { page: 1, per_page },
+            stored_per_page: per_page,
         }
     }
 
@@ -256,7 +277,7 @@ impl ViewState {
         }
         let mut query = pairs.finish().replace("%2C", ",");
         if with_paging {
-            let paging = self.paging.query();
+            let paging = self.paging.query_or(self.stored_per_page);
             if !paging.is_empty() {
                 if !query.is_empty() {
                     query.push('&');
@@ -320,7 +341,14 @@ async fn environment(
     }
     let ids: Vec<i64> = characters.iter().map(|c| c.character_id).collect();
     let selection = query.selection(&ids);
-    let view_state = ViewState::from_query(&selection, query);
+    let stored_per_page = state
+        .stores
+        .opportunities
+        .load_page_size(account_id)
+        .await?
+        .filter(|size| PER_PAGE_SIZES.contains(size))
+        .unwrap_or(DEFAULT_PER_PAGE);
+    let view_state = ViewState::from_query(&selection, query, stored_per_page);
     Ok(Some(Environment {
         settings: Settings::load(&*state.stores.opportunities, account_id).await?,
         fee_choice: choose_station_fees(
@@ -371,7 +399,16 @@ async fn build_view(
             content: format!("/opportunities/{}/content{query}", table.id()),
         }
     };
-    let (page_rows, pager) = paginate(&all_rows, env.view_state.paging, link_to);
+    let (page_rows, mut pager) = paginate(&all_rows, env.view_state.paging, link_to);
+    // Choosing a size saves it, so the page it leads to takes that size as the stored one.
+    pager.save = Some("/opportunities/page-size".to_owned());
+    for option in &mut pager.sizes {
+        let query = env.view_state.with_size_stored(option.value).query(true);
+        option.link = Link {
+            href: format!("/opportunities/{}{query}", table.id()),
+            content: format!("/opportunities/{}/content{query}", table.id()),
+        };
+    }
     // What the URLs below carry is the page actually shown, after clamping.
     env.view_state.paging = pager.paging;
     let detail_query = env.view_state.query(false);
@@ -867,6 +904,32 @@ pub async fn save_fee_character(
             response
         }
         Err(response) => *response,
+    }
+}
+
+/// Saves the page size the page-size control chose, for every opportunity table of the account.
+/// Answers with no content: the page fetches the table itself. A size that is not on offer is
+/// rejected and nothing is stored.
+pub async fn save_page_size(
+    State(state): State<AppState>,
+    account: CurrentAccount,
+    body: String,
+) -> Response {
+    let per_page = url::form_urlencoded::parse(body.as_bytes())
+        .find(|(name, _)| name == "per_page")
+        .and_then(|(_, value)| value.trim().parse::<u32>().ok())
+        .filter(|size| PER_PAGE_SIZES.contains(size));
+    let Some(per_page) = per_page else {
+        return StatusCode::UNPROCESSABLE_ENTITY.into_response();
+    };
+    match state
+        .stores
+        .opportunities
+        .save_page_size(account.id, per_page)
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => pages::internal_error(e),
     }
 }
 

@@ -676,7 +676,7 @@ async fn the_range_does_not_change_the_cards() {
 // ---- pagination ----
 
 #[tokio::test]
-async fn three_hundred_rows_read_page_one_of_six_and_the_cards_do_not_depend_on_the_page() {
+async fn three_hundred_rows_read_page_one_of_twelve_and_the_cards_do_not_depend_on_the_page() {
     let app = app().await;
     let browser = signed_in(&app).await;
     for i in 0..300 {
@@ -687,10 +687,10 @@ async fn three_hundred_rows_read_page_one_of_six_and_the_cards_do_not_depend_on_
     let first = get(&app, &browser, "/wealth/content?sort=item&dir=asc").await;
     let second = get(&app, &browser, "/wealth/content?sort=item&dir=asc&page=2").await;
 
-    assert!(first.contains("Page 1 of 6"), "{first}");
-    assert_eq!(rows(&first).len(), 50);
-    assert!(second.contains("Page 2 of 6"));
-    assert_eq!(rows(&second).len(), 50);
+    assert!(first.contains("Page 1 of 12"), "{first}");
+    assert_eq!(rows(&first).len(), 25);
+    assert!(second.contains("Page 2 of 12"));
+    assert_eq!(rows(&second).len(), 25);
     assert_ne!(rows(&first)[0], rows(&second)[0]);
     assert_eq!(
         kpi(&first, "kpi-wealth").title,
@@ -715,7 +715,7 @@ async fn a_range_switch_and_a_sorting_start_on_the_first_page() {
     let html = get(
         &app,
         &browser,
-        "/wealth/content?page=2&per_page=25&range=24h",
+        "/wealth/content?page=2&per_page=50&range=24h",
     )
     .await
     .replace("&#38;", "&");
@@ -732,6 +732,6 @@ async fn a_range_switch_and_a_sorting_start_on_the_first_page() {
             !link.contains("&page=") && !link.contains("?page="),
             "{link}"
         );
-        assert!(link.contains("per_page=25"), "{link}");
+        assert!(link.contains("per_page=50"), "{link}");
     }
 }

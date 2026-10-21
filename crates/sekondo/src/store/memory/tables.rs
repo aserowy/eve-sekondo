@@ -232,23 +232,28 @@ pub(super) struct ItemStatsRow {
 #[derive(Debug, Clone)]
 pub(super) struct SettingsRow {
     pub min_margin: Numeric,
+    pub max_margin: Numeric,
     pub min_isk_per_day: Numeric,
     pub search: String,
     pub capital: Numeric,
     pub fee_character_id: Option<i64>,
+    pub per_page: Option<u32>,
 }
 
 impl SettingsRow {
     pub fn of(
         settings: &crate::opportunities::settings::Settings,
         fee_character_id: Option<i64>,
+        per_page: Option<u32>,
     ) -> Self {
         Self {
             min_margin: Numeric::from_f64(settings.min_margin),
+            max_margin: Numeric::from_f64(settings.max_margin),
             min_isk_per_day: Numeric::from_f64(settings.min_isk_per_day),
             search: settings.search.clone(),
             capital: Numeric::from_f64(settings.capital),
             fee_character_id,
+            per_page,
         }
     }
 }

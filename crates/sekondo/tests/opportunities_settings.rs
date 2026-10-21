@@ -60,8 +60,9 @@ async fn save(
     browser.send(request).await
 }
 
-const VALID: [(&str, &str); 4] = [
+const VALID: [(&str, &str); 5] = [
     ("min_margin", "5"),
+    ("max_margin", "80"),
     ("min_isk_per_day", "5000000"),
     ("search", ""),
     ("capital", "100000000"),
@@ -165,6 +166,28 @@ async fn a_first_visit_shows_the_default_filters() {
 }
 
 #[tokio::test]
+async fn an_account_without_saved_settings_reads_a_maximum_margin_of_eighty_percent() {
+    let app = AppBuilder::new().with_stub().spawn().await;
+    let browser = signed_in(&app, ALICE).await;
+    browser.get(&app.url("/opportunities/classic")).await;
+
+    for account in app.stores.accounts.account_ids().await.unwrap() {
+        assert!(
+            app.stores
+                .opportunities
+                .load_settings(account)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let loaded = Settings::load(&*app.stores.opportunities, account)
+            .await
+            .unwrap();
+        assert_eq!(loaded.max_margin, 0.80);
+    }
+}
+
+#[tokio::test]
 async fn saving_stores_the_settings_per_account_and_answers_the_tables() {
     let app = AppBuilder::new().with_stub().spawn().await;
     let browser = signed_in(&app, ALICE).await;
@@ -177,6 +200,7 @@ async fn saving_stores_the_settings_per_account_and_answers_the_tables() {
         Some(&token),
         &[
             ("min_margin", "7.5"),
+            ("max_margin", "150"),
             ("min_isk_per_day", "10,000,000"),
             ("search", " trit "),
             ("capital", "2000000000"),
@@ -198,6 +222,7 @@ async fn saving_stores_the_settings_per_account_and_answers_the_tables() {
         stored(&app).await,
         [Settings {
             min_margin: 0.075,
+            max_margin: 1.5,
             min_isk_per_day: 10_000_000.0,
             search: "trit".to_owned(),
             capital: 2_000_000_000.0,
@@ -216,6 +241,7 @@ async fn the_stored_settings_are_what_the_page_shows_after_signing_in_again() {
         Some(&token),
         &[
             ("min_margin", "7.5"),
+            ("max_margin", "80"),
             ("min_isk_per_day", "1000"),
             ("search", "pyer"),
             ("capital", "2000000000"),
@@ -261,6 +287,7 @@ async fn a_capital_of_zero_is_rejected_with_a_message_and_the_stored_settings_st
         Some(&token),
         &[
             ("min_margin", "9"),
+            ("max_margin", "80"),
             ("min_isk_per_day", "1"),
             ("search", "x"),
             ("capital", "0"),
@@ -357,6 +384,7 @@ async fn one_accounts_settings_do_not_change_another_accounts() {
         Some(&alice_token),
         &[
             ("min_margin", "30"),
+            ("max_margin", "80"),
             ("min_isk_per_day", "9"),
             ("search", "only-alice"),
             ("capital", "5"),
@@ -397,6 +425,7 @@ async fn raising_the_capital_removes_an_item_that_can_no_longer_fill_in_time() {
         Some(&token),
         &[
             ("min_margin", "5"),
+            ("max_margin", "80"),
             ("min_isk_per_day", "5000000"),
             ("search", ""),
             ("capital", "2000000000"),
@@ -422,6 +451,7 @@ async fn the_name_search_narrows_every_table_without_regard_to_case() {
         Some(&token),
         &[
             ("min_margin", "5"),
+            ("max_margin", "80"),
             ("min_isk_per_day", "5000000"),
             ("search", "PYER"),
             ("capital", "100000000"),
@@ -502,7 +532,7 @@ async fn a_saved_filter_goes_back_to_the_first_page_in_the_address_bar() {
     pairs.extend([
         ("cs", "item"),
         ("cd", "asc"),
-        ("per_page", "25"),
+        ("per_page", "50"),
         ("page", "3"),
     ]);
 
@@ -511,8 +541,101 @@ async fn a_saved_filter_goes_back_to_the_first_page_in_the_address_bar() {
     assert_eq!(res.status(), 200);
     assert_eq!(
         res.headers()["hx-replace-url"],
-        "/opportunities/classic?cs=item&cd=asc&per_page=25"
+        "/opportunities/classic?cs=item&cd=asc&per_page=50"
     );
     let html = res.text().await.unwrap();
     assert!(html.contains("Page 1 of 1") || !html.contains(r#"class="pagination""#));
+}
+
+/// Posts the page size like the page's script does: with the CSRF token in a header.
+async fn save_page_size(
+    app: &TestApp,
+    browser: &Browser,
+    token: Option<&str>,
+    per_page: &str,
+) -> reqwest::Response {
+    let mut request = browser
+        .post(&app.url("/opportunities/page-size"))
+        .header("origin", &app.base_url)
+        .header("hx-request", "true")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(encoded(&[("per_page", per_page)]));
+    if let Some(token) = token {
+        request = request.header("x-csrf-token", token);
+    }
+    browser.send(request).await
+}
+
+async fn stored_page_sizes(app: &TestApp) -> Vec<u32> {
+    let mut all = Vec::new();
+    for account in app.stores.accounts.account_ids().await.unwrap() {
+        all.extend(
+            app.stores
+                .opportunities
+                .load_page_size(account)
+                .await
+                .unwrap(),
+        );
+    }
+    all
+}
+
+#[tokio::test]
+async fn an_offered_page_size_is_stored_and_answered_with_no_content() {
+    let app = AppBuilder::new().with_stub().spawn().await;
+    let browser = signed_in(&app, ALICE).await;
+    let token = csrf_token(&app, &browser).await;
+
+    for size in ["10", "25", "50", "100", "200"] {
+        let res = save_page_size(&app, &browser, Some(&token), size).await;
+        assert_eq!(res.status(), 204, "{size}");
+        assert_eq!(
+            stored_page_sizes(&app).await,
+            [size.parse::<u32>().unwrap()]
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_unknown_page_size_is_rejected_and_the_stored_size_stays() {
+    let app = AppBuilder::new().with_stub().spawn().await;
+    let browser = signed_in(&app, ALICE).await;
+    let token = csrf_token(&app, &browser).await;
+    save_page_size(&app, &browser, Some(&token), "100").await;
+
+    for size in ["30", "0", "-10", "abc", ""] {
+        let res = save_page_size(&app, &browser, Some(&token), size).await;
+        assert_eq!(res.status(), 422, "{size:?}");
+    }
+    assert_eq!(stored_page_sizes(&app).await, [100]);
+}
+
+#[tokio::test]
+async fn a_page_size_without_the_csrf_token_is_refused_and_the_stored_size_stays() {
+    let app = AppBuilder::new().with_stub().spawn().await;
+    let browser = signed_in(&app, ALICE).await;
+    let token = csrf_token(&app, &browser).await;
+    save_page_size(&app, &browser, Some(&token), "100").await;
+
+    let without = save_page_size(&app, &browser, None, "10").await;
+    let wrong = save_page_size(&app, &browser, Some("not-the-token"), "10").await;
+
+    assert_eq!(without.status(), 403);
+    assert_eq!(wrong.status(), 403);
+    assert_eq!(stored_page_sizes(&app).await, [100]);
+}
+
+#[tokio::test]
+async fn an_unauthenticated_page_size_post_is_refused() {
+    let app = AppBuilder::new().with_stub().spawn().await;
+    let anonymous = app.browser();
+
+    let res = save_page_size(&app, &anonymous, Some("anything"), "10").await;
+
+    assert!(
+        res.status() == 403 || res.status().is_redirection(),
+        "{}",
+        res.status()
+    );
+    assert_eq!(stored_page_sizes(&app).await, Vec::<u32>::new());
 }

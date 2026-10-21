@@ -78,22 +78,23 @@ test('the sub-menu switches between the four tables without row counts, keeping 
   await expect(page.locator('#classic')).toHaveCount(0);
 
   // Raising the minimum margin until a table is empty still shows no number.
+  await setFilter(page, 'Maximum margin (%)', '200');
   await setFilter(page, 'Minimum margin (%)', '99');
   await expect(page.locator('#trend tbody tr')).toHaveCount(0);
   expect(await menu.innerText()).not.toMatch(/\d/);
 });
 
-test('more than fifty matches are paged: the first page has fifty, the second the rest, and a filter goes back to page 1', async ({ page }) => {
+test('more than 25 matches are paged: the first page has 25, the second the next 25, and a filter goes back to page 1', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await withItems(page, 80);
-  await expect(page.locator('#classic tbody tr')).toHaveCount(50);
+  await expect(page.locator('#classic tbody tr')).toHaveCount(25);
   const pagination = page.locator('.pagination');
-  await expect(pagination).toContainText('Page 1 of 2');
+  await expect(pagination).toContainText('Page 1 of 4');
 
   await pagination.getByRole('link', { name: 'Next' }).click();
   await expect(page).toHaveURL(/page=2$/);
-  await expect(page.locator('#classic tbody tr')).toHaveCount(30);
-  await expect(pagination).toContainText('Page 2 of 2');
+  await expect(page.locator('#classic tbody tr')).toHaveCount(25);
+  await expect(pagination).toContainText('Page 2 of 4');
 
   await setFilter(page, 'Item name', 'Type 10');
   await expect(page).not.toHaveURL(/page=/);
@@ -196,11 +197,11 @@ test('the filter section wraps in a narrow window and the page does not scroll s
   expect(next.y - firstLineBottom).toBeCloseTo(0.75 * rem, 0);
 });
 
-test('each opportunity filter has its label above its input, and the four inputs are equally wide', async ({ page }) => {
+test('each opportunity filter has its label above its input, and the five inputs are equally wide', async ({ page }) => {
   await page.setViewportSize({ width: 1920, height: 1080 });
   await openOpportunities(page, 'trend');
 
-  const labels = ['Minimum margin (%)', 'Minimum ISK/day', 'Item name', 'Capital per item (ISK)'];
+  const labels = ['Minimum margin (%)', 'Maximum margin (%)', 'Minimum ISK/day', 'Item name', 'Capital per item (ISK)'];
   const fields = [];
   for (const label of labels) {
     const input = page.locator('#opportunity-filters').getByLabel(label);

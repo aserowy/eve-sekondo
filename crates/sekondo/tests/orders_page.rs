@@ -1219,8 +1219,18 @@ fn ids_in_page(html: &str) -> Vec<i64> {
 async fn the_second_page_shows_the_51st_to_the_70th_order_by_price() {
     let (app, browser) = many_sells(70).await;
 
-    let first = get_one(&app, &browser, "/orders/sell?sort=price&dir=asc").await;
-    let second = get_one(&app, &browser, "/orders/sell?sort=price&dir=asc&page=2").await;
+    let first = get_one(
+        &app,
+        &browser,
+        "/orders/sell?sort=price&dir=asc&per_page=50",
+    )
+    .await;
+    let second = get_one(
+        &app,
+        &browser,
+        "/orders/sell?sort=price&dir=asc&per_page=50&page=2",
+    )
+    .await;
 
     assert_eq!(ids_in_page(&first), (1..=50).collect::<Vec<_>>());
     assert_eq!(ids_in_page(&second), (51..=70).collect::<Vec<_>>());
@@ -1242,40 +1252,42 @@ async fn a_page_past_the_end_shows_the_last_page_and_keeps_it_in_the_refresh_url
 
     let html = get_one(&app, &browser, "/orders/sell?page=9").await;
 
-    assert!(html.contains("Page 3 of 3"), "{html}");
+    assert!(html.contains("Page 5 of 5"), "{html}");
     assert_eq!(ids_in_page(&html).len(), 20);
     let refresh = unescaped(&html);
     assert!(
-        refresh.contains(r#"hx-get="/orders/sell/content?page=3""#),
+        refresh.contains(r#"hx-get="/orders/sell/content?page=5""#),
         "the refresh URL carries the page shown: {refresh}"
     );
 }
 
 #[tokio::test]
-async fn the_page_size_is_taken_from_the_url_and_unknown_sizes_fall_back_to_fifty() {
+async fn the_page_size_is_taken_from_the_url_and_unknown_sizes_fall_back_to_twenty_five() {
     let (app, browser) = many_sells(120).await;
 
     let all = get_one(&app, &browser, "/orders/sell?per_page=200").await;
     assert_eq!(ids_in_page(&all).len(), 120);
     assert!(all.contains("Page 1 of 1"));
-    let small = get_one(&app, &browser, "/orders/sell?per_page=25&page=5").await;
-    assert_eq!(ids_in_page(&small).len(), 20);
-    assert!(small.contains("Page 5 of 5"));
+    let small = get_one(&app, &browser, "/orders/sell?per_page=10&page=12").await;
+    assert_eq!(ids_in_page(&small).len(), 10);
+    assert!(small.contains("Page 12 of 12"));
     let odd = get_one(&app, &browser, "/orders/sell?per_page=30").await;
-    assert_eq!(ids_in_page(&odd).len(), 50);
+    assert_eq!(ids_in_page(&odd).len(), 25);
+    let missing = get_one(&app, &browser, "/orders/sell").await;
+    assert_eq!(ids_in_page(&missing).len(), 25);
 }
 
 #[tokio::test]
 async fn sorting_goes_back_to_the_first_page_and_keeps_the_page_size() {
     let (app, browser) = many_sells(120).await;
 
-    let html = unescaped(&get_one(&app, &browser, "/orders/sell?page=2&per_page=25").await);
+    let html = unescaped(&get_one(&app, &browser, "/orders/sell?page=2&per_page=50").await);
 
     let price_link = html
         .split("<a ")
         .find(|a| a.contains("sort=price"))
         .unwrap_or_else(|| panic!("no price header in {html}"));
-    assert!(price_link.contains("per_page=25"), "{price_link}");
+    assert!(price_link.contains("per_page=50"), "{price_link}");
     assert!(
         !price_link.contains("&page=") && !price_link.contains("?page="),
         "{price_link}"
@@ -1324,7 +1336,24 @@ async fn the_buy_page_has_its_own_paging() {
     let sell = get_one(&app, &browser, "/orders/sell?page=2").await;
     let buy = get_one(&app, &browser, "/orders/buy?page=2").await;
 
-    assert!(sell.contains("Page 2 of 2"));
+    assert!(sell.contains("Page 2 of 3"));
     assert!(buy.contains("Page 1 of 1"), "one buy order only: {buy}");
     assert_eq!(ids_in_page(&buy), [9001]);
+}
+
+#[tokio::test]
+async fn the_sell_orders_page_ignores_the_stored_opportunity_page_size() {
+    let (app, browser) = many_sells(30).await;
+    for account in app.stores.accounts.account_ids().await.unwrap() {
+        app.stores
+            .opportunities
+            .save_page_size(account, 100)
+            .await
+            .unwrap();
+    }
+
+    let html = get_one(&app, &browser, "/orders/sell").await;
+
+    assert_eq!(ids_in_page(&html).len(), 25);
+    assert!(html.contains("Page 1 of 2"), "{html}");
 }

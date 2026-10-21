@@ -84,7 +84,7 @@ test('the sidebar and the sub-menu stay at the top of the window while the page 
   });
   expect(await pollCharacter(page, 90000001)).toBe('200 updated');
   await page.goto('/orders/sell');
-  await expect(page.locator('#sell-orders tbody.order')).toHaveCount(50);
+  await expect(page.locator('#sell-orders tbody.order')).toHaveCount(25);
 
   await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(300);
@@ -154,4 +154,26 @@ test('the opportunities page keeps its filter section on a narrow window without
   await aliceTrained(page);
   await page.goto('/opportunities/classic');
   expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
+});
+
+test('the page-size control offers 10 to 200 rows, shows 25 by default, and a smaller size makes more pages', async ({ page }) => {
+  await loginWith(page, 'Alice Alpha');
+  await stubControl('orders', {
+    character_id: 90000001,
+    orders: Array.from({ length: 120 }, (_, i) => stubOrder(i + 1, { price: 10 + i })),
+  });
+  expect(await pollCharacter(page, 90000001)).toBe('200 updated');
+  await page.goto('/orders/sell');
+  const pagination = page.locator('.pagination');
+  const sizes = pagination.getByLabel('Rows per page');
+
+  expect(await sizes.locator('option').allTextContents()).toEqual(['10', '25', '50', '100', '200']);
+  await expect(sizes).toHaveValue('25');
+  await expect(page.locator('#sell-orders tbody.order')).toHaveCount(25);
+  await expect(pagination).toContainText('Page 1 of 5');
+
+  await sizes.selectOption('10');
+  await expect(page).toHaveURL(/per_page=10$/);
+  await expect(page.locator('#sell-orders tbody.order')).toHaveCount(10);
+  await expect(pagination).toContainText('Page 1 of 12');
 });

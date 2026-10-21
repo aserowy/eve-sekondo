@@ -174,8 +174,9 @@ table.records tr.details td { color: var(--pico-muted-color); font-size: 0.8125r
 .filter-box fieldset { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; }
 .filter-box fieldset label { margin: 0; white-space: nowrap; }
 /* The opportunity filters: label-above-input fields of equal width that wrap onto further rows. */
-.filter-box #opportunity-filters { display: grid; flex: 1 1 12rem; min-width: 0; max-width: 60rem; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0 1rem; }
+.filter-box #opportunity-filters { display: grid; flex: 1 1 12rem; min-width: 0; max-width: 60rem; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0.75rem 1rem; }
 .filter-box #opportunity-filters input { margin-bottom: 0; }
+.filter-box input:not([type=checkbox], [type=radio]) { height: 2rem; padding-block: 0; }
 .filter-box #opportunity-filters small { margin: calc(var(--pico-spacing) * 0.25) 0 0; }
 .filter-box #fee-filter small { display: block; margin: calc(var(--pico-spacing) * 0.25) 0 0; }
 /* The time range: a label above a group of joined buttons, sharing the bottom edge of the fields beside it. */

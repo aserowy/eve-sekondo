@@ -665,3 +665,158 @@ async fn the_expansion_example_is_a_spike_and_its_playbook_has_both_directions()
         "{playbook}"
     );
 }
+
+// ---- the stored page size ----
+
+/// `count` items that pass every rule of the classic table.
+async fn classic_items(app: &TestApp, count: i64) {
+    let now = OffsetDateTime::now_utc();
+    for type_id in 1..=count {
+        app.stores
+            .station
+            .seed_item_stats(
+                REGION,
+                STATION,
+                type_id,
+                &sekondo::store::ItemStatsRecord {
+                    book_at: Some(now),
+                    best_buy: Some("100".to_owned()),
+                    best_sell: Some("130.00".to_owned()),
+                    buy_near_orders: Some(0),
+                    sell_near_orders: Some(0),
+                    rho: Some(0.5),
+                    indicators_at: Some(now),
+                    volume_7d: Some(100_000_000.0),
+                    volume_30d: Some(90_000_000.0),
+                    sigma: Some(0.02),
+                    returns: Some(29),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+}
+
+async fn store_page_size(app: &TestApp, per_page: u32) {
+    for account in app.stores.accounts.account_ids().await.unwrap() {
+        app.stores
+            .opportunities
+            .save_page_size(account, per_page)
+            .await
+            .unwrap();
+    }
+}
+
+async fn stored_page_size(app: &TestApp) -> Option<u32> {
+    let account = app.stores.accounts.account_ids().await.unwrap()[0];
+    app.stores
+        .opportunities
+        .load_page_size(account)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn without_a_per_page_the_stored_size_is_used_by_the_page_and_its_content() {
+    let (app, browser) = setup().await;
+    classic_items(&app, 30).await;
+    assert!(
+        get(&app, &browser, "/opportunities/classic")
+            .await
+            .contains("Page 1 of 2"),
+        "25 rows a page when nothing is stored"
+    );
+
+    store_page_size(&app, 10).await;
+
+    for path in ["/opportunities/classic", "/opportunities/classic/content"] {
+        let html = get(&app, &browser, path).await;
+        assert!(html.contains("Page 1 of 3"), "{path}: {html}");
+        assert!(
+            html.contains(r#"<option value="10" data-href="/opportunities/classic" data-content="/opportunities/classic/content" selected>"#),
+            "{path}: the size control shows the stored size: {html}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_per_page_in_the_url_wins_and_is_not_saved() {
+    let (app, browser) = setup().await;
+    classic_items(&app, 30).await;
+    store_page_size(&app, 10).await;
+
+    let html = get(&app, &browser, "/opportunities/classic?per_page=50").await;
+
+    assert!(html.contains("Page 1 of 1"), "{html}");
+    assert_eq!(stored_page_size(&app).await, Some(10));
+    let again = get(&app, &browser, "/opportunities/classic").await;
+    assert!(again.contains("Page 1 of 3"), "{again}");
+}
+
+#[tokio::test]
+async fn the_links_leave_out_the_stored_size_and_carry_any_other() {
+    let (app, browser) = setup().await;
+    classic_items(&app, 30).await;
+    store_page_size(&app, 10).await;
+
+    let html = get(&app, &browser, "/opportunities/classic")
+        .await
+        .replace("&#38;", "&");
+
+    let option = |size: u32| {
+        html.split("<option ")
+            .find(|o| o.starts_with(&format!(r#"value="{size}""#)))
+            .unwrap_or_else(|| panic!("no option {size}: {html}"))
+            .split('>')
+            .next()
+            .unwrap()
+            .to_owned()
+    };
+    // Choosing a size stores it, so no option's link needs to carry its size.
+    for size in [10, 25, 50, 100, 200] {
+        assert!(
+            option(size).contains(r#"data-href="/opportunities/classic""#),
+            "{size}: {html}"
+        );
+    }
+    assert!(
+        html.contains(r#"data-save="/opportunities/page-size""#),
+        "{html}"
+    );
+    let next = html
+        .split("<a ")
+        .find(|a| a.contains(r#"rel="next""#))
+        .unwrap();
+    assert!(
+        next.contains(r#"href="/opportunities/classic?page=2""#),
+        "{next}"
+    );
+
+    // A size from the URL differs from the stored one, so the links carry it.
+    let url = get(&app, &browser, "/opportunities/classic?per_page=25")
+        .await
+        .replace("&#38;", "&");
+    let next = url
+        .split("<a ")
+        .find(|a| a.contains(r#"rel="next""#))
+        .unwrap();
+    assert!(
+        next.contains(r#"href="/opportunities/classic?page=2&per_page=25""#),
+        "{next}"
+    );
+}
+
+#[tokio::test]
+async fn the_sub_menu_and_the_detail_page_keep_the_stored_size_without_a_per_page() {
+    let (app, browser) = setup().await;
+    classic_items(&app, 3).await;
+    store_page_size(&app, 100).await;
+
+    let html = get(&app, &browser, "/opportunities/classic").await;
+    for (_, href, _) in sub_menu(&html) {
+        assert!(!href.contains("per_page"), "{href}");
+    }
+    let detail = get(&app, &browser, "/opportunities/detail/classic/1").await;
+    assert!(!detail.contains("per_page"), "{detail}");
+}

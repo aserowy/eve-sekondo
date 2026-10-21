@@ -659,6 +659,9 @@ pub fn detail<'a>(
             Ok(f) if f.margin < context.settings.min_margin => {
                 "Its net margin is below your minimum margin.".to_owned()
             }
+            Ok(f) if f.margin > context.settings.max_margin => {
+                "Its net margin is above your maximum margin.".to_owned()
+            }
             Ok(f) if f.isk_per_day < context.settings.min_isk_per_day => {
                 "Its ISK/day is below your minimum.".to_owned()
             }
@@ -703,6 +706,7 @@ pub fn rows(table: Table, all: &[Stats], context: &Context<'_>, sort: Sort) -> V
             let v7 = stats.volume_7d.unwrap_or(0.0);
             let figures = evaluate(&inputs(stats, buy_cents, sell_cents, context)).ok()?;
             if figures.margin < settings.min_margin
+                || figures.margin > settings.max_margin
                 || figures.isk_per_day < settings.min_isk_per_day
             {
                 return None;

@@ -81,10 +81,10 @@ fn a_log_in_again_link_carries_the_icon_and_its_text() {
 #[test]
 fn the_pagination_bar_links_previous_and_next_through_the_content_fragment() {
     let html = bar(
-        120,
+        60,
         Paging {
             page: 2,
-            per_page: 50,
+            per_page: 25,
         },
     );
 

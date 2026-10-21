@@ -367,14 +367,14 @@ test('a wealth refresh keeps the wealth page on page 2 with its sorting and rang
   const opened = page.waitForResponse((r) => r.url().includes('/wealth/content'));
   await page.goto('/wealth?range=24h&sort=item&dir=asc&page=2');
   await opened;
-  await expect(page.locator('.pagination')).toContainText('Page 2 of 3');
+  await expect(page.locator('.pagination')).toContainText('Page 2 of 5');
   await page.evaluate(() => ((window as unknown as { marker: string }).marker = 'same page'));
 
   await stubControl('wallet', { character_id: 90000001, balance: 88_000_000 });
   await wealthPoll(page, 90000001, 'wallet');
 
   await expect(page.locator('#kpi-wallet .value')).toHaveText('88m');
-  await expect(page.locator('.pagination')).toContainText('Page 2 of 3');
+  await expect(page.locator('.pagination')).toContainText('Page 2 of 5');
   await expect(page).toHaveURL(/range=24h&sort=item&dir=asc&page=2$/);
   await expect(page.locator('#wealth-range-control [aria-current="true"]')).toHaveText('24 hours');
   await expect(page.locator('#inventory th[aria-sort="ascending"]')).toContainText('Item');
@@ -448,7 +448,7 @@ test('a new sale keeps the trades page on page 2 and updates the sold card', asy
   });
   expect(await wealthPoll(page, 90000001, 'transactions')).toBe('200 updated');
   const opened = page.waitForResponse((r) => r.url().includes('/trades/table'));
-  await page.goto('/trades?page=2');
+  await page.goto('/trades?page=2&per_page=50');
   await opened;
   await expect(page.locator('.pagination')).toContainText('Page 2 of 2');
   await expect(page.locator('#trades tbody tr')).toHaveCount(20);
@@ -528,7 +528,7 @@ test('a station book refresh updates the table in place and keeps sorting, filte
   expect((await stationSeed(page, { history })).startsWith('200 ')).toBe(true);
   await page.reload();
   const trend = page.locator('#trend');
-  await expect(trend.locator('tbody tr')).toHaveCount(30);
+  await expect(trend.locator('tbody tr')).toHaveCount(25);
 
   // Sort by volatility with 25 rows a page, change a filter, go to page 2 and scroll down.
   await trend.getByRole('link', { name: 'σ' }).click();
@@ -578,7 +578,7 @@ test('a station book refresh keeps where the page is scrolled on a long classic 
   );
   expect((await stationSeed(page, { history })).startsWith('200 ')).toBe(true);
   await page.reload();
-  await expect(page.locator('#classic tbody tr')).toHaveCount(30);
+  await expect(page.locator('#classic tbody tr')).toHaveCount(25);
   await page.waitForTimeout(500);
   await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
   const top = await page.evaluate(() => window.scrollY);
@@ -643,7 +643,7 @@ test('a poll and a fee change keep the orders page on page 2 and where the page 
     orders: Array.from({ length: 120 }, (_, i) => stubOrder(i + 1, { price: 10 + i })),
   });
   expect(await pollCharacter(page, 90000001)).toBe('200 updated');
-  await page.goto('/orders/sell?sort=price&dir=asc&page=2');
+  await page.goto('/orders/sell?sort=price&dir=asc&per_page=50&page=2');
   await expect(page.locator('#sell-orders tbody.order')).toHaveCount(50);
   // Let the refresh the page makes when its stream opens settle first.
   await page.waitForTimeout(800);

@@ -33,7 +33,7 @@ test('the base font stays at 16px however wide the window is', async ({ page }) 
   }
 });
 
-test("form fields keep Pico's size", async ({ page }) => {
+test("filter inputs keep Pico's text size and side padding, and are 2rem high", async ({ page }) => {
   await aliceTrained(page);
   await page.goto('/opportunities/trend');
   const input = page.getByLabel('Minimum margin (%)');
@@ -43,7 +43,7 @@ test("form fields keep Pico's size", async ({ page }) => {
   const sizes = await page.evaluate(() => {
     const read = (el: Element) => {
       const s = getComputedStyle(el);
-      return { height: el.getBoundingClientRect().height, padding: [s.paddingTop, s.paddingBottom, s.paddingLeft, s.paddingRight] };
+      return { height: el.getBoundingClientRect().height, font: s.fontSize, padding: [s.paddingLeft, s.paddingRight] };
     };
     const reference = document.createElement('input');
     reference.type = 'text';
@@ -54,6 +54,8 @@ test("form fields keep Pico's size", async ({ page }) => {
     reference.remove();
     return result;
   });
-  expect(sizes.own.height).toBeCloseTo(sizes.reference.height, 1);
+  expect(sizes.own.font).toBe(sizes.reference.font);
   expect(sizes.own.padding).toEqual(sizes.reference.padding);
+  expect(sizes.own.height).toBeLessThan(sizes.reference.height);
+  expect(sizes.own.height).toBeCloseTo(32, 1);
 });

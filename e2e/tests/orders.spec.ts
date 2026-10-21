@@ -371,17 +371,17 @@ async function aliceWith120Sells(page: import('@playwright/test').Page) {
 const rowIds = (page: import('@playwright/test').Page) =>
   page.locator('#sell-orders tbody.order').evaluateAll((rows) => rows.map((r) => Number(r.id.replace('order-', ''))));
 
-test('the next page shows orders 51 to 100 with the sorting and selection unchanged, and a page size of 200 shows all', async ({ page }) => {
+test('the next page shows orders 26 to 50 with the sorting and selection unchanged, and a page size of 200 shows all', async ({ page }) => {
   await aliceWith120Sells(page);
   const pagination = page.locator('.pagination');
-  await expect(pagination).toContainText('Page 1 of 3');
-  await expect(page.locator('#sell-orders tbody.order')).toHaveCount(50);
+  await expect(pagination).toContainText('Page 1 of 5');
+  await expect(page.locator('#sell-orders tbody.order')).toHaveCount(25);
 
   await pagination.getByRole('link', { name: 'Next' }).click();
   await expect(page).toHaveURL(/sort=price&dir=asc&page=2$/);
-  await expect(pagination).toContainText('Page 2 of 3');
-  expect((await rowIds(page))[0]).toBe(51);
-  expect((await rowIds(page)).at(-1)).toBe(100);
+  await expect(pagination).toContainText('Page 2 of 5');
+  expect((await rowIds(page))[0]).toBe(26);
+  expect((await rowIds(page)).at(-1)).toBe(50);
   await expect(page.locator('#kpi-sell-count .value')).toHaveText('120');
 
   await pagination.getByLabel('Rows per page').selectOption('200');
@@ -397,12 +397,12 @@ test('a page past the end shows the last page, and sorting goes back to the firs
   await aliceWith120Sells(page);
 
   await page.goto('/orders/sell?page=9');
-  await expect(page.locator('.pagination')).toContainText('Page 3 of 3');
+  await expect(page.locator('.pagination')).toContainText('Page 5 of 5');
   await expect(page.locator('#sell-orders tbody.order')).toHaveCount(20);
 
   await page.locator('#sell-orders').getByRole('link', { name: 'Price' }).click();
   await expect(page).toHaveURL(/sort=price&dir=asc$/);
-  await expect(page.locator('.pagination')).toContainText('Page 1 of 3');
+  await expect(page.locator('.pagination')).toContainText('Page 1 of 5');
 });
 
 test('the freshness is below the pagination, unfolded, without a toggle', async ({ page }) => {

@@ -977,3 +977,21 @@ async fn a_window_without_chart_data_draws_no_charts_and_does_not_fail() {
         assert!(!html.contains("<canvas"), "{table}: {html}");
     }
 }
+
+#[tokio::test]
+async fn the_detail_page_names_the_maximum_margin_when_it_hides_the_item() {
+    let (app, browser) = setup().await;
+    item(&app, 34, "Tritanium", "250.00", 100_000_000.0).await; // m 117%, above the default 80%
+
+    let html = detail(&app, &browser, "/opportunities/detail/classic/34")
+        .await
+        .text()
+        .await
+        .unwrap();
+
+    assert!(html.contains("No longer listed"), "{html}");
+    assert!(
+        html.contains("Its net margin is above your maximum margin."),
+        "{html}"
+    );
+}

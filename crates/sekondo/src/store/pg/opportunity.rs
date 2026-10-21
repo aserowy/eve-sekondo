@@ -27,33 +27,37 @@ impl PgOpportunityStore {
 #[async_trait]
 impl OpportunityStore for PgOpportunityStore {
     async fn load_settings(&self, account_id: Uuid) -> StoreResult<Option<Settings>> {
-        let row: Option<(f64, f64, String, f64)> = sqlx::query_as(
-            "SELECT min_margin::float8, min_isk_per_day::float8, search, capital::float8
+        let row: Option<(f64, f64, f64, String, f64)> = sqlx::query_as(
+            "SELECT min_margin::float8, max_margin::float8, min_isk_per_day::float8, search, capital::float8
              FROM opportunity_settings WHERE account_id = $1",
         )
         .bind(account_id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(
-            row.map(|(min_margin, min_isk_per_day, search, capital)| Settings {
+        Ok(row.map(
+            |(min_margin, max_margin, min_isk_per_day, search, capital)| Settings {
                 min_margin,
+                max_margin,
                 min_isk_per_day,
                 search,
                 capital,
-            }),
-        )
+            },
+        ))
     }
 
     async fn save_settings(&self, account_id: Uuid, settings: &Settings) -> StoreResult<()> {
         sqlx::query(
-            "INSERT INTO opportunity_settings (account_id, min_margin, min_isk_per_day, search, capital)
-             VALUES ($1, $2::float8::numeric, $3::float8::numeric, $4, $5::float8::numeric)
+            "INSERT INTO opportunity_settings (account_id, min_margin, max_margin, min_isk_per_day, search, capital)
+             VALUES ($1, $2::float8::numeric, $3::float8::numeric, $4::float8::numeric, $5,
+                     $6::float8::numeric)
              ON CONFLICT (account_id) DO UPDATE SET
-                 min_margin = excluded.min_margin, min_isk_per_day = excluded.min_isk_per_day,
+                 min_margin = excluded.min_margin, max_margin = excluded.max_margin,
+                 min_isk_per_day = excluded.min_isk_per_day,
                  search = excluded.search, capital = excluded.capital",
         )
         .bind(account_id)
         .bind(settings.min_margin)
+        .bind(settings.max_margin)
         .bind(settings.min_isk_per_day)
         .bind(&settings.search)
         .bind(settings.capital)
@@ -83,6 +87,29 @@ impl OpportunityStore for PgOpportunityStore {
         )
         .bind(account_id)
         .bind(character_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn load_page_size(&self, account_id: Uuid) -> StoreResult<Option<u32>> {
+        let row: Option<(Option<i32>,)> =
+            sqlx::query_as("SELECT per_page FROM opportunity_settings WHERE account_id = $1")
+                .bind(account_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row
+            .and_then(|(size,)| size)
+            .and_then(|size| u32::try_from(size).ok()))
+    }
+
+    async fn save_page_size(&self, account_id: Uuid, per_page: u32) -> StoreResult<()> {
+        sqlx::query(
+            "INSERT INTO opportunity_settings (account_id, per_page) VALUES ($1, $2)
+             ON CONFLICT (account_id) DO UPDATE SET per_page = excluded.per_page",
+        )
+        .bind(account_id)
+        .bind(i32::try_from(per_page).unwrap_or(i32::MAX))
         .execute(&self.pool)
         .await?;
         Ok(())

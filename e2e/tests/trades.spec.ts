@@ -165,38 +165,38 @@ const transactionIds = (page: import('@playwright/test').Page) =>
 
 test('the table is paginated newest first, the cards cover every page, and a range switch goes back to page 1', async ({ page }) => {
   await aliceWith120Sales(page);
-  await expect(page.locator('.pagination')).toContainText('Page 1 of 3');
-  await expect(page.locator('#trades tbody tr')).toHaveCount(50);
+  await expect(page.locator('.pagination')).toContainText('Page 1 of 5');
+  await expect(page.locator('#trades tbody tr')).toHaveCount(25);
   await expect(page.locator('#kpi-sold .value')).toHaveAttribute('title', '12,000.00 ISK');
   expect((await transactionIds(page))[0]).toBe(120);
 
-  await page.locator('.pagination').getByRole('link', { name: 'Next' }).click();
-  await expect(page.locator('.pagination')).toContainText('Page 2 of 3');
-  await page.locator('.pagination').getByRole('link', { name: 'Next' }).click();
-  await expect(page).toHaveURL(/page=3$/);
-  await expect(page.locator('.pagination')).toContainText('Page 3 of 3');
+  for (const n of [2, 3, 4, 5]) {
+    await page.locator('.pagination').getByRole('link', { name: 'Next' }).click();
+    await expect(page.locator('.pagination')).toContainText(`Page ${n} of 5`);
+  }
+  await expect(page).toHaveURL(/page=5$/);
   expect(await transactionIds(page)).toEqual(Array.from({ length: 20 }, (_, i) => 20 - i));
   await expect(page.locator('#kpi-sold .value')).toHaveAttribute('title', '12,000.00 ISK');
 
   await page.locator('#trades-range-control').getByRole('button', { name: '30 days' }).click();
   await expect(page).toHaveURL(/\/trades\?range=30d$/);
-  await expect(page.locator('.pagination')).toContainText('Page 1 of 3');
+  await expect(page.locator('.pagination')).toContainText('Page 1 of 5');
   await expect(page.locator('#trades-range-control a[aria-current="true"]')).toHaveText('30 days');
 });
 
 test('a filter change goes back to page 1 and the freshness is at the end, unfolded', async ({ page }) => {
   await aliceWith120Sales(page);
   await page.locator('.pagination').getByRole('link', { name: 'Next' }).click();
-  await expect(page.locator('.pagination')).toContainText('Page 2 of 3');
+  await expect(page.locator('.pagination')).toContainText('Page 2 of 5');
   await expect(page.getByRole('button', { name: 'Freshness' })).toHaveCount(0);
   const bar = (await page.locator('.pagination').boundingBox())!;
   const freshness = page.locator('#freshness');
   await expect(freshness).toContainText('Last update');
   expect((await freshness.boundingBox())!.y).toBeGreaterThanOrEqual(bar.y + bar.height);
 
-  await page.getByRole('combobox', { name: 'Rows per page' }).selectOption('25');
-  await expect(page).toHaveURL(/per_page=25$/);
-  await expect(page.locator('.pagination')).toContainText('Page 1 of 5');
+  await page.getByRole('combobox', { name: 'Rows per page' }).selectOption('50');
+  await expect(page).toHaveURL(/per_page=50$/);
+  await expect(page.locator('.pagination')).toContainText('Page 1 of 3');
 });
 
 test('the time range is a group of joined buttons under a visible "Range" label', async ({ page }) => {

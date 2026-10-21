@@ -274,14 +274,33 @@ document.addEventListener('htmx:afterSettle', (event) => {
 // ---- pagination ----
 // Previous and next are links with their own hx-get. The page-size <select> has one URL per option,
 // so a change fetches the option's content fragment and then puts the option's page URL in the
-// address bar, the same pair of URLs the links carry.
-document.addEventListener('change', (event) => {
+// address bar, the same pair of URLs the links carry. A select with data-save first posts the size
+// to that URL (the body's CSRF header is inherited through source: select); when that fails, the
+// table is left alone and the select goes back to the size that is shown.
+function saveSize(select, option) {
+  return new Promise((resolve) => {
+    const done = (event) => {
+      if (event.target !== select) return;
+      document.body.removeEventListener('htmx:afterRequest', done);
+      resolve(event.detail.successful);
+    };
+    document.body.addEventListener('htmx:afterRequest', done);
+    htmx
+      .ajax('POST', select.dataset.save, { source: select, values: { per_page: option.value }, swap: 'none' })
+      .catch(() => {});
+  });
+}
+
+document.addEventListener('change', async (event) => {
   const select = event.target instanceof Element && event.target.closest('select[data-page-size]');
   const option = select?.selectedOptions[0];
   if (!option) return;
-  htmx
-    .ajax('GET', option.dataset.content, { target: '#content', swap: 'innerHTML show:#content:top' })
-    .then(() => history.pushState({}, '', option.dataset.href));
+  if (select.dataset.save && !(await saveSize(select, option))) {
+    select.value = [...select.options].find((o) => o.defaultSelected)?.value ?? select.value;
+    return;
+  }
+  await htmx.ajax('GET', option.dataset.content, { target: '#content', swap: 'innerHTML show:#content:top' });
+  history.pushState({}, '', option.dataset.href);
 });
 
 // ---- charts ----

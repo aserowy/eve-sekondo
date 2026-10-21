@@ -296,6 +296,7 @@ test('a first visit shows the default filters', async ({ page }) => {
   await page.goto('/opportunities/classic');
 
   await expect(filters(page).getByLabel('Minimum margin (%)')).toHaveValue('5');
+  await expect(filters(page).getByLabel('Maximum margin (%)')).toHaveValue('80');
   await expect(filters(page).getByLabel('Minimum ISK/day')).toHaveValue('5000000');
   await expect(filters(page).getByLabel('Item name')).toHaveValue('');
   await expect(filters(page).getByLabel('Capital per item (ISK)')).toHaveValue('100000000');
@@ -372,6 +373,98 @@ test('a capital of zero is rejected with a message and the tables stay as they w
   // Nothing was stored: a reload shows the default again.
   await page.reload();
   await expect(filters(page).getByLabel('Capital per item (ISK)')).toHaveValue('100000000');
+});
+
+/** One classic row on the classic page, ready for filter changes. */
+async function withOneClassicRow(page: Page) {
+  await aliceTrained(page);
+  await page.goto('/opportunities/classic');
+  await stubMarket(bookOf(34, 100, 130, 1));
+  await stubControl('esi-expires', { seconds: 300 });
+  expect(await stationBook(page)).toBe('200 updated');
+  expect((await stationSeed(page, { history: calm(34) })).startsWith('200 ')).toBe(true);
+  await page.reload();
+  await expect(page.locator('#classic tbody tr')).toHaveCount(1);
+}
+
+test('a maximum margin below the minimum marks only that input invalid and keeps the table', async ({ page }) => {
+  await withOneClassicRow(page);
+  const minimum = filters(page).getByLabel('Minimum margin (%)');
+  const maximum = filters(page).getByLabel('Maximum margin (%)');
+
+  await minimum.fill('10');
+  await minimum.press('Tab');
+  await expect(page.locator('#classic tbody tr')).toHaveCount(1);
+  await maximum.fill('5');
+  await maximum.press('Tab');
+
+  await expect(maximum).toHaveAttribute('aria-invalid', 'true');
+  await expect(filters(page).locator('[aria-invalid="true"]')).toHaveCount(1);
+  await expect(filters(page).locator('small')).toHaveCount(1);
+  await expect(filters(page).locator('small')).toContainText('maximum margin must be at least the minimum margin');
+  await expect(maximum).toHaveValue('5');
+  await expect(page.locator('#classic tbody tr')).toHaveCount(1);
+});
+
+test('an empty maximum margin says it must be a number of at least 0 percent', async ({ page }) => {
+  await withOneClassicRow(page);
+  const maximum = filters(page).getByLabel('Maximum margin (%)');
+
+  await maximum.fill('');
+  await maximum.press('Tab');
+
+  await expect(maximum).toHaveAttribute('aria-invalid', 'true');
+  await expect(filters(page).locator('small')).toContainText('maximum margin must be a number of at least 0 percent');
+  await expect(page.locator('#classic tbody tr')).toHaveCount(1);
+});
+
+// ---- the stored page size ----
+
+/** `count` classic items on the classic page, with the default page size. */
+async function withClassicItems(page: Page, count: number) {
+  await aliceTrained(page);
+  await page.goto('/opportunities/classic');
+  const types = Array.from({ length: count }, (_, i) => 1000 + i);
+  await fill(page, types.flatMap((type, i) => bookOf(type, 100, 130, 1 + 2 * i)), types.flatMap((type) => calm(type)));
+  await expect(page.locator('#classic tbody tr')).toHaveCount(25);
+}
+
+test('a chosen page size is saved, kept on the way to a detail page and back, and on a later visit', async ({ page }) => {
+  await withClassicItems(page, 30);
+  const sizes = page.locator('.pagination').getByLabel('Rows per page');
+  await expect(sizes).toHaveValue('25');
+
+  const saved = page.waitForResponse((r) => r.url().endsWith('/opportunities/page-size') && r.request().method() === 'POST');
+  await sizes.selectOption('10');
+  expect((await saved).status()).toBe(204);
+  await expect(page.locator('#classic tbody tr')).toHaveCount(10);
+  await expect(page.locator('.pagination')).toContainText('Page 1 of 3');
+  await expect(page).not.toHaveURL(/per_page/);
+
+  await page.locator('#classic tbody tr').first().click();
+  await expect(page).toHaveURL(/\/opportunities\/classic\/\d+/);
+  expect(page.url()).not.toContain('per_page');
+  await page.locator('nav.sub-menu').getByRole('link', { name: 'Classic spread trade' }).click();
+  await expect(page.locator('#classic tbody tr')).toHaveCount(10);
+  await expect(page.locator('.pagination').getByLabel('Rows per page')).toHaveValue('10');
+
+  // A fresh visit without any query: the size is kept for the account.
+  await page.goto('/opportunities/classic');
+  await expect(page.locator('#classic tbody tr')).toHaveCount(10);
+  await expect(page.locator('.pagination').getByLabel('Rows per page')).toHaveValue('10');
+});
+
+test('a page size the server refuses to save is not shown', async ({ page }) => {
+  await withClassicItems(page, 30);
+  await page.route('**/opportunities/page-size', (route) => route.fulfill({ status: 500 }));
+  const sizes = page.locator('.pagination').getByLabel('Rows per page');
+  const url = page.url();
+
+  await sizes.selectOption('10');
+
+  await expect(sizes).toHaveValue('25');
+  await expect(page.locator('#classic tbody tr')).toHaveCount(25);
+  expect(page.url()).toBe(url);
 });
 
 // ---- the detail page ----

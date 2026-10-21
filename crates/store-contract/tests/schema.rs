@@ -1107,8 +1107,8 @@ async fn opportunity_settings_default_and_go_with_the_account(pool: PgPool) {
             .await
             .unwrap();
     }
-    let row: (String, String, String, String) = sqlx::query_as(
-        "SELECT min_margin::text, min_isk_per_day::text, search, capital::text \
+    let row: (String, String, String, String, String) = sqlx::query_as(
+        "SELECT min_margin::text, max_margin::text, min_isk_per_day::text, search, capital::text \
          FROM opportunity_settings WHERE account_id = $1",
     )
     .bind(account)
@@ -1119,6 +1119,7 @@ async fn opportunity_settings_default_and_go_with_the_account(pool: PgPool) {
         row,
         (
             "0.05".into(),
+            "0.80".into(),
             "5000000".into(),
             String::new(),
             "100000000".into()

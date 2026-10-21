@@ -207,7 +207,7 @@ Every group SHALL start at the top of its line of the filter section. A group th
 
 The filters SHALL be structured as form fields:
 - **Character filter**: a group with the visible legend "Characters" above the characters' checkboxes. The checkboxes are laid out side by side, each with its character's name as its label.
-- **Text and number fields**: each field's label text is shown above its input. The fields of one form are laid out side by side in columns of equal width that wrap onto further rows when the width does not fit them. Every such field, including a field that searches by name, SHALL be a plain text input with the same shape, size and padding as the other fields, without a search icon, rounded search shape or built-in clear button.
+- **Text and number fields**: each field's label text is shown above its input. The fields of one form are laid out side by side in columns of equal width that wrap onto further rows when the width does not fit them. Every such field, including a field that searches by name, SHALL be a plain text input with the same shape, size and padding as the other fields, without a search icon, rounded search shape or built-in clear button. Every such input SHALL be 2rem high, border included, and SHALL keep the body text size: only its vertical padding is reduced. Wrapped rows of fields SHALL be 0.75rem apart, from the bottom of one row's inputs to the top of the next row's labels. Neighbouring columns stay 1rem apart.
 - **Time range**: a group of joined buttons, one per range, with the visible label "Range" above it. The current range is shown as the highlighted button and is exposed to assistive technology as current.
 - **Fee character**: a group with the visible legend "Fees" above one radio button per selected character, laid out side by side, each with its character's name as its label. Exactly one is checked. Helper text below the radio buttons tells the rates in use. With no character selected, the group shows the helper text only.
 
@@ -233,7 +233,15 @@ The filter sections are:
 
 #### Scenario: Labels above inputs
 - **WHEN** a signed-in user opens the trend page at 1920×1080
-- **THEN** the "Minimum margin (%)", "Minimum ISK/day", "Item name" and "Capital per item (ISK)" labels are each above their input, and the four inputs are equally wide
+- **THEN** the "Minimum margin (%)", "Maximum margin (%)", "Minimum ISK/day", "Item name" and "Capital per item (ISK)" labels are each above their input, and the five inputs are equally wide
+
+#### Scenario: Low inputs at body text size
+- **WHEN** a signed-in user opens the trend page at 1920×1080
+- **THEN** every opportunity filter input is 2rem high, border included, and its computed font size is the body text size
+
+#### Scenario: Wrapped rows apart
+- **WHEN** a signed-in user opens the trend page in a window so narrow that the opportunity filters wrap onto two rows
+- **THEN** the top edge of each label in the second row is 0.75rem below the bottom edge of the input above it
 
 #### Scenario: Item name is a plain input
 - **WHEN** a signed-in user opens the trend page
@@ -368,10 +376,10 @@ Every KPI SHALL be shown as its own card holding, from top to bottom, the KPI's 
 
 #### Scenario: KPIs cover every table page
 - **WHEN** a user with 120 sell orders opens the sell orders page with the default page size
-- **THEN** the table shows 50 orders and the order count card reads 120
+- **THEN** the table shows 25 orders and the order count card reads 120
 
 ### Requirement: Pagination
-Every table on a table page SHALL be paginated on the server. The page number SHALL be given by the `page` query parameter, starting at 1, and the page size by the `per_page` query parameter, one of 25, 50, 100 or 200. A missing or unknown page size SHALL select 50. A missing, malformed or non-positive page number SHALL select page 1, and a page number past the last page SHALL select the last page. The page SHALL show a control to go to the previous and the next page, the current page and the number of pages as "Page x of y", and a control to choose the page size.
+Every table on a table page SHALL be paginated on the server. The page number SHALL be given by the `page` query parameter, starting at 1, and the page size by the `per_page` query parameter, one of 10, 25, 50, 100 or 200. An unknown page size SHALL select 25. A missing page size SHALL select the page's stored page size where the page has one, as the opportunity table pages do, and 25 otherwise. A missing, malformed or non-positive page number SHALL select page 1, and a page number past the last page SHALL select the last page. The page SHALL show a control to go to the previous and the next page, the current page and the number of pages as "Page x of y", and a control to choose the page size.
 
 The pagination SHALL be the last block of the main content, below the table, except for an explainer card, which follows it. It SHALL NOT be part of the page footer. When the page is shorter than the window, the pagination SHALL sit at the bottom of the window, directly above the explainer card if the page has one and otherwise directly above the page footer, with the spare height between the table and the pagination. When the page is taller than the window, the pagination SHALL follow the table and SHALL only come into view when the page is scrolled to near its end. It SHALL NOT be fixed over the content. A live refresh or a change of page or page size SHALL keep this placement.
 
@@ -379,11 +387,19 @@ Going to another page or choosing another page size SHALL update the URL and the
 
 #### Scenario: Default page size
 - **WHEN** a user with 120 sell orders opens the sell orders page
-- **THEN** the table shows the first 50 orders and the pagination reads "Page 1 of 3"
+- **THEN** the table shows the first 25 orders and the pagination reads "Page 1 of 5"
+
+#### Scenario: Page sizes
+- **WHEN** a signed-in user opens the page-size control of any table page
+- **THEN** it offers 10, 25, 50, 100 and 200, in this order
+
+#### Scenario: Smallest page size
+- **WHEN** a user with 120 sell orders chooses a page size of 10
+- **THEN** the URL carries `per_page=10`, the table shows 10 orders and the pagination reads "Page 1 of 12"
 
 #### Scenario: Next page
 - **WHEN** that user activates the next page control
-- **THEN** the URL carries `page=2`, the table shows orders 51 to 100, and the sorting and the character selection are unchanged
+- **THEN** the URL carries `page=2`, the table shows orders 26 to 50, and the sorting and the character selection are unchanged
 
 #### Scenario: Larger page size
 - **WHEN** that user chooses a page size of 200 while on page 2

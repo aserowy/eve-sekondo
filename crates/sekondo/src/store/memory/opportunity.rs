@@ -30,6 +30,7 @@ impl OpportunityStore for MemOpportunityStore {
             .get(&account_id)
             .map(|row| Settings {
                 min_margin: row.min_margin.to_f64(),
+                max_margin: row.max_margin.to_f64(),
                 min_isk_per_day: row.min_isk_per_day.to_f64(),
                 search: row.search.clone(),
                 capital: row.capital.to_f64(),
@@ -41,13 +42,14 @@ impl OpportunityStore for MemOpportunityStore {
         if !tables.accounts.contains_key(&account_id) {
             return Err(crate::store::StoreError::MissingParent);
         }
-        let fee_character_id = tables
+        let (fee_character_id, per_page) = tables
             .opportunity_settings
             .get(&account_id)
-            .and_then(|row| row.fee_character_id);
-        tables
-            .opportunity_settings
-            .insert(account_id, SettingsRow::of(settings, fee_character_id));
+            .map_or((None, None), |row| (row.fee_character_id, row.per_page));
+        tables.opportunity_settings.insert(
+            account_id,
+            SettingsRow::of(settings, fee_character_id, per_page),
+        );
         Ok(())
     }
 
@@ -71,8 +73,29 @@ impl OpportunityStore for MemOpportunityStore {
         tables
             .opportunity_settings
             .entry(account_id)
-            .or_insert_with(|| SettingsRow::of(&Settings::default(), None))
+            .or_insert_with(|| SettingsRow::of(&Settings::default(), None, None))
             .fee_character_id = character_id;
+        Ok(())
+    }
+
+    async fn load_page_size(&self, account_id: Uuid) -> StoreResult<Option<u32>> {
+        let tables = self.shared.lock();
+        Ok(tables
+            .opportunity_settings
+            .get(&account_id)
+            .and_then(|row| row.per_page))
+    }
+
+    async fn save_page_size(&self, account_id: Uuid, per_page: u32) -> StoreResult<()> {
+        let mut tables = self.shared.lock();
+        if !tables.accounts.contains_key(&account_id) {
+            return Err(crate::store::StoreError::MissingParent);
+        }
+        tables
+            .opportunity_settings
+            .entry(account_id)
+            .or_insert_with(|| SettingsRow::of(&Settings::default(), None, None))
+            .per_page = Some(per_page);
         Ok(())
     }
 

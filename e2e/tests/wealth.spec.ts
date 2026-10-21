@@ -310,12 +310,12 @@ test('the inventory is paginated after sorting and a page-size change starts on 
   await wealthPoll(page, 90000001, 'assets');
   await page.goto('/wealth?sort=item&dir=asc');
   const pagination = page.locator('.pagination');
-  await expect(pagination).toContainText('Page 1 of 3');
-  await expect(page.locator('#inventory tbody tr')).toHaveCount(50);
+  await expect(pagination).toContainText('Page 1 of 5');
+  await expect(page.locator('#inventory tbody tr')).toHaveCount(25);
 
   await pagination.getByRole('link', { name: 'Next' }).click();
   await expect(page).toHaveURL(/sort=item&dir=asc&page=2$/);
-  await expect(pagination).toContainText('Page 2 of 3');
+  await expect(pagination).toContainText('Page 2 of 5');
 
   await pagination.getByLabel('Rows per page').selectOption('100');
   await expect(page).toHaveURL(/per_page=100$/);

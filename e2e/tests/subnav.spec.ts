@@ -185,7 +185,7 @@ test('only the sub-menu stays at the top: the page title scrolls out of view', a
   await stubControl('orders', { character_id: 90000001, orders: Array.from({ length: 100 }, (_, i) => stubOrder(i + 1)) });
   await pollCharacter(page, 90000001);
   await page.goto('/orders/sell');
-  await expect(page.locator('#sell-orders tbody.order')).toHaveCount(50);
+  await expect(page.locator('#sell-orders tbody.order')).toHaveCount(25);
 
   await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(300);

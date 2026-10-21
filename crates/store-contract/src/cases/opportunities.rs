@@ -37,6 +37,17 @@ pub fn cases() -> Vec<Case> {
             "opportunities/filters-and-the-fee-character-are-saved-independently",
             |s| boxed(filters_and_fee_character_are_independent(s)),
         ),
+        case(
+            "opportunities/a-saved-page-size-comes-back-and-is-replaced",
+            |s| boxed(page_size_round_trip(s)),
+        ),
+        case("opportunities/a-page-size-belongs-to-its-account", |s| {
+            boxed(page_size_per_account(s))
+        }),
+        case(
+            "opportunities/filters-and-the-page-size-are-saved-independently",
+            |s| boxed(filters_and_page_size_are_independent(s)),
+        ),
         case("opportunities/the-station-sync-lists-what-ran", |s| {
             boxed(station_sync(s))
         }),
@@ -72,6 +83,7 @@ async fn settings_round_trip(stores: &Stores) {
     let account = account_with(stores, &[1]).await;
     let settings = Settings {
         min_margin: 0.075,
+        max_margin: 1.5,
         min_isk_per_day: 12_500_000.0,
         search: "pyer".to_owned(),
         capital: 2_000_000_000.0,
@@ -88,6 +100,7 @@ async fn settings_round_trip(stores: &Stores) {
     );
     let replaced = Settings {
         min_margin: 0.0,
+        max_margin: 0.0,
         min_isk_per_day: 0.0,
         search: String::new(),
         capital: 1.0,
@@ -266,6 +279,111 @@ async fn filters_and_fee_character_are_independent(stores: &Stores) {
     assert_eq!(
         stores.opportunities.load_settings(account).await.unwrap(),
         Some(settings)
+    );
+}
+
+async fn page_size_round_trip(stores: &Stores) {
+    let account = account_with(stores, &[1]).await;
+    assert_eq!(
+        stores.opportunities.load_page_size(account).await.unwrap(),
+        None
+    );
+
+    // Saving one with no filters saved yet creates the row with the default filters.
+    stores
+        .opportunities
+        .save_page_size(account, 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        stores.opportunities.load_page_size(account).await.unwrap(),
+        Some(100)
+    );
+    assert_eq!(
+        stores.opportunities.load_settings(account).await.unwrap(),
+        Some(Settings::default())
+    );
+
+    stores
+        .opportunities
+        .save_page_size(account, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        stores.opportunities.load_page_size(account).await.unwrap(),
+        Some(10)
+    );
+    let unknown = stores
+        .opportunities
+        .save_page_size(uuid::Uuid::new_v4(), 10)
+        .await;
+    assert!(
+        matches!(unknown, Err(StoreError::MissingParent)),
+        "{unknown:?}"
+    );
+}
+
+async fn page_size_per_account(stores: &Stores) {
+    let mine = account_with(stores, &[1]).await;
+    let theirs = account_with(stores, &[2]).await;
+    stores.opportunities.save_page_size(mine, 10).await.unwrap();
+
+    assert_eq!(
+        stores.opportunities.load_page_size(theirs).await.unwrap(),
+        None
+    );
+    // The page size goes with the account.
+    stores.accounts.delete_character(1).await.unwrap();
+    assert_eq!(
+        stores.opportunities.load_page_size(mine).await.unwrap(),
+        None
+    );
+}
+
+async fn filters_and_page_size_are_independent(stores: &Stores) {
+    let account = account_with(stores, &[1]).await;
+    let settings = Settings {
+        search: "pyer".to_owned(),
+        ..Settings::default()
+    };
+
+    // A page size saved first survives saving the filters, and the fee character ...
+    stores
+        .opportunities
+        .save_page_size(account, 50)
+        .await
+        .unwrap();
+    settings
+        .save(&*stores.opportunities, account)
+        .await
+        .unwrap();
+    stores
+        .opportunities
+        .save_fee_character(account, Some(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        stores.opportunities.load_page_size(account).await.unwrap(),
+        Some(50)
+    );
+
+    // ... and the filters and the fee character saved first survive saving a page size.
+    stores
+        .opportunities
+        .save_page_size(account, 200)
+        .await
+        .unwrap();
+    assert_eq!(
+        stores.opportunities.load_settings(account).await.unwrap(),
+        Some(settings)
+    );
+    assert_eq!(
+        stores
+            .opportunities
+            .load_fee_character(account)
+            .await
+            .unwrap(),
+        Some(1)
     );
 }
 
