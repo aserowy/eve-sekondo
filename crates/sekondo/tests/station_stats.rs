@@ -1,9 +1,16 @@
 mod common;
 
 use common::PollEnv;
-use sekondo::{clock::Clock, opportunities::stats};
+use sekondo::{
+    clock::Clock,
+    opportunities::{
+        analysis::{Direction, WindowKind},
+        stats,
+    },
+    store::WindowRow,
+};
 use serde_json::{Value, json};
-use time::{Date, Duration, OffsetDateTime, Weekday};
+use time::{Date, Duration, OffsetDateTime};
 
 const FORGE: i64 = 10000002;
 const JITA_44: i64 = 60003760;
@@ -294,106 +301,287 @@ async fn an_item_with_five_days_of_history_has_no_volatility() {
     assert_eq!((stats.returns, stats.sigma), (Some(4), None));
 }
 
-// ---- expansion fields: when the hourly rollup advanced ----
+// ---- flagging completed days ----
 
-/// The most recent dates before today on this weekday, nearest first.
-fn recent(env: &PollEnv, weekday: Weekday, count: usize) -> Vec<i64> {
-    (1..=28)
-        .filter(|back| day(env, *back).weekday() == weekday)
-        .take(count)
+/// Midnight UTC of the day `back` days before today.
+fn midnight(env: &PollEnv, back: i64) -> OffsetDateTime {
+    day(env, back).midnight().assume_utc()
+}
+
+/// One snapshot of item 34 at `hour`:10 of the day `back` days ago, with these best prices.
+async fn hour_snapshot(
+    env: &PollEnv,
+    back: i64,
+    hour: i64,
+    buy: f64,
+    sell: f64,
+    taken: (i64, i64),
+) {
+    env.stores
+        .station
+        .seed_snapshots(
+            FORGE,
+            JITA_44,
+            &[sekondo::store::SeedSnapshotRow {
+                recorded_at: midnight(env, back) + Duration::hours(hour) + Duration::minutes(10),
+                type_id: 34,
+                best_buy: buy,
+                best_sell: sell,
+                buy_near_units: 10,
+                buy_near_orders: 2,
+                sell_near_units: 20,
+                sell_near_orders: 3,
+                buy_units: 100,
+                sell_units: 200,
+                buy_taken: taken.0,
+                sell_taken: taken.1,
+            }],
+        )
+        .await
+        .unwrap();
+}
+
+/// The hours `0..hours` of a day with a spread of 10%.
+async fn quiet_day(env: &PollEnv, back: i64, hours: i64) {
+    for hour in 0..hours {
+        hour_snapshot(env, back, hour, 100.0, 110.0, (0, 0)).await;
+    }
+}
+
+async fn flag(env: &PollEnv) -> usize {
+    stats::flag_completed_days(&*env.stores.station, env.clock.now())
+        .await
+        .unwrap()
+}
+
+async fn flagged(env: &PollEnv) -> Vec<(Date, i32, i32)> {
+    env.stores
+        .station
+        .flagged_days(FORGE, JITA_44, day(env, 400))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|f| (f.day, f.hours, f.expanded_hours))
         .collect()
 }
 
 #[tokio::test]
-async fn expansion_fields_follow_the_hourly_rollup_and_nothing_else() {
+async fn a_completed_day_is_flagged_once_and_a_running_day_is_not() {
     let env = PollEnv::new().await;
-    tradable_34(&env).await;
-    env.station.refresh().await;
-    // 28 days of history with a spread of 5%, except three of the last four Tuesdays.
-    let tuesdays = recent(&env, Weekday::Tuesday, 4);
-    let peaks = [122.5, 121.8, 120.4];
-    for back in 1..=28 {
-        let expanded = tuesdays[..3].iter().position(|t| *t == back);
-        let high = expanded.map_or(105.0, |i| peaks[i]);
-        history_row(&env, 34, back, 102.0, high, 100.0, 500).await;
+    // Three days ago: a sell jump at 18:00. Two days ago: quiet, but the rollup ends at 23:00
+    // that day, so it is not complete yet.
+    quiet_day(&env, 3, 18).await;
+    hour_snapshot(&env, 3, 18, 100.0, 140.0, (0, 50)).await;
+    for hour in 19..24 {
+        hour_snapshot(&env, 3, hour, 100.0, 110.0, (0, 0)).await;
     }
-    // Without a rollup there is nothing to advance.
-    assert!(
-        !stats::refresh_expansions_if_advanced(&*env.stores.station, env.clock.now())
-            .await
-            .unwrap()
-    );
-    assert_eq!(stats_of(&env, 34).await.unwrap().expansion_at, None);
-
-    // Own snapshots of a single hour, rolled up.
-    let first_hour = env.clock.now() - Duration::hours(3);
-    snapshot_at(&env, first_hour, 34, (0, 0)).await;
+    quiet_day(&env, 2, 24).await;
     roll_up(&env).await;
-    assert!(
-        stats::refresh_expansions_if_advanced(&*env.stores.station, env.clock.now())
-            .await
-            .unwrap()
-    );
 
-    let stats = stats_of(&env, 34).await.unwrap();
-    // Less than 7 days of own snapshots: a weekday window from the daily figures. P25 of
-    // 120.40, 121.80 and 122.50 is 121.10; one tick below is 121.00.
-    assert_eq!(stats.expansion_kind.as_deref(), Some("weekday"));
+    assert_eq!(flag(&env).await, 1, "only the third day is complete");
+
+    assert_eq!(flagged(&env).await, [(day(&env, 3), 24, 1)]);
+    let hours = env
+        .stores
+        .station
+        .expanded_hours(FORGE, JITA_44, midnight(&env, 400))
+        .await
+        .unwrap();
+    assert_eq!(hours.len(), 1);
+    let hour = &hours[0].hour;
+    assert_eq!(hour.start, midnight(&env, 3) + Duration::hours(18));
     assert_eq!(
-        stats.expansion_weekday,
-        Some(1),
-        "Tuesday, counted from Monday"
+        hour.direction,
+        sekondo::opportunities::analysis::Direction::Spike
     );
-    assert_eq!(stats.expansion_hour, None);
-    assert_eq!(stats.expansion_sell.as_deref(), Some("121.00"));
-    let marker = stats.expansion_at.expect("the rollup it was computed for");
+    assert!((hour.ratio - 140.0 / 110.0).abs() < 1e-9, "{}", hour.ratio);
+    assert_eq!((hour.extreme_cents, hour.taken), (14_000, 50));
 
-    // Nothing advanced: a book refresh leaves the expansion fields alone, and no recompute runs.
-    env.clock.advance(Duration::minutes(6));
-    env.station.refresh().await;
-    assert!(
-        !stats::refresh_expansions_if_advanced(&*env.stores.station, env.clock.now())
-            .await
-            .unwrap()
-    );
-    assert_eq!(stats_of(&env, 34).await.unwrap().expansion_at, Some(marker));
-
-    // A newer hour rolls up: the fields are computed again.
-    env.clock.advance(Duration::hours(2));
-    snapshot_at(&env, env.clock.now(), 34, (0, 0)).await;
+    // An hour on the next day after its first hour completes the second day.
+    hour_snapshot(&env, 1, 1, 100.0, 110.0, (0, 0)).await;
     roll_up(&env).await;
-    assert!(
-        stats::refresh_expansions_if_advanced(&*env.stores.station, env.clock.now())
-            .await
-            .unwrap()
+    assert_eq!(flag(&env).await, 1);
+    assert_eq!(
+        flagged(&env).await,
+        [(day(&env, 3), 24, 1), (day(&env, 2), 24, 0)]
     );
-    assert!(stats_of(&env, 34).await.unwrap().expansion_at > Some(marker));
+
+    // Nothing new: nothing is flagged again.
+    assert_eq!(flag(&env).await, 0);
+    assert_eq!(flagged(&env).await.len(), 2);
 }
 
 #[tokio::test]
-async fn an_item_without_a_recurring_window_has_empty_expansion_fields_but_a_marker() {
+async fn the_first_run_flags_every_retained_day() {
+    let env = PollEnv::new().await;
+    for back in 2..=5 {
+        quiet_day(&env, back, 24).await;
+    }
+    hour_snapshot(&env, 1, 2, 100.0, 110.0, (0, 0)).await;
+    roll_up(&env).await;
+
+    assert_eq!(flag(&env).await, 4);
+    assert_eq!(flagged(&env).await.len(), 4);
+    assert_eq!(flag(&env).await, 0);
+}
+
+#[tokio::test]
+async fn a_day_with_nineteen_hours_is_flagged_but_has_no_expanded_hours() {
+    let env = PollEnv::new().await;
+    quiet_day(&env, 2, 18).await;
+    hour_snapshot(&env, 2, 20, 100.0, 300.0, (0, 9)).await;
+    hour_snapshot(&env, 1, 2, 100.0, 110.0, (0, 0)).await;
+    roll_up(&env).await;
+
+    assert_eq!(flag(&env).await, 1);
+
+    assert_eq!(flagged(&env).await, [(day(&env, 2), 19, 0)]);
+    assert!(
+        env.stores
+            .station
+            .expanded_hours(FORGE, JITA_44, midnight(&env, 400))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+// ---- recurring windows: when the hourly rollup advanced ----
+
+async fn refresh_expansions(env: &PollEnv) -> bool {
+    stats::refresh_expansions_if_advanced(&*env.stores.station, env.clock.now())
+        .await
+        .unwrap()
+}
+
+/// An item row for item 34, so that there is something to compute the windows for.
+async fn item_row(env: &PollEnv) {
+    env.stores
+        .station
+        .seed_item_stats(
+            FORGE,
+            JITA_44,
+            34,
+            &Stats {
+                book_at: Some(env.clock.now()),
+                best_buy: Some("100.00".to_owned()),
+                best_sell: Some("110.00".to_owned()),
+                buy_near_orders: Some(1),
+                sell_near_orders: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+async fn windows(env: &PollEnv) -> Vec<WindowRow> {
+    env.stores.station.windows(FORGE, JITA_44).await.unwrap()
+}
+
+/// Item 34 on `days_back` days: a spike at 18:00 (the best sell jumps to 160.00, 100 units taken
+/// from sell orders) and a dip at 11:00 (the best buy falls to 60.00, 40 units taken from buy
+/// orders), the rest at 100.00 / 110.00.
+async fn spike_and_dip_days(env: &PollEnv, days_back: std::ops::RangeInclusive<i64>) {
+    for back in days_back {
+        for hour in 0..24 {
+            let (buy, sell, taken) = match hour {
+                11 => (60.0, 110.0, (40, 0)),
+                18 => (100.0, 160.0, (0, 100)),
+                _ => (100.0, 110.0, (0, 0)),
+            };
+            hour_snapshot(env, back, hour, buy, sell, taken).await;
+        }
+    }
+}
+
+fn daily(hour: u8, direction: Direction, price_cents: i64, v_win: f64) -> WindowRow {
+    WindowRow {
+        type_id: 34,
+        kind: WindowKind::HourOfDay { hour },
+        direction,
+        price_cents,
+        occurrences: 8,
+        covered: 8,
+        v_win,
+    }
+}
+
+#[tokio::test]
+async fn an_item_with_a_spike_and_a_dip_window_stores_both() {
+    let env = PollEnv::new().await;
+    item_row(&env).await;
+    spike_and_dip_days(&env, 2..=9).await;
+    hour_snapshot(&env, 1, 1, 100.0, 110.0, (0, 0)).await;
+    roll_up(&env).await;
+
+    assert!(refresh_expansions(&env).await);
+
+    // The dip: one tick above 0.6 x the median best buy of 100.00 (60.00 -> 60.01). The spike: one
+    // tick below 160.00 / 110.00 x the median best sell of 110.00 (160.00 -> 159.90).
+    assert_eq!(
+        windows(&env).await,
+        [
+            daily(11, Direction::Dip, 6_001, 40.0),
+            daily(18, Direction::Spike, 15_990, 100.0)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn an_item_that_turns_jumpy_loses_its_windows() {
+    let env = PollEnv::new().await;
+    item_row(&env).await;
+    spike_and_dip_days(&env, 5..=12).await;
+    hour_snapshot(&env, 4, 1, 100.0, 110.0, (0, 0)).await;
+    roll_up(&env).await;
+    assert!(refresh_expansions(&env).await);
+    assert_eq!(windows(&env).await.len(), 2);
+
+    // Three days on which 11 of 24 hours jump: 49 of 264 hours (19%) have expanded.
+    for back in 2..=4 {
+        for hour in 0..24 {
+            let sell = if hour < 11 { 160.0 } else { 110.0 };
+            hour_snapshot(&env, back, hour, 100.0, sell, (0, 5)).await;
+        }
+    }
+    hour_snapshot(&env, 1, 1, 100.0, 110.0, (0, 0)).await;
+    roll_up(&env).await;
+    assert!(refresh_expansions(&env).await);
+
+    assert_eq!(windows(&env).await, []);
+}
+
+#[tokio::test]
+async fn windows_follow_the_hourly_rollup_and_nothing_else() {
     let env = PollEnv::new().await;
     tradable_34(&env).await;
     env.station.refresh().await;
-    for back in 1..=28 {
-        history_row(&env, 34, back, 102.0, 105.0, 100.0, 500).await;
-    }
+    // Without a rollup there is nothing to advance.
+    assert!(!refresh_expansions(&env).await);
+    assert_eq!(stats_of(&env, 34).await.unwrap().expansion_at, None);
+
+    // Own snapshots of a single hour, rolled up: computed, with no window, but with a marker.
     snapshot_at(&env, env.clock.now() - Duration::hours(3), 34, (0, 0)).await;
     roll_up(&env).await;
+    assert!(refresh_expansions(&env).await);
+    assert_eq!(windows(&env).await, []);
+    let marker = stats_of(&env, 34)
+        .await
+        .unwrap()
+        .expansion_at
+        .expect("the rollup it was computed for");
 
-    assert!(
-        stats::refresh_expansions_if_advanced(&*env.stores.station, env.clock.now())
-            .await
-            .unwrap()
-    );
+    // Nothing advanced: a book refresh leaves the marker alone, and no recompute runs.
+    env.clock.advance(Duration::minutes(6));
+    env.station.refresh().await;
+    assert!(!refresh_expansions(&env).await);
+    assert_eq!(stats_of(&env, 34).await.unwrap().expansion_at, Some(marker));
 
-    let stats = stats_of(&env, 34).await.unwrap();
-    assert_eq!(stats.expansion_kind, None);
-    assert_eq!(stats.expansion_sell, None);
-    assert!(stats.expansion_at.is_some());
-    assert!(
-        !stats::refresh_expansions_if_advanced(&*env.stores.station, env.clock.now())
-            .await
-            .unwrap()
-    );
+    // A newer hour rolls up: computed again.
+    env.clock.advance(Duration::hours(2));
+    snapshot_at(&env, env.clock.now(), 34, (0, 0)).await;
+    roll_up(&env).await;
+    assert!(refresh_expansions(&env).await);
+    assert!(stats_of(&env, 34).await.unwrap().expansion_at > Some(marker));
 }

@@ -2,13 +2,14 @@
 
 use sekondo::{
     esi::EsiHistoryDay,
+    opportunities::analysis::{Direction, WindowKind},
     store::{
-        BookFields, ExpansionColumns, IndicatorColumns, SeedHistoryRow, SeedSnapshotRow,
-        StationOrder, StoreError, Stores,
+        BookFields, IndicatorColumns, SeedHistoryRow, SeedSnapshotRow, StationOrder, StoreError,
+        Stores, WindowRow,
     },
 };
 use time::{
-    Date, Duration, OffsetDateTime,
+    Date, Duration, OffsetDateTime, Weekday,
     macros::{date, datetime},
 };
 
@@ -98,6 +99,19 @@ pub fn cases() -> Vec<Case> {
         }),
         case("station/a-seeded-item-row-replaces-the-whole-row", |s| {
             boxed(seeded_item_row(s))
+        }),
+        case(
+            "station/completed-days-are-flagged-once-with-their-expanded-hours",
+            |s| boxed(flagged_days(s)),
+        ),
+        case("station/flags-before-the-cut-are-pruned", |s| {
+            boxed(pruned_flags(s))
+        }),
+        case("station/the-medians-of-the-hourly-averages", |s| {
+            boxed(hourly_medians(s))
+        }),
+        case("station/windows-are-replaced-as-a-whole", |s| {
+            boxed(replaced_windows(s))
         }),
     ]
 }
@@ -1213,13 +1227,13 @@ async fn daily_figures(stores: &Stores) {
 
     // Nothing is rolled up yet: every day has the history's own range.
     let before = stores
-        .station
-        .daily_points(REGION, date!(2026 - 10 - 01))
+        .opportunities
+        .item_day_points(REGION, 34, date!(2026 - 10 - 01))
         .await
         .unwrap();
     assert_eq!(before.len(), 3);
-    assert_close(before[2].2, 0.2);
-    assert_eq!(before[2].3, 1_200);
+    assert_close(before[2].1, 0.2);
+    assert_eq!(before[2].2, 1_200);
 
     refresh(
         stores,
@@ -1229,8 +1243,8 @@ async fn daily_figures(stores: &Stores) {
     .await;
 
     let after = stores
-        .station
-        .daily_points(REGION, date!(2026 - 10 - 01))
+        .opportunities
+        .item_day_points(REGION, 34, date!(2026 - 10 - 01))
         .await
         .unwrap();
     assert_eq!(after.len(), 3);
@@ -1238,21 +1252,21 @@ async fn daily_figures(stores: &Stores) {
         panic!("three days")
     };
     assert_eq!(
-        (eighteenth.1, nineteenth.1, twentieth.1),
+        (eighteenth.0, nineteenth.0, twentieth.0),
         (
             date!(2026 - 10 - 18),
             date!(2026 - 10 - 19),
             date!(2026 - 10 - 20)
         )
     );
-    assert_close(eighteenth.2, 1.5 / 8.0);
-    assert_eq!(eighteenth.3, 950, "no rollup: the history's high");
-    assert_close(nineteenth.2, 0.3);
-    assert_eq!(nineteenth.3, 1_300, "19 hours are not enough");
+    assert_close(eighteenth.1, 1.5 / 8.0);
+    assert_eq!(eighteenth.2, 950, "no rollup: the history's high");
+    assert_close(nineteenth.1, 0.3);
+    assert_eq!(nineteenth.2, 1_300, "19 hours are not enough");
     // 20 hours: the largest spread and the highest sell price of the hours.
-    assert_close(twentieth.2, 1.19 / 10.0);
+    assert_close(twentieth.1, 1.19 / 10.0);
     assert_eq!(
-        twentieth.3, 1_119,
+        twentieth.2, 1_119,
         "the best sell price of the 19th hour, 11.19"
     );
     let item = stores
@@ -1389,7 +1403,7 @@ async fn item_rows(stores: &Stores) {
         (2, 3, Some(0.25))
     );
     assert_eq!(stats[1].best_buy_cents, 2_050);
-    assert!(stats[0].volume_7d.is_none() && stats[0].expansion_kind.is_none());
+    assert!(stats[0].volume_7d.is_none() && stats[0].windows.is_empty());
     // The upsert replaces the book fields of a row that is there.
     stores
         .station
@@ -1628,17 +1642,19 @@ async fn indicators_and_expansions(stores: &Stores) {
     );
     stores
         .station
-        .update_expansions(
+        .replace_windows(
             REGION,
             STATION,
             latest,
-            &ExpansionColumns {
-                type_id: vec![34],
-                kind: vec![Some("weekday_hour".to_owned())],
-                weekday: vec![Some(1)],
-                hour: vec![Some(14)],
-                sell: vec![Some(1_234)],
-            },
+            &[window(
+                34,
+                WindowKind::WeekdayHour {
+                    weekday: Weekday::Tuesday,
+                    hour: 14,
+                },
+                Direction::Spike,
+                1_234,
+            )],
         )
         .await
         .unwrap();
@@ -1661,27 +1677,22 @@ async fn indicators_and_expansions(stores: &Stores) {
         .load_stats(REGION, STATION)
         .await
         .unwrap();
-    assert_eq!(stats[0].expansion_kind.as_deref(), Some("weekday_hour"));
     assert_eq!(
-        (stats[0].expansion_weekday, stats[0].expansion_hour),
-        (Some(1), Some(14))
+        stats[0].windows,
+        [window(
+            34,
+            WindowKind::WeekdayHour {
+                weekday: Weekday::Tuesday,
+                hour: 14
+            },
+            Direction::Spike,
+            1_234
+        )]
     );
-    assert_eq!(stats[0].expansion_sell_cents, Some(1_234));
-    // A row without an expansion window is stale as long as the hour differs.
+    // An item without a window is stale as long as the hour differs, and loses what it had.
     stores
         .station
-        .update_expansions(
-            REGION,
-            STATION,
-            latest,
-            &ExpansionColumns {
-                type_id: vec![34],
-                kind: vec![None],
-                weekday: vec![None],
-                hour: vec![None],
-                sell: vec![None],
-            },
-        )
+        .replace_windows(REGION, STATION, latest, &[])
         .await
         .unwrap();
     let cleared = stores
@@ -1689,8 +1700,28 @@ async fn indicators_and_expansions(stores: &Stores) {
         .load_stats(REGION, STATION)
         .await
         .unwrap();
-    assert_eq!(cleared[0].expansion_kind, None);
-    assert_eq!(cleared[0].expansion_sell_cents, None);
+    assert!(cleared[0].windows.is_empty());
+    assert!(
+        !stores
+            .station
+            .expansions_stale(REGION, STATION, latest)
+            .await
+            .unwrap(),
+        "the marker is set even without a window"
+    );
+}
+
+/// A stored window of an item with fixed counts.
+fn window(type_id: i64, kind: WindowKind, direction: Direction, price_cents: i64) -> WindowRow {
+    WindowRow {
+        type_id,
+        kind,
+        direction,
+        price_cents,
+        occurrences: 14,
+        covered: 20,
+        v_win: 250.5,
+    }
 }
 
 async fn latest_snapshots(stores: &Stores) {
@@ -2077,10 +2108,6 @@ async fn seeded_item_row(stores: &Stores) {
         percent_b: Some(0.3),
         rsi14: Some(55.0),
         expansion_at: Some(t),
-        expansion_kind: Some("hour".to_owned()),
-        expansion_weekday: None,
-        expansion_hour: Some(18),
-        expansion_sell: Some("125.20".to_owned()),
     };
 
     stores
@@ -2134,8 +2161,8 @@ async fn seeded_item_row(stores: &Stores) {
         .await
         .unwrap();
     assert_eq!(
-        (listed[0].best_buy_cents, listed[0].expansion_kind.clone()),
-        (100, None)
+        (listed[0].best_buy_cents, listed[0].windows.len()),
+        (100, 0)
     );
     let bad = stores
         .station
@@ -2157,5 +2184,408 @@ async fn seeded_item_row(stores: &Stores) {
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+/// One snapshot of item 34 at `hour`:10 of `day` with these prices and units taken.
+fn hour_snapshot(day: Date, hour: i64, buy: f64, sell: f64, taken: (i64, i64)) -> SeedSnapshotRow {
+    SeedSnapshotRow {
+        buy_taken: taken.0,
+        sell_taken: taken.1,
+        ..snapshot(
+            day.midnight().assume_utc() + Duration::hours(hour) + Duration::minutes(10),
+            buy,
+            sell,
+        )
+    }
+}
+
+/// `hours` hours of `day` at a spread of 10%, then the jumps `(hour, buy, sell, taken)`.
+fn day_snapshots(
+    day: Date,
+    hours: i64,
+    jumps: &[(i64, f64, f64, (i64, i64))],
+) -> Vec<SeedSnapshotRow> {
+    (0..hours)
+        .map(|hour| {
+            let (buy, sell, taken) = jumps
+                .iter()
+                .find(|(h, ..)| *h == hour)
+                .map_or((100.0, 110.0, (0, 0)), |(_, b, s, t)| (*b, *s, *t));
+            hour_snapshot(day, hour, buy, sell, taken)
+        })
+        .collect()
+}
+
+/// Four days of item 34, rolled up: a spike and a dip (10th, 24 hours), a tie between the two
+/// moves (11th, 22 hours), an even hour count whose median is the mean of the middle two (12th,
+/// 20 hours), a day without enough hours (13th, 19 hours), and the first hours of the 14th.
+async fn four_days(stores: &Stores) {
+    let mut rows = day_snapshots(
+        date!(2026 - 10 - 10),
+        24,
+        &[(5, 60.0, 110.0, (40, 1)), (18, 100.0, 140.0, (2, 77))],
+    );
+    // 11th: 75.00 is 25% below the median buy, 137.50 is 25% above the median sell.
+    rows.extend(day_snapshots(
+        date!(2026 - 10 - 11),
+        22,
+        &[(7, 75.0, 137.5, (9, 33))],
+    ));
+    // 12th: ten hours at a spread of 0.125, nine at 0.25 and one at 0.375, which is exactly twice
+    // the median 0.1875.
+    let twelfth = date!(2026 - 10 - 12);
+    for hour in 0..20 {
+        let sell = match hour {
+            0..=9 => 112.5,
+            19 => 137.5,
+            _ => 125.0,
+        };
+        rows.push(hour_snapshot(twelfth, hour, 100.0, sell, (0, 11)));
+    }
+    // 13th: a huge jump in 19 hours, which are not enough.
+    rows.extend(day_snapshots(
+        date!(2026 - 10 - 13),
+        19,
+        &[(3, 100.0, 300.0, (0, 5))],
+    ));
+    // The 14th is only half done: three hours.
+    rows.extend(day_snapshots(date!(2026 - 10 - 14), 3, &[]));
+    stores
+        .station
+        .seed_snapshots(REGION, STATION, &rows)
+        .await
+        .unwrap();
+    refresh(
+        stores,
+        datetime!(2026-10-10 00:00 UTC),
+        datetime!(2026-10-15 00:00 UTC),
+    )
+    .await;
+}
+
+async fn flagged_days(stores: &Stores) {
+    four_days(stores).await;
+    let latest = stores
+        .station
+        .latest_hour(REGION, STATION)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest, datetime!(2026-10-14 02:00 UTC));
+
+    // The 14th is not complete; the others are, and none is flagged yet.
+    let days = stores
+        .station
+        .unflagged_days(REGION, STATION, latest)
+        .await
+        .unwrap();
+    assert_eq!(
+        days,
+        [
+            date!(2026 - 10 - 10),
+            date!(2026 - 10 - 11),
+            date!(2026 - 10 - 12),
+            date!(2026 - 10 - 13)
+        ]
+    );
+    // A day is complete an hour after its end, not before.
+    let early = stores
+        .station
+        .unflagged_days(REGION, STATION, datetime!(2026-10-13 00:30 UTC))
+        .await
+        .unwrap();
+    assert_eq!(early, [date!(2026 - 10 - 10), date!(2026 - 10 - 11)]);
+
+    stores
+        .station
+        .flag_days(REGION, STATION, &days)
+        .await
+        .unwrap();
+
+    let flagged = stores
+        .station
+        .flagged_days(REGION, STATION, date!(2026 - 10 - 01))
+        .await
+        .unwrap();
+    let flagged: Vec<_> = flagged
+        .iter()
+        .map(|f| (f.type_id, f.day, f.hours, f.expanded_hours))
+        .collect();
+    assert_eq!(
+        flagged,
+        [
+            (34, date!(2026 - 10 - 10), 24, 2),
+            (34, date!(2026 - 10 - 11), 22, 1),
+            (34, date!(2026 - 10 - 12), 20, 1),
+            (34, date!(2026 - 10 - 13), 19, 0),
+        ]
+    );
+    let hours = stores
+        .station
+        .expanded_hours(REGION, STATION, datetime!(2026-10-01 00:00 UTC))
+        .await
+        .unwrap();
+    let hours: Vec<_> = hours.iter().map(|h| (h.type_id, h.hour)).collect();
+    assert_eq!(hours.len(), 4, "the uncovered day has none: {hours:?}");
+    let expect = |at: OffsetDateTime, direction, ratio: f64, extreme, taken| {
+        let (_, hour) = hours
+            .iter()
+            .find(|(_, h)| h.start == at)
+            .unwrap_or_else(|| panic!("no expanded hour at {at}"));
+        assert_eq!(
+            (hour.direction, hour.extreme_cents, hour.taken),
+            (direction, extreme, taken),
+            "{at}"
+        );
+        assert_close(hour.ratio, ratio);
+    };
+    // A buy drop to 60.00 under a median buy of 100.00 is a dip with its units taken from buys.
+    expect(
+        datetime!(2026-10-10 05:00 UTC),
+        Direction::Dip,
+        0.6,
+        6_000,
+        40,
+    );
+    expect(
+        datetime!(2026-10-10 18:00 UTC),
+        Direction::Spike,
+        14_000.0 / 11_000.0,
+        14_000,
+        77,
+    );
+    // Equal moves are a spike.
+    expect(
+        datetime!(2026-10-11 07:00 UTC),
+        Direction::Spike,
+        1.25,
+        13_750,
+        33,
+    );
+    // The median sell of the 12th is the mean of 112.50 and 125.00.
+    expect(
+        datetime!(2026-10-12 19:00 UTC),
+        Direction::Spike,
+        13_750.0 / 11_875.0,
+        13_750,
+        11,
+    );
+
+    // The item's own expanded hours, from a time on.
+    let of_item = stores
+        .opportunities
+        .item_expanded_hours(REGION, STATION, 34, datetime!(2026-10-11 00:00 UTC))
+        .await
+        .unwrap();
+    assert_eq!(
+        of_item.iter().map(|h| h.start).collect::<Vec<_>>(),
+        [
+            datetime!(2026-10-11 07:00 UTC),
+            datetime!(2026-10-12 19:00 UTC)
+        ]
+    );
+    assert!(
+        stores
+            .opportunities
+            .item_expanded_hours(REGION, STATION, 35, datetime!(2026-10-01 00:00 UTC))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Flagging a day again changes nothing, and nothing is left to flag.
+    stores
+        .station
+        .flag_days(REGION, STATION, &days)
+        .await
+        .unwrap();
+    assert_eq!(
+        stores
+            .station
+            .flagged_days(REGION, STATION, date!(2026 - 10 - 01))
+            .await
+            .unwrap()
+            .len(),
+        4
+    );
+    assert_eq!(
+        stores
+            .station
+            .expanded_hours(REGION, STATION, datetime!(2026-10-01 00:00 UTC))
+            .await
+            .unwrap()
+            .len(),
+        4
+    );
+    assert!(
+        stores
+            .station
+            .unflagged_days(REGION, STATION, latest)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // Only from a day on.
+    assert_eq!(
+        stores
+            .station
+            .flagged_days(REGION, STATION, date!(2026 - 10 - 12))
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        stores
+            .station
+            .expanded_hours(REGION, STATION, datetime!(2026-10-11 00:00 UTC))
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+async fn pruned_flags(stores: &Stores) {
+    four_days(stores).await;
+    let latest = datetime!(2026-10-14 02:00 UTC);
+    let days = stores
+        .station
+        .unflagged_days(REGION, STATION, latest)
+        .await
+        .unwrap();
+    stores
+        .station
+        .flag_days(REGION, STATION, &days)
+        .await
+        .unwrap();
+
+    stores
+        .station
+        .prune_flags(REGION, STATION, date!(2026 - 10 - 12))
+        .await
+        .unwrap();
+
+    let flagged = stores
+        .station
+        .flagged_days(REGION, STATION, date!(2026 - 01 - 01))
+        .await
+        .unwrap();
+    assert_eq!(
+        flagged.iter().map(|f| f.day).collect::<Vec<_>>(),
+        [date!(2026 - 10 - 12), date!(2026 - 10 - 13)]
+    );
+    let hours = stores
+        .station
+        .expanded_hours(REGION, STATION, datetime!(2026-01-01 00:00 UTC))
+        .await
+        .unwrap();
+    assert_eq!(
+        hours.iter().map(|h| h.hour.start).collect::<Vec<_>>(),
+        [datetime!(2026-10-12 19:00 UTC)]
+    );
+    // Another station keeps its flags: pruning is per station.
+    stores
+        .station
+        .prune_flags(REGION, STATION + 1, date!(2026 - 12 - 31))
+        .await
+        .unwrap();
+    assert_eq!(
+        stores
+            .station
+            .flagged_days(REGION, STATION, date!(2026 - 01 - 01))
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+async fn hourly_medians(stores: &Stores) {
+    four_days(stores).await;
+    // From the 13th: 19 hours of 100.00 / 110.00 and three more of the 14th.
+    let medians = stores
+        .station
+        .medians(REGION, STATION, datetime!(2026-10-13 00:00 UTC))
+        .await
+        .unwrap();
+    assert_eq!(medians.len(), 1);
+    assert_eq!(medians[0].type_id, 34);
+    assert_close(medians[0].buy_cents, 10_000.0);
+    assert_close(medians[0].sell_cents, 11_000.0);
+    // The 12th alone: ten hours at 112.50 and ten at 125.00 or 137.50 (the middle two are
+    // 112.50 and 125.00).
+    let twelfth = stores
+        .station
+        .medians(REGION, STATION, datetime!(2026-10-12 00:00 UTC))
+        .await
+        .unwrap();
+    assert!(twelfth[0].sell_cents > 11_000.0);
+    assert!(
+        stores
+            .station
+            .medians(REGION, STATION, datetime!(2026-10-20 00:00 UTC))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+async fn replaced_windows(stores: &Stores) {
+    let tuesday = WindowKind::WeekdayHour {
+        weekday: Weekday::Tuesday,
+        hour: 11,
+    };
+    let daily = WindowKind::HourOfDay { hour: 18 };
+    let latest = datetime!(2026-10-20 10:00 UTC);
+    stores
+        .station
+        .replace_windows(
+            REGION,
+            STATION,
+            latest,
+            &[
+                window(34, daily, Direction::Spike, 125_20),
+                window(34, tuesday, Direction::Dip, 82_010),
+                window(35, daily, Direction::Spike, 99),
+            ],
+        )
+        .await
+        .unwrap();
+    let stored = stores.station.windows(REGION, STATION).await.unwrap();
+    assert_eq!(stored.len(), 3);
+    for expected in [
+        window(34, daily, Direction::Spike, 125_20),
+        window(34, tuesday, Direction::Dip, 82_010),
+        window(35, daily, Direction::Spike, 99),
+    ] {
+        assert!(stored.contains(&expected), "{expected:?} in {stored:?}");
+    }
+    // The same window in both directions is two windows.
+    stores
+        .station
+        .replace_windows(
+            REGION,
+            STATION,
+            latest,
+            &[
+                window(34, daily, Direction::Spike, 125_20),
+                window(34, daily, Direction::Dip, 80_00),
+            ],
+        )
+        .await
+        .unwrap();
+    let again = stores.station.windows(REGION, STATION).await.unwrap();
+    assert_eq!(again.len(), 2, "everything else was replaced: {again:?}");
+    // Another station's windows are not touched.
+    stores
+        .station
+        .replace_windows(REGION, STATION + 1, latest, &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        stores.station.windows(REGION, STATION).await.unwrap().len(),
+        2
     );
 }

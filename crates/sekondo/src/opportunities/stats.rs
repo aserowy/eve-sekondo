@@ -6,12 +6,12 @@ use std::collections::HashMap;
 
 use time::{Date, Duration, OffsetDateTime};
 
-use crate::store::{BookFields, ExpansionColumns, IndicatorColumns, StationStore, StoreError};
+use crate::store::{BookFields, IndicatorColumns, StationStore, StoreError, WindowRow};
 
 use super::{
     REGION_ID, STATION_ID,
     analysis::{
-        self, DayPoint, HourPoint, WindowKind, bollinger, buy_side_ratio, recurring_windows, rsi14,
+        ExpandedHour, FlaggedDay, Medians, bollinger, buy_side_ratio, recurring_windows, rsi14,
         sma, sma_crossing, volatility, volume_rising,
     },
 };
@@ -20,8 +20,10 @@ use super::{
 const RHO_DAYS: i64 = 30;
 /// Days of history the indicators read.
 const HISTORY_DAYS: i64 = 30;
-/// Days of rollups the recurrence reads.
-const ROLLUP_DAYS: i64 = 30;
+/// Days of flagged days the recurrence reads: 52 weeks.
+const RECURRENCE_DAYS: i64 = 52 * 7;
+/// Days whose hourly averages make the medians the windows are priced with.
+const MEDIAN_DAYS: i64 = 7;
 
 /// After a book refresh: the item rows follow the tradable items, and their book fields (the best
 /// prices and orders within 1% from the latest snapshot, and ρ over 30 days) are replaced.
@@ -137,9 +139,36 @@ fn push_indicators(columns: &mut IndicatorColumns, type_id: i64, today: Date, s:
     columns.rsi14.push(rsi14(&s.averages));
 }
 
+/// How long flagged days and expanded hours are kept, in days.
+const FLAG_DAYS: i64 = 365;
+
+/// Flags every completed UTC day of the hourly rollup that is not flagged yet: a day is complete
+/// once the newest rollup hour is at least an hour past its end. Then drops what is older than a
+/// year. Returns how many days it flagged.
+pub async fn flag_completed_days(
+    store: &dyn StationStore,
+    now: OffsetDateTime,
+) -> Result<usize, StoreError> {
+    let Some(latest) = store.latest_hour(REGION_ID, STATION_ID).await? else {
+        return Ok(0);
+    };
+    let days = store.unflagged_days(REGION_ID, STATION_ID, latest).await?;
+    if !days.is_empty() {
+        store.flag_days(REGION_ID, STATION_ID, &days).await?;
+    }
+    store
+        .prune_flags(
+            REGION_ID,
+            STATION_ID,
+            now.date() - Duration::days(FLAG_DAYS),
+        )
+        .await?;
+    Ok(days.len())
+}
+
 /// When the hourly rollup advanced (its newest hour differs from the one the item rows were last
-/// computed for): the expansion fields of every item row, from the recurring window with the
-/// highest sell price. Returns whether it recomputed.
+/// computed for): flags the days that completed, then stores the recurring windows of every item
+/// from the flagged days and the 7-day medians. Returns whether it recomputed.
 pub async fn refresh_expansions_if_advanced(
     store: &dyn StationStore,
     now: OffsetDateTime,
@@ -153,65 +182,54 @@ pub async fn refresh_expansions_if_advanced(
     {
         return Ok(false);
     }
+    flag_completed_days(store, now).await?;
 
-    let from = now - Duration::days(ROLLUP_DAYS);
-    // Hourly patterns need 7 days of own snapshots; until then only the daily figures are read.
-    let own_days = store.own_hourly_days(REGION_ID, STATION_ID, from).await?;
-    let mut hours: HashMap<i64, Vec<HourPoint>> = HashMap::new();
-    if own_days >= analysis::MIN_HOURLY_DAYS as i64 {
-        let rows = store.hourly_points(REGION_ID, STATION_ID, from).await?;
-        for (type_id, start, spread_avg, spread_max, sell_max_cents) in rows {
-            hours.entry(type_id).or_default().push(HourPoint {
-                start,
-                spread_avg,
-                spread_max,
-                sell_max_cents,
-            });
-        }
-    }
-    let rows = store.daily_points(REGION_ID, from.date()).await?;
-    let mut days: HashMap<i64, Vec<DayPoint>> = HashMap::new();
-    for (type_id, day, spread, high_cents) in rows {
-        days.entry(type_id).or_default().push(DayPoint {
-            day,
-            spread,
-            high_cents,
+    let from = now.date() - Duration::days(RECURRENCE_DAYS);
+    let mut flagged: HashMap<i64, Vec<FlaggedDay>> = HashMap::new();
+    for row in store.flagged_days(REGION_ID, STATION_ID, from).await? {
+        flagged.entry(row.type_id).or_default().push(FlaggedDay {
+            day: row.day,
+            hours: usize::try_from(row.hours).unwrap_or_default(),
+            expanded: usize::try_from(row.expanded_hours).unwrap_or_default(),
         });
     }
+    let mut expanded: HashMap<i64, Vec<ExpandedHour>> = HashMap::new();
+    for row in store
+        .expanded_hours(REGION_ID, STATION_ID, from.midnight().assume_utc())
+        .await?
+    {
+        expanded.entry(row.type_id).or_default().push(row.hour);
+    }
+    let medians = store
+        .medians(REGION_ID, STATION_ID, now - Duration::days(MEDIAN_DAYS))
+        .await?;
 
-    let item_ids = store.item_stat_ids(REGION_ID, STATION_ID).await?;
-    let mut columns = ExpansionColumns {
-        type_id: item_ids.clone(),
-        ..ExpansionColumns::default()
-    };
-    for type_id in &item_ids {
-        let windows = recurring_windows(
-            hours.get(type_id).map_or(&[], Vec::as_slice),
-            days.get(type_id).map_or(&[], Vec::as_slice),
-            now,
-        );
-        let best = windows.first();
-        let (k, w, h) = match best.map(|w| w.kind) {
-            Some(WindowKind::HourOfDay { hour }) => (Some("hour"), None, Some(i16::from(hour))),
-            Some(WindowKind::WeekdayHour { weekday, hour }) => (
-                Some("weekday_hour"),
-                Some(i16::from(weekday.number_days_from_monday())),
-                Some(i16::from(hour)),
-            ),
-            Some(WindowKind::Weekday { weekday }) => (
-                Some("weekday"),
-                Some(i16::from(weekday.number_days_from_monday())),
-                None,
-            ),
-            None => (None, None, None),
+    let mut rows = Vec::new();
+    for median in medians {
+        let Some(days) = flagged.get(&median.type_id) else {
+            continue;
         };
-        columns.kind.push(k.map(str::to_owned));
-        columns.weekday.push(w);
-        columns.hour.push(h);
-        columns.sell.push(best.map(|w| w.sell_cents));
+        let hours = expanded.get(&median.type_id).map_or(&[][..], Vec::as_slice);
+        let medians = Medians {
+            buy_cents: median.buy_cents,
+            sell_cents: median.sell_cents,
+        };
+        rows.extend(
+            recurring_windows(days, hours, medians, now)
+                .into_iter()
+                .map(|w| WindowRow {
+                    type_id: median.type_id,
+                    kind: w.kind,
+                    direction: w.direction,
+                    price_cents: w.price_cents,
+                    occurrences: w.occurrences.len() as i32,
+                    covered: w.covered as i32,
+                    v_win: w.v_win,
+                }),
+        );
     }
     store
-        .update_expansions(REGION_ID, STATION_ID, latest, &columns)
+        .replace_windows(REGION_ID, STATION_ID, latest, &rows)
         .await?;
     Ok(true)
 }

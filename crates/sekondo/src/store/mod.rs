@@ -12,7 +12,11 @@ use crate::{
     fee_poller,
     fees::{CharacterFee, FeeRow},
     freshness::{FreshnessRecord, WealthFreshnessRecord},
-    opportunities::{settings::Settings, tables::Stats},
+    opportunities::{
+        analysis::{Direction, ExpandedHour, WindowKind, weekday_from_monday},
+        settings::Settings,
+        tables::Stats,
+    },
     orders::{OrderRow, Side, Sort},
     range::Range,
     trades::TradeRow,
@@ -388,10 +392,6 @@ pub struct ItemStatsRecord {
     pub percent_b: Option<f64>,
     pub rsi14: Option<f64>,
     pub expansion_at: Option<OffsetDateTime>,
-    pub expansion_kind: Option<String>,
-    pub expansion_weekday: Option<i16>,
-    pub expansion_hour: Option<i16>,
-    pub expansion_sell: Option<String>,
 }
 
 /// A public market order of a pair.
@@ -739,20 +739,60 @@ pub trait StationStore: Send + Sync {
         from: OffsetDateTime,
     ) -> StoreResult<Vec<(i64, OffsetDateTime, f64, f64, i64)>>;
 
-    /// `(item, day, spread, high in cents)` since `from`.
-    async fn daily_points(
-        &self,
-        region_id: i64,
-        from: Date,
-    ) -> StoreResult<Vec<(i64, Date, f64, i64)>>;
-
-    async fn update_expansions(
+    /// The completed UTC days of the hourly rollup that are not flagged yet: days with a rollup
+    /// whose end is at least an hour behind `latest`, the newest hour. Oldest first.
+    async fn unflagged_days(
         &self,
         region_id: i64,
         station_id: i64,
         latest: OffsetDateTime,
-        columns: &ExpansionColumns,
+    ) -> StoreResult<Vec<Date>>;
+
+    /// Flags these days: one `station_flagged_days` row per item with rollups on the day, and for
+    /// covered days one `station_expanded_hours` row per expanded hour. A day already flagged is
+    /// left as it is.
+    async fn flag_days(&self, region_id: i64, station_id: i64, days: &[Date]) -> StoreResult<()>;
+
+    /// The flagged days since `from` of every item.
+    async fn flagged_days(
+        &self,
+        region_id: i64,
+        station_id: i64,
+        from: Date,
+    ) -> StoreResult<Vec<FlaggedDayRow>>;
+
+    /// The expanded hours since `from` of every item, oldest first per item.
+    async fn expanded_hours(
+        &self,
+        region_id: i64,
+        station_id: i64,
+        from: OffsetDateTime,
+    ) -> StoreResult<Vec<ExpandedHourRow>>;
+
+    /// The medians of the hourly average best buy and best sell since `from` of every item with
+    /// rollups.
+    async fn medians(
+        &self,
+        region_id: i64,
+        station_id: i64,
+        from: OffsetDateTime,
+    ) -> StoreResult<Vec<MedianRow>>;
+
+    /// Replaces the recurring windows of the station's items and marks every item row as computed
+    /// for the hour `latest`.
+    async fn replace_windows(
+        &self,
+        region_id: i64,
+        station_id: i64,
+        latest: OffsetDateTime,
+        windows: &[WindowRow],
     ) -> StoreResult<()>;
+
+    /// The recurring windows of every item.
+    async fn windows(&self, region_id: i64, station_id: i64) -> StoreResult<Vec<WindowRow>>;
+
+    /// Deletes the flagged days and expanded hours before `before`.
+    async fn prune_flags(&self, region_id: i64, station_id: i64, before: Date) -> StoreResult<()>;
 
     /// Materializes the hourly and the daily rollup of the snapshots in `from..to`. Until a
     /// refresh covers them, snapshots do not appear in the rollups.
@@ -853,14 +893,87 @@ pub struct IndicatorColumns {
     pub rsi14: Vec<Option<f64>>,
 }
 
-/// The expansion fields of the item rows, one entry per item in every column. `sell` is in cents.
-#[derive(Debug, Default)]
-pub struct ExpansionColumns {
-    pub type_id: Vec<i64>,
-    pub kind: Vec<Option<String>>,
-    pub weekday: Vec<Option<i16>>,
-    pub hour: Vec<Option<i16>>,
-    pub sell: Vec<Option<i64>>,
+/// One item's day as flagged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlaggedDayRow {
+    pub type_id: i64,
+    pub day: Date,
+    pub hours: i32,
+    pub expanded_hours: i32,
+}
+
+/// An item's expanded hour.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExpandedHourRow {
+    pub type_id: i64,
+    pub hour: ExpandedHour,
+}
+
+/// The 7-day medians of an item, in cents.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MedianRow {
+    pub type_id: i64,
+    pub buy_cents: f64,
+    pub sell_cents: f64,
+}
+
+/// A recurring window of an item as stored. `price_cents` is S for a spike and B for a dip.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowRow {
+    pub type_id: i64,
+    pub kind: WindowKind,
+    pub direction: Direction,
+    pub price_cents: i64,
+    pub occurrences: i32,
+    pub covered: i32,
+    pub v_win: f64,
+}
+
+impl WindowRow {
+    /// The `(kind, weekday, hour)` columns of the window.
+    pub fn columns(&self) -> (&'static str, Option<i16>, i16) {
+        match self.kind {
+            WindowKind::HourOfDay { hour } => ("hour", None, i16::from(hour)),
+            WindowKind::WeekdayHour { weekday, hour } => (
+                "weekday_hour",
+                Some(i16::from(weekday.number_days_from_monday())),
+                i16::from(hour),
+            ),
+        }
+    }
+
+    /// The window of its stored columns, or `None` for columns that make no window.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_columns(
+        type_id: i64,
+        kind: &str,
+        weekday: Option<i16>,
+        hour: i16,
+        direction: &str,
+        price_cents: i64,
+        occurrences: i32,
+        covered: i32,
+        v_win: f64,
+    ) -> Option<Self> {
+        let hour_of_day = u8::try_from(hour).ok()?;
+        let kind = match kind {
+            "hour" => WindowKind::HourOfDay { hour: hour_of_day },
+            "weekday_hour" => WindowKind::WeekdayHour {
+                weekday: weekday_from_monday(weekday?)?,
+                hour: hour_of_day,
+            },
+            _ => return None,
+        };
+        Some(Self {
+            type_id,
+            kind,
+            direction: Direction::parse(direction)?,
+            price_cents,
+            occurrences,
+            covered,
+            v_win,
+        })
+    }
 }
 
 /// One synthetic snapshot of an item.
@@ -971,6 +1084,15 @@ pub trait OpportunityStore: Send + Sync {
         type_id: i64,
         from: OffsetDateTime,
     ) -> StoreResult<Vec<(OffsetDateTime, f64, f64, i64)>>;
+
+    /// The expanded hours of the item since `from`, oldest first.
+    async fn item_expanded_hours(
+        &self,
+        region_id: i64,
+        station_id: i64,
+        type_id: i64,
+        from: OffsetDateTime,
+    ) -> StoreResult<Vec<ExpandedHour>>;
 
     /// `(day, spread, high in cents)` of the item since `from`, oldest first.
     async fn item_day_points(

@@ -1,6 +1,10 @@
 mod common;
 
 use common::{AppBuilder, Browser, TestApp};
+use sekondo::{
+    opportunities::analysis::{Direction, WindowKind},
+    store::WindowRow,
+};
 
 const ALICE: i64 = 90000001;
 const JITA_44: i64 = 60003760;
@@ -63,9 +67,9 @@ struct Item {
     sma20: Option<f64>,
     percent_b: Option<f64>,
     rsi14: Option<f64>,
-    expansion_kind: Option<&'static str>,
-    expansion_hour: Option<i16>,
-    expansion_sell: Option<&'static str>,
+    /// Recurring windows of the expansion table: kind, direction, S (spike) or B (dip) in cents
+    /// and V_win.
+    windows: Vec<(WindowKind, Direction, i64, f64)>,
 }
 
 impl Item {
@@ -87,9 +91,7 @@ impl Item {
             sma20: None,
             percent_b: None,
             rsi14: None,
-            expansion_kind: None,
-            expansion_hour: None,
-            expansion_sell: None,
+            windows: Vec::new(),
         }
     }
 
@@ -127,12 +129,28 @@ impl Item {
                     percent_b: self.percent_b,
                     rsi14: self.rsi14,
                     expansion_at: Some(now),
-                    expansion_kind: self.expansion_kind.map(str::to_owned),
-                    expansion_weekday: None,
-                    expansion_hour: self.expansion_hour,
-                    expansion_sell: self.expansion_sell.map(str::to_owned),
                 },
             )
+            .await
+            .unwrap();
+        // The windows of every item inserted so far, and this one's.
+        let mut windows = app.stores.station.windows(10000002, JITA_44).await.unwrap();
+        windows.extend(
+            self.windows
+                .iter()
+                .map(|(kind, direction, price_cents, v_win)| WindowRow {
+                    type_id: self.type_id,
+                    kind: *kind,
+                    direction: *direction,
+                    price_cents: *price_cents,
+                    occurrences: 14,
+                    covered: 20,
+                    v_win: *v_win,
+                }),
+        );
+        app.stores
+            .station
+            .replace_windows(10000002, JITA_44, now, &windows)
             .await
             .unwrap();
         if let Some(name) = self.name {
@@ -235,7 +253,9 @@ async fn the_columns_say_that_the_buy_price_is_current_and_not_a_suggestion() {
     let html = get(&app, &browser, "/opportunities/tables").await;
 
     assert!(
-        html.contains(r#"<abbr title="Current best buy, not a suggested price">B</abbr>"#),
+        html.contains(
+            r#"<abbr title="Current best buy, not a suggested price, except in a dip row of the recurring spread expansion table, where it is the predicted buy price">B</abbr>"#
+        ),
         "{html}"
     );
     assert!(!html.to_lowercase().contains("suggested buy"));
@@ -282,6 +302,50 @@ async fn the_headers_are_short_labels_with_their_full_names_on_hover() {
         head.contains(r#"<abbr title="Allowed holding time">T_max</abbr>"#),
         "{head}"
     );
+}
+
+#[tokio::test]
+async fn the_expansion_headers_end_with_window_direction_window_volume_and_next_start() {
+    let (app, browser) = setup().await;
+    Item {
+        windows: vec![(DAILY_18, Direction::Spike, 12_520, 4_000.0)],
+        ..Item::new(34)
+    }
+    .insert(&app)
+    .await;
+
+    let html = get_one(&app, &browser, "/opportunities/expansion").await;
+    let head = &html[html.find("<thead>").unwrap()..html.find("</thead>").unwrap()];
+
+    let shorts: Vec<&str> = head
+        .split("</abbr>")
+        .filter_map(|part| part.rsplit_once('>').map(|(_, short)| short))
+        .filter(|short| !short.trim().is_empty())
+        .collect();
+    assert_eq!(
+        shorts,
+        [
+            "B",
+            "S",
+            "Net",
+            "m",
+            "ISK/d",
+            "V7",
+            "V30",
+            "\u{03C3}",
+            "T_max",
+            "T_fill",
+            "V_min",
+            "n b/s",
+            "Window",
+            "Dir",
+            "V_win",
+            "Next (UTC)"
+        ],
+        "{head}"
+    );
+    assert!(head.contains("direction"), "{head}");
+    assert!(head.contains("window-volume"), "{head}");
 }
 
 #[tokio::test]
@@ -691,16 +755,20 @@ async fn an_item_inside_its_bands_is_not_listed_but_a_low_rsi_alone_is_enough() 
 
 // ---- recurring expansion ----
 
+const DAILY_18: WindowKind = WindowKind::HourOfDay { hour: 18 };
+const TUESDAY_11: WindowKind = WindowKind::WeekdayHour {
+    weekday: time::Weekday::Tuesday,
+    hour: 11,
+};
+
 #[tokio::test]
-async fn a_recurring_window_is_listed_with_its_name_its_next_start_and_its_sell_price() {
-    use sekondo::opportunities::analysis::WindowKind;
+async fn a_spike_window_is_listed_with_its_direction_its_volume_its_next_start_and_its_sell_price()
+{
     let (app, browser) = setup().await;
     Item {
         best_buy: "100.00",
         best_sell: "110.00",
-        expansion_kind: Some("hour"),
-        expansion_hour: Some(18),
-        expansion_sell: Some("125.20"),
+        windows: vec![(DAILY_18, Direction::Spike, 12_520, 4_000.0)],
         ..Item::new(34)
     }
     .insert(&app)
@@ -713,12 +781,110 @@ async fn a_recurring_window_is_listed_with_its_name_its_next_start_and_its_sell_
 
     assert_eq!(rows(expansion), [34]);
     assert_eq!(cell(expansion, 34, "window"), "daily 18:00");
+    assert_eq!(cell(expansion, 34, "direction"), "Spike");
+    assert_eq!(cell(expansion, 34, "window-volume"), "4,000");
+    assert_eq!(cell(expansion, 34, "buy"), "100.00");
     assert_eq!(cell(expansion, 34, "sell"), "125.20");
-    let next = WindowKind::HourOfDay { hour: 18 }.next_start(time::OffsetDateTime::now_utc());
+    let next = DAILY_18.next_start(time::OffsetDateTime::now_utc());
     assert_eq!(cell(expansion, 34, "next"), sekondo::format::eve_time(next));
     // Buying at 100 and selling at 109.90 earns nothing after the base fees, so item 34 is not in
     // the classic table; item 35 is.
     assert_eq!(rows(table(&html, "classic")), [35]);
+}
+
+#[tokio::test]
+async fn a_dip_row_buys_at_the_predicted_price_and_sells_one_tick_below_the_best_sell() {
+    let (app, browser) = setup().await;
+    Item {
+        best_buy: "100.00",
+        best_sell: "110.00",
+        windows: vec![(TUESDAY_11, Direction::Dip, 8_210, 900.0)],
+        ..Item::new(34)
+    }
+    .insert(&app)
+    .await;
+
+    let html = get(&app, &browser, "/opportunities/tables").await;
+    let expansion = table(&html, "expansion");
+
+    assert_eq!(rows(expansion), [34]);
+    assert_eq!(cell(expansion, 34, "window"), "weekly Tue 11:00");
+    assert_eq!(cell(expansion, 34, "direction"), "Dip");
+    assert_eq!(cell(expansion, 34, "buy"), "82.10");
+    assert_eq!(cell(expansion, 34, "sell"), "109.90");
+    // c = 82.10 x 1.03 = 84.563 and r = 109.90 x 0.895 = 98.3605, so the net margin is 13.7975.
+    assert_eq!(cell(expansion, 34, "net"), "13.80");
+    assert_eq!(cell(expansion, 34, "margin"), "16.32%");
+}
+
+#[tokio::test]
+async fn the_window_with_the_highest_margin_is_the_one_in_the_row() {
+    let (app, browser) = setup().await;
+    // The spike gives m = 8.8% (buy 100.00, sell 125.20); the dip 16.3% (buy 82.10, sell 109.90).
+    Item {
+        best_buy: "100.00",
+        best_sell: "110.00",
+        windows: vec![
+            (DAILY_18, Direction::Spike, 12_520, 4_000.0),
+            (TUESDAY_11, Direction::Dip, 8_210, 900.0),
+        ],
+        ..Item::new(34)
+    }
+    .insert(&app)
+    .await;
+
+    let html = get(&app, &browser, "/opportunities/tables").await;
+    let expansion = table(&html, "expansion");
+
+    assert_eq!(rows(expansion), [34], "one row per item");
+    assert_eq!(cell(expansion, 34, "direction"), "Dip");
+    assert_eq!(cell(expansion, 34, "window"), "weekly Tue 11:00");
+}
+
+#[tokio::test]
+async fn a_dip_whose_buy_price_is_not_below_the_sell_price_is_not_listed() {
+    let (app, browser) = setup().await;
+    // B 150.00 against S 109.90: no margin.
+    Item {
+        best_buy: "100.00",
+        best_sell: "110.00",
+        windows: vec![(TUESDAY_11, Direction::Dip, 15_000, 900.0)],
+        ..Item::new(34)
+    }
+    .insert(&app)
+    .await;
+
+    let html = get(&app, &browser, "/opportunities/tables").await;
+
+    assert_eq!(rows(table(&html, "expansion")), Vec::<i64>::new());
+}
+
+#[tokio::test]
+async fn on_equal_margins_the_window_that_starts_next_is_the_one_in_the_row() {
+    let (app, browser) = setup().await;
+    // Two spikes with the same S: the daily window starts before the weekly one or at most with
+    // it, so the row is the daily one.
+    Item {
+        best_buy: "100.00",
+        best_sell: "110.00",
+        windows: vec![
+            (TUESDAY_11, Direction::Spike, 12_520, 1.0),
+            (DAILY_18, Direction::Spike, 12_520, 2.0),
+        ],
+        ..Item::new(34)
+    }
+    .insert(&app)
+    .await;
+    let now = time::OffsetDateTime::now_utc();
+    let expected = if DAILY_18.next_start(now) <= TUESDAY_11.next_start(now) {
+        "daily 18:00"
+    } else {
+        "weekly Tue 11:00"
+    };
+
+    let html = get(&app, &browser, "/opportunities/tables").await;
+
+    assert_eq!(cell(table(&html, "expansion"), 34, "window"), expected);
 }
 
 async fn snapshot_days(app: &TestApp, days: i64) {
@@ -748,25 +914,15 @@ async fn snapshot_days(app: &TestApp, days: i64) {
 }
 
 #[tokio::test]
-async fn the_expansion_table_says_that_hourly_patterns_are_still_being_collected() {
+async fn no_table_says_that_hourly_data_is_being_collected() {
     let (app, browser) = setup().await;
     snapshot_days(&app, 3).await;
 
     let html = get(&app, &browser, "/opportunities/tables").await;
 
-    assert!(
-        table(&html, "expansion").contains("Collecting hourly data (3/7 days)"),
-        "{html}"
-    );
-    assert!(!table(&html, "classic").contains("Collecting hourly data"));
-}
-
-#[tokio::test]
-async fn the_collecting_note_goes_away_after_seven_days() {
-    let (app, browser) = setup().await;
-    snapshot_days(&app, 7).await;
-
-    let html = get(&app, &browser, "/opportunities/tables").await;
-
     assert!(!html.contains("Collecting hourly data"), "{html}");
+    assert!(
+        table(&html, "expansion").contains("No opportunities."),
+        "an empty table, without a note: {html}"
+    );
 }

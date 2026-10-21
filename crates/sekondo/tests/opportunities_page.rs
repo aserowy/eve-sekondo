@@ -600,3 +600,68 @@ async fn an_empty_table_shows_no_opportunities_and_then_its_explainer() {
     assert!(empty < card);
     assert!(explainer(&html).contains("11,790.00"));
 }
+
+#[tokio::test]
+async fn the_expansion_signal_covers_the_expansion_the_quiet_rule_both_directions_and_the_prices() {
+    let (app, browser) = setup().await;
+
+    let html = get(&app, &browser, "/opportunities/expansion").await;
+    let card = explainer(&html);
+    let signal =
+        &card[card.find("<h3>Signal</h3>").unwrap()..card.find("<h3>Shared figures</h3>").unwrap()];
+
+    for text in [
+        "at least twice the median",
+        "UTC day",
+        "dip",
+        "spike",
+        "more than 10% of its hours",
+        "25th percentile",
+        "75th percentile",
+        "7 days",
+        "1.20, 1.22, 1.25, 1.26, 1.28, 1.30, 1.31, 1.33, 1.35 and 1.40",
+        "1.2525",
+        "12,525.00",
+        "12,520.00",
+    ] {
+        assert!(signal.contains(text), "{text} missing: {signal}");
+    }
+    assert!(
+        !signal.contains("1.5 times"),
+        "the old rule is gone: {signal}"
+    );
+    assert!(!signal.contains("fewer days"), "{signal}");
+}
+
+#[tokio::test]
+async fn the_expansion_example_is_a_spike_and_its_playbook_has_both_directions() {
+    let (app, browser) = setup().await;
+
+    let html = get(&app, &browser, "/opportunities/expansion").await;
+    let card = explainer(&html);
+    let example = &card[card.find("<h3>Worked example</h3>").unwrap()
+        ..card.find("<h3>Order playbook</h3>").unwrap()];
+    let playbook = &card[card.find("<h3>Order playbook</h3>").unwrap()..];
+
+    assert!(
+        example.contains(r#"<th scope="row">Dir</th><td>Spike"#),
+        "{example}"
+    );
+    for text in ["12,520.00", "17.55%", "11.87M"] {
+        assert!(example.contains(text), "{text} missing");
+    }
+    assert!(
+        playbook.contains("unless the table\u{2019}s own steps say otherwise"),
+        "{playbook}"
+    );
+    assert!(playbook.contains("For a spike row"), "{playbook}");
+    assert!(playbook.contains("For a dip row"), "{playbook}");
+    assert!(
+        playbook.contains("at B itself, not one tick above"),
+        "{playbook}"
+    );
+    assert!(
+        playbook.contains("cancel it when the window ends unfilled"),
+        "{playbook}"
+    );
+}

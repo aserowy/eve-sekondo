@@ -41,6 +41,7 @@ fn the_detail_legend_follows_the_figure_groups() {
             "b",
             "t",
             "B",
+            "Best buy",
             "Best sell",
             "S",
             "c",
@@ -63,12 +64,13 @@ fn the_detail_legend_follows_the_figure_groups() {
 }
 
 #[test]
-fn the_best_buy_is_named_as_not_a_suggested_price() {
-    assert!(
-        Term::BestBuy.name().contains("not a suggested price"),
-        "{}",
-        Term::BestBuy.name()
+fn b_is_named_as_not_a_suggested_price_except_for_a_dip_row() {
+    assert_eq!(
+        Term::Buy.name(),
+        "Current best buy, not a suggested price, except in a dip row of the recurring spread \
+         expansion table, where it is the predicted buy price"
     );
+    assert_eq!(Term::BestBuy.name(), "Current best buy");
 }
 
 #[test]
@@ -87,5 +89,47 @@ fn the_item_entry_explains_the_own_order_marks() {
     assert!(
         meaning.contains("own buy") && meaning.contains("own sell"),
         "{meaning}"
+    );
+}
+
+#[test]
+fn the_expansion_legend_lists_its_columns_in_order_with_dir_and_v_win() {
+    assert_eq!(
+        shorts(&legend::table_terms(Table::Expansion)),
+        [
+            "Item",
+            "B",
+            "S",
+            "Net",
+            "m",
+            "ISK/d",
+            "V7",
+            "V30",
+            "\u{03C3}",
+            "T_max",
+            "T_fill",
+            "V_min",
+            "n b/s",
+            "Window",
+            "Dir",
+            "V_win",
+            "Next (UTC)",
+        ]
+    );
+}
+
+#[test]
+fn dir_and_v_win_say_what_they_mean() {
+    let dir = Term::Dir.meaning();
+    assert!(dir.contains("Dip") && dir.contains("Spike"), "{dir}");
+    let window = Term::Window.meaning();
+    assert!(
+        window.contains("twice") && window.contains("60%"),
+        "the expanded hour and the recurrence rules: {window}"
+    );
+    let v_win = Term::VWin.meaning();
+    assert!(
+        v_win.contains("buy orders for a dip") && v_win.contains("sell orders for a spike"),
+        "{v_win}"
     );
 }

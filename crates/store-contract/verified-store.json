@@ -1,6 +1,6 @@
 {
-  "fingerprint": "ec5c3e61de52234467ccfabb2bc4e38917bc09357fe3632659c8a910cba17e87",
-  "verified_at": "2026-10-20T10:44:39.748276723Z",
+  "fingerprint": "682faafc9677296e713e3de8122cd6abc1316bad654fb5eea98b76a39e8a439b",
+  "verified_at": "2026-10-20T17:50:45.356958536Z",
   "cases": [
     "accounts/tokens-round-trip-as-ciphertext",
     "accounts/an-account-lists-its-characters-in-link-order",
@@ -70,6 +70,10 @@
     "station/the-history-table-and-the-item-row-show-what-is-stored",
     "station/the-materialized-buckets-are-listed",
     "station/a-seeded-item-row-replaces-the-whole-row",
+    "station/completed-days-are-flagged-once-with-their-expanded-hours",
+    "station/flags-before-the-cut-are-pruned",
+    "station/the-medians-of-the-hourly-averages",
+    "station/windows-are-replaced-as-a-whole",
     "opportunities/an-account-without-filters-has-none-stored",
     "opportunities/saved-filters-come-back-and-are-replaced",
     "opportunities/filters-belong-to-their-account",

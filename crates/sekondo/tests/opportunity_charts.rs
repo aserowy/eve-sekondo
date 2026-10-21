@@ -1,7 +1,7 @@
 //! The data of the detail window's charts, as the browser draws it.
 
 use sekondo::opportunities::{
-    analysis::{DayPoint, HourPoint, Window, WindowKind},
+    analysis::{DayPoint, Direction, ExpandedHour, HourPoint, WindowKind},
     charts::{self, Chart, Day, Depth, PricePoint},
 };
 use time::{Date, Duration, Month, OffsetDateTime, Weekday};
@@ -230,22 +230,38 @@ fn the_spread_by_weekday_averages_the_daily_spread_of_each_weekday() {
     close(values(&chart, 0)[0], 5.0, 1e-9);
 }
 
-#[test]
-fn the_peaks_chart_marks_the_sell_price_over_every_past_occurrence() {
-    let at = |day: u8| date(day).with_hms(18, 0, 0).unwrap().assume_utc();
-    let window = Window {
-        kind: WindowKind::HourOfDay { hour: 18 },
-        peaks: vec![12_000, 13_000, 14_000],
-        occurrences: vec![(at(1), 14_000), (at(2), 12_000), (at(3), 13_000)],
-        sell_cents: 12_520,
-        next_start: at(4),
-    };
+fn expanded(at: OffsetDateTime, direction: Direction, extreme_cents: i64) -> ExpandedHour {
+    ExpandedHour {
+        start: at,
+        direction,
+        ratio: 1.0,
+        extreme_cents,
+        taken: 1,
+    }
+}
 
-    let chart = charts::peaks(&window);
+#[test]
+fn the_peaks_chart_marks_the_sell_price_over_every_past_spike_of_the_window() {
+    let at = |day: u8, hour: u8| date(day).with_hms(hour, 0, 0).unwrap().assume_utc();
+    let hours = [
+        expanded(at(1, 18), Direction::Spike, 14_000),
+        expanded(at(2, 18), Direction::Spike, 12_000),
+        // other hours and the other direction are not part of the window
+        expanded(at(2, 9), Direction::Spike, 99_999),
+        expanded(at(3, 18), Direction::Dip, 5_000),
+        expanded(at(3, 18) + Duration::days(1), Direction::Spike, 13_000),
+    ];
+
+    let chart = charts::peaks(
+        WindowKind::HourOfDay { hour: 18 },
+        Direction::Spike,
+        12_520,
+        &hours,
+    );
 
     assert_eq!(
         chart.labels,
-        ["2026-09-01 18:00", "2026-09-02 18:00", "2026-09-03 18:00"]
+        ["2026-09-01 18:00", "2026-09-02 18:00", "2026-09-04 18:00"]
     );
     assert_eq!(chart.series[0].name, "Peak");
     assert_eq!(
@@ -256,6 +272,36 @@ fn the_peaks_chart_marks_the_sell_price_over_every_past_occurrence() {
     assert_eq!(chart.series[1].kind, Some("line"));
     assert_eq!(values(&chart, 1), [Some(12_520.0); 3]);
     assert_eq!(chart.series[1].exact[0], "125.20");
+}
+
+#[test]
+fn the_troughs_chart_marks_the_buy_price_over_every_past_dip_of_the_weekday_window() {
+    // 1 September 2026 is a Tuesday.
+    let at = |day: u8, hour: u8| date(day).with_hms(hour, 0, 0).unwrap().assume_utc();
+    let hours = [
+        expanded(at(1, 11), Direction::Dip, 8_000),
+        expanded(at(8, 11), Direction::Dip, 8_400),
+        // a Wednesday and a spike are not part of the window
+        expanded(at(2, 11), Direction::Dip, 1),
+        expanded(at(15, 11), Direction::Spike, 1),
+    ];
+
+    let chart = charts::peaks(
+        WindowKind::WeekdayHour {
+            weekday: Weekday::Tuesday,
+            hour: 11,
+        },
+        Direction::Dip,
+        8_210,
+        &hours,
+    );
+
+    assert_eq!(chart.labels, ["2026-09-01 11:00", "2026-09-08 11:00"]);
+    assert_eq!(chart.series[0].name, "Trough");
+    assert_eq!(values(&chart, 0), [Some(8_000.0), Some(8_400.0)]);
+    assert_eq!(chart.series[1].name, "B");
+    assert_eq!(values(&chart, 1), [Some(8_210.0); 2]);
+    assert_eq!(chart.series[1].exact[0], "82.10");
 }
 
 #[test]

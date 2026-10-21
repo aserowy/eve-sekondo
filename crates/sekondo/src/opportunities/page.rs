@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use super::{
     REGION_ID, STATION_ID, STATION_NAME,
-    analysis::{self, FeeSource},
+    analysis::{self, Direction, FeeSource, WindowKind},
     charts,
     legend::{self, LegendEntry, Term},
     settings::{FieldError, Form, Settings},
@@ -47,8 +47,6 @@ pub struct FreshnessView {
     pub history_last: Option<String>,
     pub history_error: Option<String>,
     pub own_days: i64,
-    /// How many days of own snapshots the hourly patterns need.
-    pub own_days_needed: usize,
     pub own_days_text: String,
 }
 
@@ -71,7 +69,6 @@ pub async fn freshness(
             .map(format::eve_time),
         history_error: row("history").and_then(|r| r.last_error.clone()),
         own_days: days,
-        own_days_needed: analysis::MIN_HOURLY_DAYS,
         own_days_text: match days {
             1 => "1 day of own snapshots".to_owned(),
             n => format!("{n} days of own snapshots"),
@@ -538,8 +535,8 @@ fn row_view(table: Table, row: &Row, page_query: &str) -> RowView {
         let (text, title) = match key {
             SortKey::Item => (row.name.clone(), String::new()),
             SortKey::Buy => (
-                format::isk_short(row.best_buy_cents),
-                format::isk_exact(row.best_buy_cents),
+                format::isk_short(row.buy_cents),
+                format::isk_exact(row.buy_cents),
             ),
             SortKey::Sell => (
                 format::isk_short(row.sell_cents),
@@ -559,6 +556,12 @@ fn row_view(table: Table, row: &Row, page_query: &str) -> RowView {
                 String::new(),
             ),
             SortKey::Window => (row.window_label(), String::new()),
+            SortKey::Direction => (
+                row.direction()
+                    .map_or_else(String::new, |d| d.label().to_owned()),
+                String::new(),
+            ),
+            SortKey::WindowVolume => (whole(row.v_win()), String::new()),
             SortKey::NextStart => (
                 match &row.extra {
                     Extra::Expansion { next_start, .. } => format::eve_time(*next_start),
@@ -897,6 +900,22 @@ pub struct SectionView {
     pub label: String,
 }
 
+/// One recurring window in the detail page's "Recurring windows" section.
+pub struct WindowView {
+    pub label: String,
+    pub direction: &'static str,
+    /// `S` for a spike, `B` for a dip.
+    pub price_label: &'static str,
+    pub price: String,
+    /// `occurrences/covered`.
+    pub occurrences: String,
+    pub v_win: String,
+    /// The next three starts, in EVE time.
+    pub next: Vec<String>,
+    /// The window the table's row uses.
+    pub chosen: bool,
+}
+
 pub struct DetailView {
     pub name: String,
     pub table_title: &'static str,
@@ -910,8 +929,8 @@ pub struct DetailView {
     pub page_url: String,
     pub sections: Vec<SectionView>,
     pub charts: Vec<ChartView>,
-    /// The starts of the next occurrences of the window of an expansion row.
-    pub next_occurrences: Vec<String>,
+    /// Every recurring window of an expansion item.
+    pub windows: Vec<WindowView>,
     /// Why the table does not list the item (right now); `None` while it does.
     pub reason: Option<String>,
     pub fees: FeeGroupView,
@@ -945,11 +964,35 @@ fn sell_detail(table: Table, detail: &tables::Detail<'_>) -> Option<String> {
             .sma20
             .map(|sma20| format!("SMA 20 {} rounded down", isk(sma20))),
         Table::Expansion => match &detail.extra {
-            Some(Extra::Expansion { window, .. }) => {
-                Some(format!("p25 of peaks of {}", window.label()))
-            }
+            Some(Extra::Expansion {
+                window,
+                direction: Direction::Spike,
+                ..
+            }) => Some(format!("p25 of peaks of {}", window.label())),
+            Some(Extra::Expansion {
+                direction: Direction::Dip,
+                ..
+            }) => Some(format!(
+                "1 tick below {}",
+                format::isk_short(stats.best_sell_cents)
+            )),
             _ => None,
         },
+    }
+}
+
+/// How a dip row derives B, with its input.
+fn buy_detail(table: Table, detail: &tables::Detail<'_>) -> Option<String> {
+    match (table, &detail.extra) {
+        (
+            Table::Expansion,
+            Some(Extra::Expansion {
+                window,
+                direction: Direction::Dip,
+                ..
+            }),
+        ) => Some(format!("1 tick above p75 of troughs of {}", window.label())),
+        _ => None,
     }
 }
 
@@ -963,20 +1006,27 @@ fn detail_figures(
     let stats = detail.stats;
     let fees = context.fees;
     let group = |title, figures| FigureGroup { title, figures };
-    let mut prices = vec![
-        figure(
-            "buy",
+    let buy_cents = detail.buy_cents.unwrap_or(stats.best_buy_cents);
+    let mut prices = vec![figure(
+        "buy",
+        Term::Buy,
+        format::isk_short(buy_cents),
+        buy_detail(table, detail),
+    )];
+    if buy_cents != stats.best_buy_cents {
+        prices.push(figure(
+            "best-buy",
             Term::BestBuy,
             format::isk_short(stats.best_buy_cents),
             None,
-        ),
-        figure(
-            "best-sell",
-            Term::BestSell,
-            format::isk_short(stats.best_sell_cents),
-            None,
-        ),
-    ];
+        ));
+    }
+    prices.extend([figure(
+        "best-sell",
+        Term::BestSell,
+        format::isk_short(stats.best_sell_cents),
+        None,
+    )]);
     if let Some(sell) = detail.sell_cents {
         prices.push(figure(
             "sell",
@@ -1004,7 +1054,7 @@ fn detail_figures(
                 c.clone(),
                 Some(format!(
                     "{} \u{00D7} {:.4}",
-                    format::isk_short(stats.best_buy_cents),
+                    format::isk_short(buy_cents),
                     1.0 + fees.broker
                 )),
             ),
@@ -1124,8 +1174,10 @@ fn detail_figures(
     .collect()
 }
 
-/// How far back the charts and the recurrence look, in days.
+/// How far back the charts look, in days.
 const CHART_DAYS: i64 = 30;
+/// How far back the occurrences of a window are drawn: 52 weeks.
+const PEAK_DAYS: i64 = 52 * 7;
 
 fn chart_view(kind: &'static str, title: &'static str, chart: &charts::Chart) -> Option<ChartView> {
     match serde_json::to_string(chart) {
@@ -1252,11 +1304,12 @@ async fn detail_charts(
     store: &dyn OpportunityStore,
     table: Table,
     stats: &tables::Stats,
+    row_extra: Option<&Extra>,
     now: OffsetDateTime,
-) -> Result<(Vec<ChartView>, Vec<String>), StoreError> {
+) -> Result<(Vec<ChartView>, Vec<WindowView>), StoreError> {
     let type_id = stats.type_id;
     let mut views = Vec::new();
-    let mut next_occurrences = Vec::new();
+    let mut windows = Vec::new();
     match table {
         Table::Trend => {
             let days = history_days(store, type_id, now).await?;
@@ -1323,22 +1376,74 @@ async fn detail_charts(
                     &charts::spread_by_weekday(&days),
                 ));
             }
-            let windows = analysis::recurring_windows(&hours, &days, now);
-            let window = stats
-                .window()
-                .and_then(|kind| windows.iter().find(|w| w.kind == kind))
-                .or_else(|| windows.first());
-            if let Some(window) = window {
+            let chosen = match row_extra {
+                Some(Extra::Expansion {
+                    window, direction, ..
+                }) => Some((*window, *direction)),
+                _ => None,
+            };
+            windows = window_views(stats, chosen, now);
+            if let Some(window) = stats
+                .windows
+                .iter()
+                .find(|w| Some((w.kind, w.direction)) == chosen)
+            {
+                let expanded = store
+                    .item_expanded_hours(
+                        REGION_ID,
+                        STATION_ID,
+                        type_id,
+                        (now - time::Duration::days(PEAK_DAYS))
+                            .date()
+                            .midnight()
+                            .assume_utc(),
+                    )
+                    .await?;
                 views.extend(chart_view(
                     "peaks",
-                    "Past peaks of the window, with S",
-                    &charts::peaks(window),
+                    match window.direction {
+                        Direction::Spike => "Past peaks of the window, with S",
+                        Direction::Dip => "Past troughs of the window, with B",
+                    },
+                    &charts::peaks(window.kind, window.direction, window.price_cents, &expanded),
                 ));
-                next_occurrences = charts::next_occurrences(window.kind, now, 3);
             }
         }
     }
-    Ok((views, next_occurrences))
+    Ok((views, windows))
+}
+
+/// Every window of the item for the detail page, the one that starts next first.
+fn window_views(
+    stats: &tables::Stats,
+    chosen: Option<(WindowKind, Direction)>,
+    now: OffsetDateTime,
+) -> Vec<WindowView> {
+    let mut windows: Vec<(OffsetDateTime, WindowView)> = stats
+        .windows
+        .iter()
+        .map(|w| {
+            let next = charts::next_occurrences(w.kind, now, 3);
+            (
+                w.kind.next_start(now),
+                WindowView {
+                    label: w.kind.label(),
+                    direction: w.direction.label(),
+                    price_label: match w.direction {
+                        Direction::Spike => "S",
+                        Direction::Dip => "B",
+                    },
+                    price: format::isk_short(w.price_cents),
+                    occurrences: format!("{}/{}", w.occurrences, w.covered),
+                    v_win: whole(w.v_win),
+                    next,
+                    chosen: Some((w.kind, w.direction)) == chosen,
+                },
+            )
+        })
+        .collect();
+    windows.sort_by_key(|(start, _)| *start);
+    windows.into_iter().map(|(_, view)| view).collect()
 }
 
 /// The rows of the detail page, and out of band its sub-menu and context text.
@@ -1384,20 +1489,25 @@ async fn build_detail(
     let refresh_path = format!("/opportunities/detail/{}/{type_id}", table.id());
     let refresh_url = format!("{refresh_path}{page_query}");
     let fees = fee_group(&env, table, Some(type_id));
-    let (name, charts, next_occurrences, reason, figures) =
+    let (name, charts, windows, reason, figures) =
         match tables::detail(table, type_id, &env.stats, &context, sort) {
             Some(detail) => {
-                let (charts, next_occurrences) =
-                    match detail_charts(&*state.stores.opportunities, table, detail.stats, env.now)
-                        .await
-                    {
-                        Ok(drawn) => drawn,
-                        Err(e) => return Err(Box::new(pages::internal_error(e))),
-                    };
+                let (charts, windows) = match detail_charts(
+                    &*state.stores.opportunities,
+                    table,
+                    detail.stats,
+                    detail.extra.as_ref(),
+                    env.now,
+                )
+                .await
+                {
+                    Ok(drawn) => drawn,
+                    Err(e) => return Err(Box::new(pages::internal_error(e))),
+                };
                 (
                     detail.stats.display_name(),
                     charts,
-                    next_occurrences,
+                    windows,
                     detail.reason.clone(),
                     detail_figures(table, &detail, &context),
                 )
@@ -1430,10 +1540,10 @@ async fn build_detail(
         id: chart.kind.to_owned(),
         label: chart.title.to_owned(),
     }));
-    if !next_occurrences.is_empty() {
+    if !windows.is_empty() {
         sections.push(SectionView {
-            id: "next".to_owned(),
-            label: "Next occurrences".to_owned(),
+            id: "windows".to_owned(),
+            label: "Recurring windows".to_owned(),
         });
     }
     let view = DetailView {
@@ -1454,7 +1564,7 @@ async fn build_detail(
         page_url: format!("/opportunities/{}/{type_id}", table.id()),
         sections,
         charts,
-        next_occurrences,
+        windows,
         reason,
         fees,
         figures,

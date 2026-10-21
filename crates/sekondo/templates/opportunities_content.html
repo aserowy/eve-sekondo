@@ -1,7 +1,4 @@
 <section id="{{ view.table.id }}">
-  {% if view.table.id == "expansion" && view.freshness.own_days < view.freshness.own_days_needed as i64 %}
-  <p class="note">Collecting hourly data ({{ view.freshness.own_days }}/{{ view.freshness.own_days_needed }} days)</p>
-  {% endif %}
   {% if view.table.rows.is_empty() %}
   <p>No opportunities.</p>
   {% else %}

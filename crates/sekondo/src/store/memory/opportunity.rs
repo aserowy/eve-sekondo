@@ -9,7 +9,7 @@ use super::{
     tables::{SettingsRow, Tables},
 };
 use crate::{
-    opportunities::{settings::Settings, tables::Stats},
+    opportunities::{analysis::ExpandedHour, settings::Settings, tables::Stats},
     store::{OpportunityStore, StoreResult, SyncRow},
 };
 
@@ -133,10 +133,14 @@ impl OpportunityStore for MemOpportunityStore {
                     volume_rising: s.volume_rising,
                     percent_b: s.percent_b,
                     rsi14: s.rsi14,
-                    expansion_kind: s.expansion_kind.clone(),
-                    expansion_weekday: s.expansion_weekday,
-                    expansion_hour: s.expansion_hour,
-                    expansion_sell_cents: s.expansion_sell.as_ref().and_then(cents),
+                    windows: tables
+                        .item_windows
+                        .iter()
+                        .filter(|(region, station, w)| {
+                            *region == region_id && *station == station_id && w.type_id == *type_id
+                        })
+                        .map(|(_, _, w)| w.clone())
+                        .collect(),
                 })
             })
             .collect())
@@ -253,6 +257,24 @@ impl OpportunityStore for MemOpportunityStore {
                         .unwrap_or_default(),
                 )
             })
+            .collect())
+    }
+
+    async fn item_expanded_hours(
+        &self,
+        region_id: i64,
+        station_id: i64,
+        type_id: i64,
+        from: OffsetDateTime,
+    ) -> StoreResult<Vec<ExpandedHour>> {
+        let tables = self.shared.lock();
+        Ok(tables
+            .expanded_hours
+            .iter()
+            .filter(|((region, station, t, start), _)| {
+                *region == region_id && *station == station_id && *t == type_id && *start >= from
+            })
+            .map(|(_, hour)| *hour)
             .collect())
     }
 

@@ -5,7 +5,7 @@
 
 use std::{cmp::Ordering, collections::HashSet};
 
-use time::{Date, OffsetDateTime, Weekday};
+use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
 use super::legend::Term;
@@ -13,13 +13,13 @@ use super::settings::Settings;
 use super::{
     STATION_ID,
     analysis::{
-        Exclusion, FeeSource, Fees, Figures, Inputs, WindowKind, choose_fees, evaluate, figures,
-        round_down_valid, tick_below,
+        Direction, Exclusion, FeeSource, Fees, Figures, Inputs, WindowKind, choose_fees, evaluate,
+        figures, margin, round_down_valid, tick_below,
     },
 };
 use crate::{
     orders::Dir,
-    store::{FeeStore, OpportunityStore, StoreError},
+    store::{FeeStore, OpportunityStore, StoreError, WindowRow},
 };
 
 /// The four tables, in the order the page shows them.
@@ -70,7 +70,12 @@ impl Table {
     /// The columns only this table has.
     fn extra_keys(self) -> &'static [SortKey] {
         match self {
-            Self::Expansion => &[SortKey::Window, SortKey::NextStart],
+            Self::Expansion => &[
+                SortKey::Window,
+                SortKey::Direction,
+                SortKey::WindowVolume,
+                SortKey::NextStart,
+            ],
             Self::Classic => &[],
             Self::Reversion => &[SortKey::PercentB, SortKey::Rsi],
             Self::Trend => &[SortKey::Sma5, SortKey::Sma20, SortKey::Cross],
@@ -87,7 +92,11 @@ impl Table {
             SortKey::Margin,
             SortKey::IskPerDay,
         ];
-        keys.extend(self.extra_keys());
+        // The expansion table's own columns come last; the other tables' follow ISK/d.
+        let extras_last = self == Self::Expansion;
+        if !extras_last {
+            keys.extend(self.extra_keys());
+        }
         keys.extend([
             SortKey::V7,
             SortKey::V30,
@@ -97,6 +106,9 @@ impl Table {
             SortKey::MinVolume,
             SortKey::Near,
         ]);
+        if extras_last {
+            keys.extend(self.extra_keys());
+        }
         keys
     }
 }
@@ -117,6 +129,8 @@ pub enum SortKey {
     MinVolume,
     Near,
     Window,
+    Direction,
+    WindowVolume,
     NextStart,
     PercentB,
     Rsi,
@@ -143,6 +157,8 @@ impl SortKey {
             Self::MinVolume => "min-volume",
             Self::Near => "near",
             Self::Window => "window",
+            Self::Direction => "direction",
+            Self::WindowVolume => "window-volume",
             Self::NextStart => "next",
             Self::PercentB => "pb",
             Self::Rsi => "rsi",
@@ -161,7 +177,7 @@ impl SortKey {
     pub fn term(self) -> Term {
         match self {
             Self::Item => Term::Item,
-            Self::Buy => Term::BestBuy,
+            Self::Buy => Term::Buy,
             Self::Sell => Term::Sell,
             Self::Net => Term::Net,
             Self::Margin => Term::Margin,
@@ -174,6 +190,8 @@ impl SortKey {
             Self::MinVolume => Term::MinVolume,
             Self::Near => Term::Near,
             Self::Window => Term::Window,
+            Self::Direction => Term::Dir,
+            Self::WindowVolume => Term::VWin,
             Self::NextStart => Term::NextStart,
             Self::PercentB => Term::PercentB,
             Self::Rsi => Term::Rsi,
@@ -187,7 +205,7 @@ impl SortKey {
     pub fn is_numeric(self) -> bool {
         !matches!(
             self,
-            Self::Item | Self::Window | Self::NextStart | Self::Cross
+            Self::Item | Self::Window | Self::Direction | Self::NextStart | Self::Cross
         )
     }
 }
@@ -248,10 +266,9 @@ pub struct Stats {
     pub volume_rising: Option<bool>,
     pub percent_b: Option<f64>,
     pub rsi14: Option<f64>,
-    pub expansion_kind: Option<String>,
-    pub expansion_weekday: Option<i16>,
-    pub expansion_hour: Option<i16>,
-    pub expansion_sell_cents: Option<i64>,
+    /// The recurring windows of the item, set by the store after the row is read.
+    #[sqlx(skip)]
+    pub windows: Vec<WindowRow>,
 }
 
 impl Stats {
@@ -260,37 +277,6 @@ impl Stats {
             .clone()
             .unwrap_or_else(|| format!("Type {}", self.type_id))
     }
-
-    /// The recurring window the expansion fields describe.
-    pub fn window(&self) -> Option<WindowKind> {
-        let hour = || u8::try_from(self.expansion_hour?).ok();
-        let weekday = || weekday_from_monday(self.expansion_weekday?);
-        match self.expansion_kind.as_deref()? {
-            "hour" => Some(WindowKind::HourOfDay { hour: hour()? }),
-            "weekday_hour" => Some(WindowKind::WeekdayHour {
-                weekday: weekday()?,
-                hour: hour()?,
-            }),
-            "weekday" => Some(WindowKind::Weekday {
-                weekday: weekday()?,
-            }),
-            _ => None,
-        }
-    }
-}
-
-fn weekday_from_monday(n: i16) -> Option<Weekday> {
-    [
-        Weekday::Monday,
-        Weekday::Tuesday,
-        Weekday::Wednesday,
-        Weekday::Thursday,
-        Weekday::Friday,
-        Weekday::Saturday,
-        Weekday::Sunday,
-    ]
-    .get(usize::try_from(n).ok()?)
-    .copied()
 }
 
 /// The items on which the selected characters have an order at the station.
@@ -376,6 +362,9 @@ pub enum Extra {
     None,
     Expansion {
         window: WindowKind,
+        direction: Direction,
+        /// Units taken from the side that moved, per occurrence.
+        v_win: f64,
         next_start: OffsetDateTime,
     },
     Reversion {
@@ -394,7 +383,8 @@ pub enum Extra {
 pub struct Row {
     pub type_id: i64,
     pub name: String,
-    pub best_buy_cents: i64,
+    /// B: the current best buy, or the predicted buy price of a dip row.
+    pub buy_cents: i64,
     pub sell_cents: i64,
     pub figures: Figures,
     pub v7: f64,
@@ -414,7 +404,7 @@ impl Row {
         let g = &other.figures;
         match key {
             SortKey::Item => self.name.to_lowercase().cmp(&other.name.to_lowercase()),
-            SortKey::Buy => self.best_buy_cents.cmp(&other.best_buy_cents),
+            SortKey::Buy => self.buy_cents.cmp(&other.buy_cents),
             SortKey::Sell => self.sell_cents.cmp(&other.sell_cents),
             SortKey::Net => float(f.net_per_unit, g.net_per_unit),
             SortKey::Margin => float(f.margin, g.margin),
@@ -429,6 +419,8 @@ impl Row {
                 (self.near_buy + self.near_sell).cmp(&(other.near_buy + other.near_sell))
             }
             SortKey::Window => self.window_label().cmp(&other.window_label()),
+            SortKey::Direction => self.direction().cmp(&other.direction()),
+            SortKey::WindowVolume => float(self.v_win(), other.v_win()),
             SortKey::NextStart => self.next_start().cmp(&other.next_start()),
             SortKey::PercentB => float(self.percent_b(), other.percent_b()),
             SortKey::Rsi => float(self.rsi(), other.rsi()),
@@ -442,6 +434,20 @@ impl Row {
         match &self.extra {
             Extra::Expansion { window, .. } => window.label(),
             _ => String::new(),
+        }
+    }
+
+    pub fn direction(&self) -> Option<Direction> {
+        match &self.extra {
+            Extra::Expansion { direction, .. } => Some(*direction),
+            _ => None,
+        }
+    }
+
+    pub fn v_win(&self) -> f64 {
+        match &self.extra {
+            Extra::Expansion { v_win, .. } => *v_win,
+            _ => f64::NAN,
         }
     }
 
@@ -496,24 +502,38 @@ pub struct Context<'a> {
     pub now: OffsetDateTime,
 }
 
-/// The sell price S and the extra columns of an item in a table, or `None` when the table does
-/// not list it.
-pub fn candidate(table: Table, stats: &Stats, now: OffsetDateTime) -> Option<(i64, Extra)> {
+/// The buy price B, the sell price S and the extra columns of an item in a table.
+#[derive(Debug, Clone)]
+pub struct Candidate {
+    pub buy_cents: i64,
+    pub sell_cents: i64,
+    pub extra: Extra,
+}
+
+/// What a table lists an item with, or `None` when the table does not list it.
+pub fn candidate(table: Table, stats: &Stats, context: &Context<'_>) -> Option<Candidate> {
+    let current = |sell_cents, extra| {
+        Some(Candidate {
+            buy_cents: stats.best_buy_cents,
+            sell_cents,
+            extra,
+        })
+    };
     match table {
-        Table::Classic => Some((tick_below(stats.best_sell_cents), Extra::None)),
+        Table::Classic => current(tick_below(stats.best_sell_cents), Extra::None),
         Table::Trend => {
             let cross_day = stats.cross_day?;
             if stats.volume_rising != Some(true) {
                 return None;
             }
-            Some((
+            current(
                 tick_below(stats.best_sell_cents),
                 Extra::Trend {
                     sma5: stats.sma5?,
                     sma20: stats.sma20?,
                     cross_day,
                 },
-            ))
+            )
         }
         Table::Reversion => {
             let sma20 = stats.sma20?;
@@ -524,33 +544,60 @@ pub fn candidate(table: Table, stats: &Stats, now: OffsetDateTime) -> Option<(i6
             }
             let sell = round_down_valid((sma20 * 100.0).round() as i64);
             // S must be above the current best buy, or there is nothing to earn.
-            (sell > stats.best_buy_cents).then(|| {
-                (
-                    sell,
-                    Extra::Reversion {
-                        percent_b: stats.percent_b.unwrap_or(f64::NAN),
-                        rsi: stats.rsi14.unwrap_or(f64::NAN),
-                    },
-                )
-            })
-        }
-        Table::Expansion => {
-            let window = stats.window()?;
-            Some((
-                stats.expansion_sell_cents?,
-                Extra::Expansion {
-                    window,
-                    next_start: window.next_start(now),
+            if sell <= stats.best_buy_cents {
+                return None;
+            }
+            current(
+                sell,
+                Extra::Reversion {
+                    percent_b: stats.percent_b.unwrap_or(f64::NAN),
+                    rsi: stats.rsi14.unwrap_or(f64::NAN),
                 },
-            ))
+            )
         }
+        Table::Expansion => stats
+            .windows
+            .iter()
+            .map(|w| expansion_candidate(w, stats, context.now))
+            .max_by(|a, b| {
+                let m = |c: &Candidate| margin(c.buy_cents, c.sell_cents, context.fees);
+                m(a).total_cmp(&m(b))
+                    // On equal m the window that starts next wins.
+                    .then_with(|| next_start_of(b).cmp(&next_start_of(a)))
+            }),
     }
 }
 
-/// The shared-rule inputs of an item at a sell price.
-pub fn inputs(stats: &Stats, sell_cents: i64, context: &Context<'_>) -> Inputs {
+fn next_start_of(candidate: &Candidate) -> Option<OffsetDateTime> {
+    match &candidate.extra {
+        Extra::Expansion { next_start, .. } => Some(*next_start),
+        _ => None,
+    }
+}
+
+/// One stored window as a candidate: a spike buys at the current best buy and sells at its
+/// predicted price; a dip buys at its predicted price and sells one tick below the best sell.
+pub fn expansion_candidate(window: &WindowRow, stats: &Stats, now: OffsetDateTime) -> Candidate {
+    let (buy_cents, sell_cents) = match window.direction {
+        Direction::Spike => (stats.best_buy_cents, window.price_cents),
+        Direction::Dip => (window.price_cents, tick_below(stats.best_sell_cents)),
+    };
+    Candidate {
+        buy_cents,
+        sell_cents,
+        extra: Extra::Expansion {
+            window: window.kind,
+            direction: window.direction,
+            v_win: window.v_win,
+            next_start: window.kind.next_start(now),
+        },
+    }
+}
+
+/// The shared-rule inputs of an item at a buy and a sell price.
+pub fn inputs(stats: &Stats, buy_cents: i64, sell_cents: i64, context: &Context<'_>) -> Inputs {
     Inputs {
-        best_buy_cents: stats.best_buy_cents,
+        best_buy_cents: buy_cents,
         sell_cents,
         fees: context.fees,
         capital: context.settings.capital,
@@ -579,6 +626,7 @@ pub struct Detail<'a> {
     pub stats: &'a Stats,
     pub listed: bool,
     pub reason: Option<String>,
+    pub buy_cents: Option<i64>,
     pub sell_cents: Option<i64>,
     pub extra: Option<Extra>,
     pub figures: Option<Figures>,
@@ -595,18 +643,18 @@ pub fn detail<'a>(
     let listed = rows(table, all, context, sort)
         .iter()
         .any(|row| row.type_id == type_id);
-    let candidate = candidate(table, stats, context.now);
-    let (sell_cents, extra) = match candidate {
-        Some((sell, extra)) => (Some(sell), Some(extra)),
-        None => (None, None),
+    let candidate = candidate(table, stats, context);
+    let (buy_cents, sell_cents, extra) = match candidate {
+        Some(c) => (Some(c.buy_cents), Some(c.sell_cents), Some(c.extra)),
+        None => (None, None, None),
     };
-    let figures = sell_cents.and_then(|sell| {
-        let input = inputs(stats, sell, context);
+    let figures = buy_cents.zip(sell_cents).and_then(|(buy, sell)| {
+        let input = inputs(stats, buy, sell, context);
         input.sigma.map(|sigma| figures(&input, sigma))
     });
-    let reason = (!listed).then(|| match sell_cents {
+    let reason = (!listed).then(|| match buy_cents.zip(sell_cents) {
         None => "It no longer meets this table's rule.".to_owned(),
-        Some(sell) => match evaluate(&inputs(stats, sell, context)) {
+        Some((buy, sell)) => match evaluate(&inputs(stats, buy, sell, context)) {
             Err(exclusion) => exclusion_text(exclusion).to_owned(),
             Ok(f) if f.margin < context.settings.min_margin => {
                 "Its net margin is below your minimum margin.".to_owned()
@@ -628,6 +676,7 @@ pub fn detail<'a>(
         stats,
         listed,
         reason,
+        buy_cents,
         sell_cents,
         extra,
         figures,
@@ -642,13 +691,17 @@ pub fn rows(table: Table, all: &[Stats], context: &Context<'_>, sort: Sort) -> V
     let mut rows: Vec<Row> = all
         .iter()
         .filter_map(|stats| {
-            let (sell_cents, extra) = candidate(table, stats, context.now)?;
+            let Candidate {
+                buy_cents,
+                sell_cents,
+                extra,
+            } = candidate(table, stats, context)?;
             let name = stats.display_name();
             if !search.is_empty() && !name.to_lowercase().contains(&search) {
                 return None;
             }
             let v7 = stats.volume_7d.unwrap_or(0.0);
-            let figures = evaluate(&inputs(stats, sell_cents, context)).ok()?;
+            let figures = evaluate(&inputs(stats, buy_cents, sell_cents, context)).ok()?;
             if figures.margin < settings.min_margin
                 || figures.isk_per_day < settings.min_isk_per_day
             {
@@ -657,7 +710,7 @@ pub fn rows(table: Table, all: &[Stats], context: &Context<'_>, sort: Sort) -> V
             Some(Row {
                 type_id: stats.type_id,
                 name,
-                best_buy_cents: stats.best_buy_cents,
+                buy_cents,
                 sell_cents,
                 figures,
                 v7,

@@ -1,10 +1,11 @@
 //! The pure maths of the station opportunity analyses.
 
 use sekondo::opportunities::analysis::{
-    BASE_FEES, DayPoint, Exclusion, FeeSource, Fees, HourPoint, Inputs, WindowKind, bollinger,
-    buy_side_ratio, choose_fees, cost, evaluate, figures, margin, market_share, min_margin,
-    net_per_unit, order_size, recurring_windows, revenue, round_down_valid, rsi14, sma,
-    sma_crossing, snapshot_days, tick_below, volatility, volume_rising,
+    BASE_FEES, Direction, Exclusion, ExpandedHour, FeeSource, Fees, FlaggedDay, HourFigures,
+    Inputs, Medians, Window, WindowKind, bollinger, buy_side_ratio, choose_fees, cost, evaluate,
+    figures, flag_day, margin, market_share, min_margin, net_per_unit, order_size, percentile,
+    recurring_windows, revenue, round_down_valid, rsi14, sma, sma_crossing, tick_above, tick_below,
+    volatility, volume_rising,
 };
 use time::{Date, Duration, Month, OffsetDateTime, Weekday};
 
@@ -50,6 +51,35 @@ fn a_tick_below_a_price_that_is_not_valid_goes_to_the_valid_price_below() {
 fn nothing_is_below_the_smallest_price() {
     assert_eq!(tick_below(1), 0);
     assert_eq!(tick_below(0), 0);
+}
+
+#[test]
+fn one_tick_above_a_round_price_rises_to_the_next_valid_price() {
+    // 1,234,500.00 -> 1,235,000.00
+    assert_eq!(tick_above(123_450_000), 123_500_000);
+    // 820.00 -> 820.10
+    assert_eq!(tick_above(82_000), 82_010);
+    // 9.99 -> 10.00
+    assert_eq!(tick_above(999), 1_000);
+}
+
+#[test]
+fn a_tick_above_a_price_that_is_not_valid_goes_to_the_valid_price_above() {
+    // 150.37 -> 150.40
+    assert_eq!(tick_above(15_037), 15_040);
+    // 1,234,567.00 -> 1,235,000.00
+    assert_eq!(tick_above(123_456_700), 123_500_000);
+}
+
+#[test]
+fn percentiles_interpolate_linearly_between_ranks() {
+    let sorted = [100, 200, 300, 400, 500];
+    close(percentile(&sorted, 0.25), 200.0, 1e-9);
+    close(percentile(&sorted, 0.75), 400.0, 1e-9);
+    let even = [100, 200, 300, 400];
+    close(percentile(&even, 0.25), 175.0, 1e-9);
+    close(percentile(&even, 0.75), 325.0, 1e-9);
+    close(percentile(&[700], 0.25), 700.0, 1e-9);
 }
 
 #[test]
@@ -484,189 +514,362 @@ fn now() -> OffsetDateTime {
     utc(10, 17, 12)
 }
 
-/// The best sell of every ordinary hour, in cents.
-const FLAT_SELL: i64 = 10_000;
+/// The 7-day medians the windows are priced with: best buy 1,000.00 and best sell 10,000.00.
+const MEDIANS: Medians = Medians {
+    buy_cents: 100_000.0,
+    sell_cents: 1_000_000.0,
+};
 
-/// Hourly rollups for the `days_back` days before today (1 = yesterday), every hour of each, with
-/// a spread of 5%. `expand(days_back, hour)` returns the peak best sell in cents of an hour whose
-/// spread jumps to 10%.
-fn hours_of(
-    days_back: std::ops::RangeInclusive<i64>,
-    expand: impl Fn(i64, u8) -> Option<i64>,
-) -> Vec<HourPoint> {
-    let mut hours = Vec::new();
-    for back in days_back {
-        for hour in 0..24u8 {
-            let start = now().replace_time(time::Time::MIDNIGHT) - Duration::days(back)
-                + Duration::hours(i64::from(hour));
-            let peak = expand(back, hour);
-            hours.push(HourPoint {
-                start,
-                spread_avg: 0.05,
-                spread_max: if peak.is_some() { 0.10 } else { 0.05 },
-                sell_max_cents: peak.unwrap_or(FLAT_SELL),
-            });
-        }
+/// What one item's days look like to the recurrence: covered days and their expanded hours.
+#[derive(Default)]
+struct Item {
+    flagged: Vec<FlaggedDay>,
+    expanded: Vec<ExpandedHour>,
+}
+
+fn midnight(back: i64) -> OffsetDateTime {
+    now().replace_time(time::Time::MIDNIGHT) - Duration::days(back)
+}
+
+impl Item {
+    /// A covered day `back` days ago (1 = yesterday) with 24 hours and no expansion.
+    fn day(&mut self, back: i64) {
+        self.flagged.push(FlaggedDay {
+            day: midnight(back).date(),
+            hours: 24,
+            expanded: 0,
+        });
     }
-    hours
+
+    /// An expanded hour on a day that `day` made, taking `taken` units from the moving side. The
+    /// extreme price is the ratio of a median price of 8,000.00 (sell) or 1,200.00 (buy), a
+    /// different level than `MEDIANS`.
+    fn expand(&mut self, back: i64, hour: u8, direction: Direction, ratio: f64, taken: i64) {
+        let day = midnight(back).date();
+        self.flagged
+            .iter_mut()
+            .find(|f| f.day == day)
+            .expect("the day was made")
+            .expanded += 1;
+        let level = match direction {
+            Direction::Spike => 800_000.0,
+            Direction::Dip => 120_000.0,
+        };
+        self.expanded.push(ExpandedHour {
+            start: midnight(back) + Duration::hours(i64::from(hour)),
+            direction,
+            ratio,
+            extreme_cents: (ratio * level).round() as i64,
+            taken,
+        });
+    }
+
+    fn windows(&self) -> Vec<Window> {
+        recurring_windows(&self.flagged, &self.expanded, MEDIANS, now())
+    }
+}
+
+/// Covered days 1..=days back.
+fn covered(days: i64) -> Item {
+    let mut item = Item::default();
+    for back in 1..=days {
+        item.day(back);
+    }
+    item
 }
 
 #[test]
-fn a_daily_evening_expansion_is_a_recurring_window_with_the_p25_of_its_peaks() {
-    // 10 of the last 14 days, at 18:00, with these best sell peaks in ISK.
-    let peaks = [120, 122, 125, 126, 128, 130, 131, 133, 135, 140];
-    let hours = hours_of(1..=14, |back, hour| {
-        (hour == 18 && back <= 10).then(|| peaks[back as usize - 1] * 100)
-    });
+fn a_daily_evening_spike_is_a_recurring_window_priced_from_its_peak_ratios() {
+    // 20 of the last 28 covered days at 18:00; ten of the peaks are these, the rest are higher.
+    let mut item = covered(28);
+    let peaks = [1.20, 1.22, 1.25, 1.26, 1.28, 1.30, 1.31, 1.33, 1.35, 1.40];
+    for back in 1..=20 {
+        let ratio = peaks.get(back as usize - 1).copied().unwrap_or(1.5);
+        item.expand(back, 18, Direction::Spike, ratio, 100);
+    }
 
-    let windows = recurring_windows(&hours, &[], now());
+    let windows = item.windows();
 
-    assert_eq!(windows.len(), 1, "{windows:?}");
-    let window = &windows[0];
-    assert_eq!(window.kind, WindowKind::HourOfDay { hour: 18 });
-    assert_eq!(window.peaks.len(), 10);
-    // P25 of the peaks is 125.25 (linear interpolation between 125 and 126); one tick below it
-    // is 125.20.
-    assert_eq!(window.sell_cents, 12_520);
+    // Most weekdays expanded in 3 of the last 4 weeks as well, so their 18:00 are weekly windows
+    // too.
+    let window = windows
+        .iter()
+        .find(|w| w.kind == WindowKind::HourOfDay { hour: 18 })
+        .expect("the daily window");
+    assert_eq!(window.direction, Direction::Spike);
+    assert_eq!(window.occurrences.len(), 20);
+    assert_eq!(window.covered, 28);
+    // p25 of the 20 peaks is 1.295 (between 1.28 and 1.30), x 10,000.00 = 12,950.00; one tick
+    // below it is 12,940.00.
+    assert_eq!(window.price_cents, 1_294_000);
     assert_eq!(window.next_start, utc(10, 17, 18));
 }
 
 #[test]
 fn the_next_start_is_tomorrow_once_todays_window_has_begun() {
-    let hours = hours_of(1..=14, |back, hour| {
-        (hour == 18 && back <= 10).then_some(13_000)
-    });
-
-    let windows = recurring_windows(&hours, &[], utc(10, 17, 18));
-
-    assert_eq!(windows[0].next_start, utc(10, 18, 18));
+    let mut item = covered(14);
+    for back in 1..=10 {
+        item.expand(back, 11, Direction::Spike, 1.3, 1);
+    }
+    let windows = recurring_windows(&item.flagged, &item.expanded, MEDIANS, now());
+    assert_eq!(windows[0].next_start, utc(10, 18, 11));
 }
 
 #[test]
-fn an_expansion_on_too_few_days_is_not_recurring() {
-    let hours = hours_of(1..=14, |back, hour| {
-        (hour == 18 && back <= 5).then_some(13_000)
-    });
-    assert_eq!(recurring_windows(&hours, &[], now()), []);
-}
+fn a_weekly_tuesday_dip_is_priced_one_tick_above_the_p75_of_its_troughs() {
+    // 20 weeks whose Tuesday is covered (and no other covered day); the Tuesday 11:00 hour
+    // dipped in 14 of them, including 3 of the last 4.
+    let mut item = Item::default();
+    let tuesdays: Vec<i64> = (4..).step_by(7).take(20).collect(); // Tuesday 13 Oct is 4 days back
+    for back in &tuesdays {
+        item.day(*back);
+    }
+    let troughs = [
+        0.70, 0.72, 0.74, 0.76, 0.78, 0.79, 0.80, 0.81, 0.815, 0.82, 0.82, 0.83, 0.84, 0.85,
+    ];
+    let weeks = [0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+    for (week, trough) in weeks.iter().zip(troughs) {
+        item.expand(tuesdays[*week], 11, Direction::Dip, trough, 40);
+    }
 
-#[test]
-fn sixty_percent_of_the_days_with_data_is_enough_and_less_is_not() {
-    let six_of_ten = hours_of(1..=10, |back, hour| {
-        (hour == 18 && back <= 6).then_some(13_000)
-    });
-    assert_eq!(recurring_windows(&six_of_ten, &[], now()).len(), 1);
-
-    let five_of_ten = hours_of(1..=10, |back, hour| {
-        (hour == 18 && back <= 5).then_some(13_000)
-    });
-    assert_eq!(recurring_windows(&five_of_ten, &[], now()), []);
-}
-
-#[test]
-fn an_hour_needs_data_on_at_least_seven_days() {
-    // Eight days of data, but hour 18 is only there on six of them, and always expanded.
-    let mut hours = hours_of(1..=8, |back, hour| {
-        (hour == 18 && back <= 6).then_some(13_000)
-    });
-    hours.retain(|h| h.start.hour() != 18 || (now().date() - h.start.date()).whole_days() <= 6);
-    assert_eq!(recurring_windows(&hours, &[], now()), []);
-}
-
-#[test]
-fn a_weekday_and_hour_that_held_three_of_the_last_four_weeks_is_recurring() {
-    // Tuesdays before Saturday 17 October: 13 and 6 October, 29 and 22 September, which are 4, 11,
-    // 18 and 25 days back. Expanded at 18:00 on three of them.
-    let hours = hours_of(1..=28, |back, hour| {
-        (hour == 18 && [4, 11, 25].contains(&back)).then_some(13_000 + back * 100)
-    });
-
-    let windows = recurring_windows(&hours, &[], now());
+    let windows = item.windows();
 
     assert_eq!(windows.len(), 1, "{windows:?}");
+    let window = &windows[0];
     assert_eq!(
-        windows[0].kind,
+        window.kind,
         WindowKind::WeekdayHour {
             weekday: Weekday::Tuesday,
-            hour: 18
+            hour: 11
         }
     );
-    assert_eq!(windows[0].peaks, [13_400, 14_100, 15_500]);
-    assert_eq!(windows[0].next_start, utc(10, 20, 18));
+    assert_eq!(window.direction, Direction::Dip);
+    assert_eq!(window.occurrences.len(), 14);
+    assert_eq!(window.covered, 20);
+    // p75 of the troughs is 0.82, x 1,000.00 = 820.00; one tick above it is 820.10.
+    assert_eq!(window.price_cents, 82_010);
+    assert_eq!(window.next_start, utc(10, 20, 11));
 }
 
 #[test]
-fn two_of_the_last_four_weeks_are_not_enough() {
-    let hours = hours_of(1..=28, |back, hour| {
-        (hour == 18 && [4, 11].contains(&back)).then_some(13_000)
-    });
-    assert_eq!(recurring_windows(&hours, &[], now()), []);
+fn a_constant_spread_has_no_window() {
+    assert_eq!(covered(30).windows(), []);
 }
 
-fn daily(
-    days_back: std::ops::RangeInclusive<i64>,
-    expand: impl Fn(i64) -> Option<i64>,
-) -> Vec<DayPoint> {
-    days_back
-        .map(|back| {
-            let high = expand(back);
-            DayPoint {
-                day: now().date() - Duration::days(back),
-                spread: if high.is_some() { 0.10 } else { 0.05 },
-                high_cents: high.unwrap_or(FLAT_SELL),
+#[test]
+fn an_item_that_is_jumpy_all_day_has_no_window() {
+    // 4 of 24 hours (16.7%) expanded every day, 18:00 on 20 of the last 28 days.
+    let mut item = covered(30);
+    for back in 1..=30 {
+        for hour in [2, 7, 13, 22] {
+            if back > 20 && hour == 22 {
+                continue;
             }
-        })
-        .collect()
+            item.expand(back, hour, Direction::Spike, 1.4, 5);
+        }
+    }
+    for back in 1..=20 {
+        item.expand(back, 18, Direction::Spike, 1.4, 5);
+    }
+    assert_eq!(item.windows(), []);
 }
 
 #[test]
-fn with_three_days_of_snapshots_only_weekday_windows_are_listed() {
-    // Hour 18 expands on all three snapshot days, but that is no pattern yet.
-    let hours = hours_of(1..=3, |_, hour| (hour == 18).then_some(13_000));
-    assert_eq!(snapshot_days(&hours), 3);
-    // From the daily figures: three of the last four Tuesdays were at least 1.5 times the median.
-    let days = daily(1..=28, |back| {
-        [4, 18, 25].contains(&back).then_some(12_000 + back * 10)
-    });
+fn ten_percent_of_the_hours_still_leaves_the_windows() {
+    // 18:00 on 20 of 28 days plus 2 other hours on 10 days: 40 of 720 hours is 5.6%.
+    let mut item = covered(30);
+    for back in 1..=20 {
+        item.expand(back, 18, Direction::Spike, 1.4, 5);
+    }
+    for back in 1..=10 {
+        item.expand(back, 4, Direction::Spike, 1.4, 5);
+        item.expand(back, 9, Direction::Spike, 1.4, 5);
+    }
+    assert!(
+        item.windows()
+            .iter()
+            .any(|w| w.kind == WindowKind::HourOfDay { hour: 18 })
+    );
+}
 
-    let windows = recurring_windows(&hours, &days, now());
+#[test]
+fn an_hour_that_expanded_on_ten_of_28_days_is_too_irregular() {
+    let mut item = covered(28);
+    for back in 1..=10 {
+        item.expand(back, 18, Direction::Spike, 1.4, 5);
+    }
+    assert_eq!(item.windows(), []);
+}
 
+#[test]
+fn sixty_percent_of_the_covered_days_is_enough_and_less_is_not() {
+    let build = |days_expanded: i64| {
+        let mut item = covered(15);
+        for back in 1..=days_expanded {
+            item.expand(back, 18, Direction::Spike, 1.4, 5);
+        }
+        item.windows().len()
+    };
+    assert_eq!(build(9), 1, "9 of 15 is 60%");
+    assert_eq!(build(8), 0, "8 of 15 is at least 7 days but under 60%");
+}
+
+#[test]
+fn an_hour_needs_seven_days_even_when_all_of_them_expanded() {
+    let mut item = covered(6);
+    for back in 1..=6 {
+        item.expand(back, 18, Direction::Spike, 1.4, 5);
+    }
+    assert_eq!(item.windows(), [], "6 of 6 is 100% but under 7 days");
+}
+
+#[test]
+fn a_weekday_hour_that_died_out_is_not_recurring() {
+    // 12 of the 20 covered Tuesdays dipped, but none of the last 4.
+    let mut item = Item::default();
+    let tuesdays: Vec<i64> = (4..).step_by(7).take(20).collect();
+    for back in &tuesdays {
+        item.day(*back);
+    }
+    for back in tuesdays.iter().skip(4).take(12) {
+        item.expand(*back, 11, Direction::Dip, 0.8, 5);
+    }
+    assert_eq!(item.windows(), []);
+}
+
+#[test]
+fn two_of_the_last_four_weeks_are_enough_and_one_is_not() {
+    let windows = |weeks: &[usize]| {
+        let mut item = Item::default();
+        let tuesdays: Vec<i64> = (4..).step_by(7).take(8).collect();
+        for back in &tuesdays {
+            item.day(*back);
+        }
+        for week in weeks {
+            item.expand(tuesdays[*week], 11, Direction::Dip, 0.8, 5);
+        }
+        item.windows().len()
+    };
+    // 5 of 8 weeks is above 60%; two of them are among the last four, or only one
+    assert_eq!(windows(&[0, 1, 4, 5, 6]), 1);
+    assert_eq!(windows(&[0, 4, 5, 6, 7]), 0);
+}
+
+#[test]
+fn directions_are_separate() {
+    let mut item = covered(28);
+    for back in 1..=10 {
+        item.expand(back, 18, Direction::Dip, 0.8, 5);
+    }
+    for back in 11..=20 {
+        item.expand(back, 18, Direction::Spike, 1.3, 5);
+    }
+    assert_eq!(item.windows(), []);
+}
+
+#[test]
+fn a_dip_and_a_spike_window_at_different_hours_are_both_listed_by_next_start() {
+    let mut item = covered(14);
+    for back in 1..=10 {
+        item.expand(back, 18, Direction::Spike, 1.3, 5);
+        item.expand(back, 11, Direction::Dip, 0.8, 5);
+    }
+    let windows = item.windows();
+    assert_eq!(windows.len(), 2, "{windows:?}");
+    assert_eq!(
+        (windows[0].kind, windows[0].direction),
+        (WindowKind::HourOfDay { hour: 18 }, Direction::Spike),
+        "18:00 starts today, 11:00 tomorrow"
+    );
+    assert_eq!(
+        (windows[1].kind, windows[1].direction),
+        (WindowKind::HourOfDay { hour: 11 }, Direction::Dip)
+    );
+}
+
+#[test]
+fn old_peaks_follow_todays_price() {
+    // The peaks were recorded at a median of 8,000.00 (extreme 10,000.00 for 1.25); the 7-day
+    // median is 10,000.00 now.
+    let mut item = Item::default();
+    let tuesdays: Vec<i64> = (4..).step_by(7).take(8).collect();
+    for back in &tuesdays {
+        item.day(*back);
+    }
+    for week in 0..6 {
+        item.expand(tuesdays[week], 18, Direction::Spike, 1.25, 5);
+    }
+    let windows = item.windows();
     assert_eq!(windows.len(), 1, "{windows:?}");
     assert_eq!(
-        windows[0].kind,
-        WindowKind::Weekday {
-            weekday: Weekday::Tuesday
-        }
+        windows[0].occurrences[0].1, 1_000_000,
+        "the ISK peak of back then"
     );
-    assert_eq!(windows[0].peaks, [12_040, 12_180, 12_250]);
-    // P25 of 120.40, 121.80, 122.50 is 121.10; one tick below it is 121.00.
-    assert_eq!(windows[0].sell_cents, 12_100);
-    assert_eq!(windows[0].next_start, utc(10, 20, 0));
+    // 1.25 x 10,000.00 = 12,500.00; one tick below it is 12,490.00
+    assert_eq!(windows[0].price_cents, 1_249_000);
 }
 
 #[test]
-fn the_window_with_the_highest_sell_price_comes_first() {
-    let hours = hours_of(1..=14, |back, hour| match hour {
-        7 if back <= 10 => Some(20_000),
-        18 if back <= 10 => Some(13_000),
-        _ => None,
-    });
+fn the_explainers_peaks_give_their_example_sell_price() {
+    // The peaks of "daily 18:00" on 10 of 14 covered days; their 25th percentile is 1.2525.
+    let mut item = covered(14);
+    let peaks = [1.20, 1.22, 1.25, 1.26, 1.28, 1.30, 1.31, 1.33, 1.35, 1.40];
+    for (back, peak) in (1..=10).zip(peaks) {
+        item.expand(back, 18, Direction::Spike, peak, 5);
+    }
+    let windows = item.windows();
+    assert_eq!(windows.len(), 1, "{windows:?}");
+    assert_eq!(windows[0].kind.label(), "daily 18:00");
+    // 1.2525 x 10,000.00 = 12,525.00; one tick below is 12,520.00
+    assert_eq!(windows[0].price_cents, 1_252_000);
+}
 
-    let windows = recurring_windows(&hours, &[], now());
+#[test]
+fn the_window_volume_is_the_average_taken_per_occurrence() {
+    let mut item = covered(14);
+    for back in 1..=10 {
+        item.expand(
+            back,
+            18,
+            Direction::Spike,
+            1.3,
+            if back <= 5 { 100 } else { 300 },
+        );
+    }
+    close(item.windows()[0].v_win, 200.0, 1e-9);
+}
 
-    assert_eq!(
-        windows.iter().map(|w| w.kind).collect::<Vec<_>>(),
-        [
-            WindowKind::HourOfDay { hour: 7 },
-            WindowKind::HourOfDay { hour: 18 }
-        ]
-    );
-    assert!(windows[0].sell_cents > windows[1].sell_cents);
+#[test]
+fn the_first_days_after_the_release_have_no_hour_window() {
+    let mut item = covered(5);
+    for back in 1..=5 {
+        item.expand(back, 18, Direction::Spike, 1.3, 5);
+    }
+    assert_eq!(item.windows(), []);
 }
 
 #[test]
 fn without_data_there_are_no_windows() {
-    assert_eq!(recurring_windows(&[], &[], now()), []);
+    assert_eq!(recurring_windows(&[], &[], MEDIANS, now()), []);
+}
+
+#[test]
+fn today_does_not_count() {
+    // an expansion earlier today on a (partly) covered day is ignored
+    let mut item = Item::default();
+    item.flagged.push(FlaggedDay {
+        day: now().date(),
+        hours: 24,
+        expanded: 1,
+    });
+    item.expanded.push(ExpandedHour {
+        start: utc(10, 17, 8),
+        direction: Direction::Spike,
+        ratio: 1.3,
+        extreme_cents: 1,
+        taken: 1,
+    });
+    assert_eq!(item.windows(), []);
 }
 
 // ---- window names and next starts ----
@@ -682,13 +885,6 @@ fn a_window_is_named_by_its_recurrence() {
         }
         .label(),
         "weekly Tue 18:00"
-    );
-    assert_eq!(
-        WindowKind::Weekday {
-            weekday: Weekday::Sunday
-        }
-        .label(),
-        "weekly Sun"
     );
 }
 
@@ -710,14 +906,6 @@ fn the_next_start_of_a_window_is_the_first_occurrence_after_now() {
         }
         .next_start(now()),
         utc(10, 20, 18)
-    );
-    assert_eq!(
-        WindowKind::Weekday {
-            weekday: Weekday::Saturday
-        }
-        .next_start(now()),
-        utc(10, 24, 0),
-        "today's midnight has passed"
     );
 }
 
@@ -905,16 +1093,101 @@ fn the_explainers_signals_give_their_examples_sell_prices() {
     assert_eq!(tick_below(1_180_000), 1_179_000);
     // Mean reversion: the SMA 20 rounded down to a valid price.
     assert_eq!(round_down_valid(1_053_740), 1_053_000);
-    // Expansion: the peaks of "daily 18:00" on 10 of the last 14 days; their 25th percentile is
-    // 12,525.00 and one tick below it is 12,520.00.
-    let peaks = [
-        12_000, 12_200, 12_500, 12_600, 12_800, 13_000, 13_100, 13_300, 13_500, 14_000,
-    ];
-    let hours = hours_of(1..=14, |back, hour| {
-        (hour == 18 && back <= 10).then(|| peaks[back as usize - 1] * 100)
-    });
-    let windows = recurring_windows(&hours, &[], now());
-    assert_eq!(windows.len(), 1, "{windows:?}");
-    assert_eq!(windows[0].kind.label(), "daily 18:00");
-    assert_eq!(windows[0].sell_cents, 1_252_000);
+    // Expansion: see the_explainers_peaks_give_their_example_sell_price.
+}
+
+// ---- flagging a day ----
+
+fn day_hours(count: u8) -> Vec<HourFigures> {
+    (0..count)
+        .map(|hour| HourFigures {
+            start: utc(10, 5, hour),
+            spread_max: 0.10,
+            best_buy_avg: 10_000.0,
+            best_sell_avg: 11_000.0,
+            best_buy_min_cents: 10_000,
+            best_sell_max_cents: 11_000,
+            buy_taken: 5,
+            sell_taken: 7,
+        })
+        .collect()
+}
+
+#[test]
+fn a_constant_spread_has_no_expanded_hour() {
+    let flags = flag_day(&day_hours(24));
+    assert!(flags.covered);
+    assert_eq!(flags.hours, 24);
+    assert_eq!(flags.expanded, []);
+}
+
+#[test]
+fn one_sell_jump_at_18_is_a_spike_with_its_peak_ratio() {
+    let mut hours = day_hours(24);
+    hours[18].spread_max = 0.25;
+    hours[18].best_sell_max_cents = 13_750;
+    hours[18].sell_taken = 900;
+    let flags = flag_day(&hours);
+    assert_eq!(flags.expanded.len(), 1);
+    let hour = &flags.expanded[0];
+    assert_eq!(hour.start, utc(10, 5, 18));
+    assert_eq!(hour.direction, Direction::Spike);
+    close(hour.ratio, 1.25, 1e-9);
+    assert_eq!(hour.extreme_cents, 13_750);
+    assert_eq!(hour.taken, 900);
+}
+
+#[test]
+fn a_buy_drop_is_a_dip_with_its_trough_ratio() {
+    let mut hours = day_hours(24);
+    hours[11].spread_max = 0.30;
+    hours[11].best_buy_min_cents = 8_200;
+    hours[11].buy_taken = 400;
+    let flags = flag_day(&hours);
+    assert_eq!(flags.expanded.len(), 1);
+    let hour = &flags.expanded[0];
+    assert_eq!(hour.direction, Direction::Dip);
+    close(hour.ratio, 0.82, 1e-9);
+    assert_eq!(hour.extreme_cents, 8_200);
+    assert_eq!(hour.taken, 400);
+}
+
+#[test]
+fn equal_moves_are_a_spike() {
+    let mut hours = day_hours(24);
+    hours[3].spread_max = 0.30;
+    hours[3].best_buy_min_cents = 9_000; // -10%
+    hours[3].best_sell_max_cents = 12_100; // +10%
+    let flags = flag_day(&hours);
+    assert_eq!(flags.expanded.len(), 1);
+    assert_eq!(flags.expanded[0].direction, Direction::Spike);
+}
+
+#[test]
+fn an_even_hour_count_uses_the_mean_of_the_middle_two() {
+    // 20 hours: ten at 0.125, nine at 0.25 and one at 0.375, so the median is 0.1875 and 0.375 is
+    // exactly 2x (all exact in binary)
+    let mut hours = day_hours(20);
+    for hour in hours.iter_mut() {
+        hour.spread_max = 0.125;
+    }
+    for hour in hours.iter_mut().skip(10) {
+        hour.spread_max = 0.25;
+    }
+    hours[19].spread_max = 0.375;
+    hours[19].best_sell_max_cents = 12_000;
+    let flags = flag_day(&hours);
+    assert_eq!(flags.expanded.len(), 1, "0.375 >= 2 x 0.1875");
+    assert_eq!(flags.expanded[0].start, utc(10, 5, 19));
+}
+
+#[test]
+fn a_day_with_19_hours_is_not_covered() {
+    let mut hours = day_hours(19);
+    hours[5].spread_max = 0.50;
+    hours[5].best_sell_max_cents = 15_000;
+    let flags = flag_day(&hours);
+    assert!(!flags.covered);
+    assert_eq!(flags.hours, 19);
+    assert_eq!(flags.expanded, []);
 }

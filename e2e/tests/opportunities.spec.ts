@@ -69,7 +69,7 @@ test('a classic row shows the sell price one tick below the best sell and the cu
   await expect(row.locator('[data-col="item"]')).toContainText('Tritanium');
   await expect(row.locator('[data-col="buy"]')).toHaveText('100.00');
   await expect(row.locator('[data-col="sell"]')).toHaveText('119.90');
-  await expect(classic.locator('th abbr', { hasText: /^B$/ })).toHaveAttribute('title', 'Current best buy, not a suggested price');
+  await expect(classic.locator('th abbr', { hasText: /^B$/ })).toHaveAttribute('title', /^Current best buy, not a suggested price, except in a dip row/);
   // Alice's fees at Jita 4-4: c = 101.41, r = 119.90 * 0.95215, so a margin of 12.58%.
   await expect(row.locator('[data-col="margin"]')).toHaveText('12.58%');
   await expect(page.locator('#fee-filter').getByRole('radio', { name: 'Alice Alpha' })).toBeChecked();
@@ -158,22 +158,36 @@ function minutesBack(daysBack: number, hour: number): number {
   return Math.round((now.getTime() - at) / 60_000);
 }
 
-test('an evening spread expansion that recurred on most days is listed as a daily window', async ({ page }) => {
+/** 14 days of hourly snapshots at :30 with a spread of 5% (100 / 105); `jump` gives `[buy, sell]` for other hours. */
+function hourly(type: number, jump: (back: number, hour: number) => [number, number] | undefined): SeedSnapshot[] {
+  const snapshots: SeedSnapshot[] = [];
+  for (let back = 1; back <= 14; back++) {
+    for (let hour = 0; hour < 24; hour++) {
+      const [buy, sell] = jump(back, hour) ?? [100, 105];
+      snapshots.push({ type_id: type, minutes_back: minutesBack(back, hour), best_buy: buy, best_sell: sell });
+    }
+  }
+  return snapshots;
+}
+
+/** A best sell of 134 + the days back at 18:30 on ten days (not yesterday, which may not be complete yet). */
+const evening = (back: number, hour: number): [number, number] | undefined =>
+  hour === 18 && back >= 2 && back <= 11 ? [100, 134 + back] : undefined;
+
+/** A best buy of 80 at 11:30 on ten days (not yesterday). */
+const morningDip = (back: number, hour: number): [number, number] | undefined =>
+  hour === 11 && back >= 2 && back <= 11 ? [80, 105] : undefined;
+
+test('an evening spread expansion that recurred on most days is listed as a daily spike window', async ({ page }) => {
   await aliceTrained(page);
   await page.goto('/opportunities/expansion');
   await stubMarket(bookOf(34, 100, 105, 1));
   await stubControl('esi-expires', { seconds: 300 });
   expect(await stationBook(page)).toBe('200 updated');
 
-  // 14 days of hourly snapshots with a spread of 5%; at 18:30 UTC the best sell jumped to 135 to 144
+  // 14 days of hourly snapshots with a spread of 5%; at 18:30 UTC the best sell peaked at 136 to 145
   // on ten of the days.
-  const snapshots: SeedSnapshot[] = [];
-  for (let back = 1; back <= 14; back++) {
-    for (let hour = 0; hour < 24; hour++) {
-      const peak = hour === 18 && back <= 10 ? 134 + back : 105;
-      snapshots.push({ type_id: 34, minutes_back: minutesBack(back, hour), best_buy: 100, best_sell: peak });
-    }
-  }
+  const snapshots = hourly(34, evening);
   expect(await stationSeed(page, { snapshots, history: calm(34) })).toBe('200 336 snapshots, 14 history days');
   expect(await stationRollups(page)).toBe('200 ok');
   await page.reload();
@@ -182,12 +196,58 @@ test('an evening spread expansion that recurred on most days is listed as a dail
   await expect(expansion).not.toContainText('Collecting hourly data');
   const row = expansion.locator('tr[data-type-id="34"]');
   await expect(row.locator('[data-col="window"]')).toHaveText('daily 18:00');
-  // The peaks are 135 to 144: their 25th percentile is 137.25, and S is one tick below it.
-  await expect(row.locator('[data-col="sell"]')).toHaveText('137.20');
+  await expect(row.locator('[data-col="direction"]')).toHaveText('Spike');
+  await expect(row.locator('[data-col="buy"]')).toHaveText('100.00');
+  // The peaks are 1.295 to 1.381 times the median best sell of 105.00 (136 to 145 ISK): their 25th
+  // percentile is 138.25, and S is one tick below it.
+  await expect(row.locator('[data-col="sell"]')).toHaveText('138.20');
+  await expect(row.locator('[data-col="window-volume"]')).not.toBeEmpty();
   await expect(row.locator('[data-col="next"]')).toContainText(/\d{4}-\d{2}-\d{2} 18:00/);
 });
 
-test('with three days of snapshots the expansion table says that hourly data is still collected', async ({ page }) => {
+test('a daily dip is listed with its predicted buy price, one tick below the best sell as its sell price', async ({ page }) => {
+  await aliceTrained(page);
+  await page.goto('/opportunities/expansion');
+  await stubMarket(bookOf(34, 100, 105, 1));
+  await stubControl('esi-expires', { seconds: 300 });
+  expect(await stationBook(page)).toBe('200 updated');
+  expect((await stationSeed(page, { snapshots: hourly(34, morningDip), history: calm(34) })).startsWith('200 ')).toBe(true);
+  expect(await stationRollups(page)).toBe('200 ok');
+  await page.reload();
+
+  const expansion = page.locator('#expansion');
+  const row = expansion.locator('tr[data-type-id="34"]');
+  await expect(row.locator('[data-col="window"]')).toHaveText('daily 11:00');
+  await expect(row.locator('[data-col="direction"]')).toHaveText('Dip');
+  // The troughs are 0.80 of the median best buy of 100.00: one tick above 80.00 is 80.01. S is one
+  // tick below the best sell of 105.00.
+  await expect(row.locator('[data-col="buy"]')).toHaveText('80.01');
+  await expect(row.locator('[data-col="sell"]')).toHaveText('104.90');
+  await expect(expansion.locator('thead abbr', { hasText: /^B$/ })).toHaveAttribute('title', /predicted buy price/);
+});
+
+test('an item with a constant spread and one that jumps in 15% of its hours are not listed', async ({ page }) => {
+  await aliceTrained(page);
+  await page.goto('/opportunities/expansion');
+  await stubMarket([...bookOf(34, 100, 110, 1), ...bookOf(35, 100, 105, 3), ...bookOf(36, 100, 105, 5)]);
+  await stubControl('esi-expires', { seconds: 300 });
+  expect(await stationBook(page)).toBe('200 updated');
+  // 34: a spread of 10% in every hour. 35: four jumpy hours a day (17%), 18:30 among them on ten
+  // days. 36: the evening spike alone.
+  const constant = hourly(34, () => [100, 110]);
+  const jumpy = hourly(35, (back, hour) => ([2, 7, 13].includes(hour) || evening(back, hour) ? [100, 140] : undefined));
+  const calmEvening = hourly(36, evening);
+  const history = [...calm(34), ...calm(35), ...calm(36)];
+  expect((await stationSeed(page, { snapshots: [...constant, ...jumpy, ...calmEvening], history })).startsWith('200 ')).toBe(true);
+  expect(await stationRollups(page)).toBe('200 ok');
+  await page.reload();
+
+  const rows = page.locator('#expansion tr[data-type-id]');
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first()).toHaveAttribute('data-type-id', '36');
+});
+
+test('with three days of snapshots there is no note above the expansion table and the footer counts the days', async ({ page }) => {
   await aliceTrained(page);
   await page.goto('/opportunities/expansion');
   await stubMarket(bookOf(34, 100, 105, 1));
@@ -198,7 +258,8 @@ test('with three days of snapshots the expansion table says that hourly data is 
   expect((await stationSeed(page, { snapshots })).startsWith('200 ')).toBe(true);
   await page.reload();
 
-  await expect(page.locator('#expansion')).toContainText('Collecting hourly data (3/7 days)');
+  await expect(page.locator('#expansion')).not.toContainText('Collecting');
+  await expect(page.locator('.note')).toHaveCount(0);
   await expect(page.locator('#freshness')).toContainText('3 days of own snapshots');
 });
 
@@ -556,20 +617,13 @@ test('the trend page draws the averages with the volume', async ({ page }) => {
   expect(volume[0]).toBe(100_000_000);
 });
 
-test('the expansion page draws the spread by hour and weekday, the peaks with S and the next occurrences', async ({ page }) => {
+test('the expansion page draws the spread by hour and weekday, the peaks with S and lists the recurring windows', async ({ page }) => {
   await aliceTrained(page);
   await page.goto('/opportunities/expansion');
   await stubMarket(bookOf(34, 100, 105, 1));
   await stubControl('esi-expires', { seconds: 300 });
   expect(await stationBook(page)).toBe('200 updated');
-  const snapshots: SeedSnapshot[] = [];
-  for (let back = 1; back <= 14; back++) {
-    for (let hour = 0; hour < 24; hour++) {
-      const peak = hour === 18 && back <= 10 ? 134 + back : 105;
-      snapshots.push({ type_id: 34, minutes_back: minutesBack(back, hour), best_buy: 100, best_sell: peak });
-    }
-  }
-  expect((await stationSeed(page, { snapshots, history: calm(34) })).startsWith('200 ')).toBe(true);
+  expect((await stationSeed(page, { snapshots: hourly(34, evening), history: calm(34) })).startsWith('200 ')).toBe(true);
   expect(await stationRollups(page)).toBe('200 ok');
   await page.reload();
 
@@ -586,11 +640,64 @@ test('the expansion page draws the spread by hour and weekday, the peaks with S 
   expect(weekdays).toHaveLength(7);
   const [peak, sell] = await chartData(page, 'peaks');
   expect(peak).toHaveLength(10);
-  expect(new Set(sell)).toEqual(new Set([13720]));
-  await expect(page.locator('#next h2')).toContainText('Next occurrences');
-  await expect(page.locator('#next li')).toHaveCount(3);
-  await expect(page.locator('#next li').first()).toContainText('18:00');
-  await expect(page.locator('#section-nav').getByRole('link', { name: 'Next occurrences' })).toHaveAttribute('href', '#next');
+  expect(new Set(sell)).toEqual(new Set([13820]));
+  await expect(page.locator('#windows h2')).toContainText('Recurring windows');
+  const windows = page.locator('#windows tbody tr');
+  await expect(windows).toHaveCount(1);
+  await expect(windows.first()).toContainText('daily 18:00');
+  await expect(windows.first()).toContainText('Spike');
+  await expect(windows.first()).toHaveClass(/chosen/);
+  await expect(windows.first()).toContainText(/\d{4}-\d{2}-\d{2} 18:00/);
+  await expect(page.locator('#section-nav').getByRole('link', { name: 'Recurring windows' })).toHaveAttribute('href', '#windows');
+});
+
+test('the expansion page lists both windows of an item and draws the troughs of the dip the row uses', async ({ page }) => {
+  await aliceTrained(page);
+  await page.goto('/opportunities/expansion');
+  await stubMarket(bookOf(34, 100, 105, 1));
+  await stubControl('esi-expires', { seconds: 300 });
+  expect(await stationBook(page)).toBe('200 updated');
+  // A deep dip, at 60.00: buying at 60.01 beats the spike's margin of about 30%.
+  const deepDip = (back: number, hour: number): [number, number] | undefined => (morningDip(back, hour) ? [60, 105] : undefined);
+  const both = hourly(34, (back, hour) => evening(back, hour) ?? deepDip(back, hour));
+  expect((await stationSeed(page, { snapshots: both, history: calm(34) })).startsWith('200 ')).toBe(true);
+  expect(await stationRollups(page)).toBe('200 ok');
+  await page.reload();
+  // The dip's margin is larger than the spike's, so the dip is the row's window.
+  await expect(page.locator('#expansion tr[data-type-id="34"] [data-col="direction"]')).toHaveText('Dip');
+
+  await page.locator('#expansion tr[data-type-id="34"]').click();
+  await expect(page).toHaveURL(/\/opportunities\/expansion\/34$/);
+
+  const windows = page.locator('#windows tbody tr');
+  await expect(windows).toHaveCount(2);
+  await expect(page.locator('#windows')).toContainText('daily 11:00');
+  await expect(page.locator('#windows')).toContainText('daily 18:00');
+  await expect(page.locator('#windows tr.chosen')).toHaveCount(1);
+  await expect(page.locator('#windows tr.chosen')).toContainText('daily 11:00');
+  await expect(page.locator('#peaks h2')).toContainText('Past troughs of the window, with B');
+  const [trough, buy] = await chartData(page, 'peaks');
+  expect(trough).toHaveLength(10);
+  expect(new Set(trough)).toEqual(new Set([6000]));
+  expect(new Set(buy)).toEqual(new Set([6001]));
+  // B is the predicted buy price, so the current best buy has a card of its own.
+  await expect(page.locator('[data-figure="best-buy"] [data-value]')).toHaveText('100.00');
+  await expect(page.locator('[data-figure="buy"] [data-value]')).toHaveText('60.01');
+});
+
+test('the expansion explainer covers dips and spikes, its playbook has steps for both, and its example keeps S at 12,520.00', async ({ page }) => {
+  await aliceTrained(page);
+  await page.goto('/opportunities/expansion');
+  await page.locator('details > summary', { hasText: 'How to read this table' }).click();
+  const card = page.locator('article.explainer');
+  await expect(card.locator('h3')).toHaveText(['Legend', 'Signal', 'Shared figures', 'Worked example', 'Order playbook']);
+  await expect(card).toContainText('at least twice the median');
+  await expect(card).toContainText('more than 10% of its hours');
+  await expect(card.locator('table.example')).toContainText('12,520.00');
+  await expect(card.locator('table.example')).toContainText('Spike');
+  await expect(card.locator('ol')).toContainText('For a spike row');
+  await expect(card.locator('ol')).toContainText('For a dip row');
+  await expect(card.locator('ol')).toContainText('at B itself, not one tick above');
 });
 
 test('a rejected value marks its own input invalid with the message right below it, and a good value clears it', async ({ page }) => {
@@ -760,10 +867,10 @@ test('the detail legend is closed on load and lists the figures with their names
 
   await legend.locator('summary').click();
   await expect(legend.locator('tbody th')).toHaveText([
-    'b', 't', 'B', 'Best sell', 'S', 'c', 'r', 'Net', 'm', 'U', 'V7', 'V30', 'ρ', 'q_buy', 'q_sell', 'σ', 'T_fill', 'T_max', 'V_min', 'ISK/d',
+    'b', 't', 'B', 'Best buy', 'Best sell', 'S', 'c', 'r', 'Net', 'm', 'U', 'V7', 'V30', 'ρ', 'q_buy', 'q_sell', 'σ', 'T_fill', 'T_max', 'V_min', 'ISK/d',
   ]);
-  await expect(legend.locator('tbody tr').nth(17)).toContainText('Allowed holding time');
-  await expect(legend.locator('tbody tr').nth(17)).toContainText('min(3, (m / 2σ)²) days');
+  await expect(legend.locator('tbody tr').nth(18)).toContainText('Allowed holding time');
+  await expect(legend.locator('tbody tr').nth(18)).toContainText('min(3, (m / 2σ)²) days');
   await expect(legend).not.toContainText('Order playbook');
 });
 
@@ -786,7 +893,7 @@ test('the detail legend is a table of label, name, meaning and formula, styled l
   const row = (label: string) => table.locator('tbody tr').filter({ has: page.locator('th', { hasText: new RegExp(`^${label}$`) }) });
   await expect(row('T_max').locator('td').nth(2)).toHaveText('min(3, (m / 2σ)²) days');
   await expect(row('T_max').locator('td code')).toHaveCount(1);
-  await expect(row('B').locator('td').nth(0)).toHaveText('Current best buy, not a suggested price');
+  await expect(row('B').locator('td').nth(0)).toHaveText(/^Current best buy, not a suggested price, except in a dip row of the recurring spread expansion table, where it is the predicted buy price$/);
   await expect(row('B').locator('td').nth(2)).toHaveText('');
   expect(await table.locator('tbody th').first().evaluate((th) => getComputedStyle(th).fontWeight)).toBe(exampleWeight);
 });

@@ -1,6 +1,7 @@
 <h3>Signal</h3>
-<p>An item is listed when its spread widens again and again at the same time: the window. With at least 7 days of own hourly snapshots, an hour of day recurs when, on at least 60% of the last 14 days with data for it (and on at least 7 days), its highest spread was at least 1.5 times the median hourly spread of 30 days. A weekday and hour recur when that held in 3 of the last 4 weeks. With fewer days of snapshots, only weekdays are looked at, from the daily figures. S is one tick below the 25th percentile of the best sell peaks of the past occurrences: a price most occurrences reached.</p>
-<p>For example, the window “daily 18:00” peaked at 12,000, 12,200, 12,500, 12,600, 12,800, 13,000, 13,100, 13,300, 13,500 and 14,000. Their 25th percentile is 12,525.00, and one tick below it, S is 12,520.00.</p>
+<p>An item is listed when its spread is normally steady but blows up at a predictable time. An hour counts as expanded when its highest spread is at least twice the median of the highest spreads of its own UTC day. An expanded hour is a dip when the best buy fell further below the day’s median best buy than the best sell rose above the day’s median best sell: a chance to buy far below the normal price. Otherwise it is a spike: a chance to sell far above it. Only quiet items are listed: an item with more than 10% of its hours expanded over the last 30 days is not.</p>
+<p>A window is a direction together with an hour of day, which recurs when the hour expanded in that direction on at least 60% of the last 28 days with data (and on at least 7 days), or with a weekday and hour, which recurs when it did so in at least 60% of the last 52 weeks with data (in at least 3 of them, and in at least 2 of the last 4). Each past occurrence is kept as a ratio to the median of its own day, and applied to the median of the last 7 days. For a spike, B is the current best buy and S is one tick below the 25th percentile of the peaks times the 7-day median best sell. For a dip, B is one tick above the 75th percentile of the troughs times the 7-day median best buy, and S is one tick below the current best sell.</p>
+<p>For example, the window “daily 18:00” peaked at 1.20, 1.22, 1.25, 1.26, 1.28, 1.30, 1.31, 1.33, 1.35 and 1.40 times its day’s median best sell. Their 25th percentile is 1.2525, which times a 7-day median best sell of 10,000.00 is 12,525.00, and one tick below it, S is 12,520.00.</p>
 {% include "opportunities_explainer_shared.html" %}
 <h3>Worked example</h3>
 <p>One illustrative row, with b = 1.41%, t = 3.375%, a capital per item of 100,000,000, ρ = 0.5 and 3 buy and 1 sell orders within 1%:</p>
@@ -17,6 +18,8 @@
     <tr><th scope="row">q_buy, q_sell</th><td>1/(3 + 1) × 80,000 × 0.5 = 10,000 and 1/(1 + 1) × 80,000 × 0.5 = 20,000</td></tr>
     <tr><th scope="row">ISK/d</th><td>1,779.92 × 9,860 / 1.48 days ≈ 11.87M</td></tr>
     <tr><th scope="row">Window</th><td>daily 18:00</td></tr>
+    <tr><th scope="row">Dir</th><td>Spike</td></tr>
+    <tr><th scope="row">V_win</th><td>the units taken from sell orders in that hour, averaged over the past occurrences</td></tr>
     <tr><th scope="row">Next (UTC)</th><td>the next 18:00 EVE time, today or tomorrow</td></tr>
     <tr><th scope="row">V7</th><td>80,000, the V of the formulas</td></tr>
     <tr><th scope="row">V30</th><td>76,000, so V7 is no short spike</td></tr>
@@ -33,7 +36,6 @@
 <h3>Order playbook</h3>
 <ol>
   {% include "opportunities_explainer_playbook_common.html" %}
-  <li>Place the buy order well before the window.</li>
-  <li>Once it has filled, place the sell order at S before the next start shown in the row.</li>
-  <li>When the sell order has not filled by the end of the window, wait for the next occurrence or re-check the row, instead of chasing the price down.</li>
+  <li>For a spike row, place the buy order well before the window. Once it has filled, place the sell order at S before the next start shown in the row. When the sell order has not filled by the end of the window, wait for the next occurrence or re-check the row, instead of chasing the price down.</li>
+  <li>For a dip row, place the buy order at B itself, not one tick above, shortly before the next start shown in the row, and cancel it when the window ends unfilled. Once it has filled, sell at S, one tick below the best sell, as in a classic spread trade.</li>
 </ol>

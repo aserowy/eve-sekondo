@@ -6,7 +6,9 @@
 use serde::Serialize;
 use time::{Date, OffsetDateTime, Weekday};
 
-use super::analysis::{DayPoint, HourPoint, Window, WindowKind, bollinger, rsi14, sma};
+use super::analysis::{
+    DayPoint, Direction, ExpandedHour, HourPoint, WindowKind, bollinger, rsi14, sma,
+};
 use crate::format;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -318,24 +320,36 @@ pub fn spread_by_weekday(days: &[DayPoint]) -> Chart {
     }
 }
 
-/// The peaks of the past occurrences of a window, with S drawn over them.
-pub fn peaks(window: &Window) -> Chart {
-    let peak: Vec<Option<f64>> = window
-        .occurrences
+/// The past occurrences of a window in ISK, from its expanded hours: the maximum best sell of
+/// each with S drawn over them for a spike, the minimum best buy with B for a dip.
+pub fn peaks(
+    kind: WindowKind,
+    direction: Direction,
+    price_cents: i64,
+    expanded: &[ExpandedHour],
+) -> Chart {
+    let held: Vec<&ExpandedHour> = expanded
         .iter()
-        .map(|(_, cents)| Some(*cents as f64))
+        .filter(|h| h.direction == direction)
+        .filter(|h| match kind {
+            WindowKind::HourOfDay { hour } => h.start.hour() == hour,
+            WindowKind::WeekdayHour { weekday, hour } => {
+                h.start.hour() == hour && h.start.weekday() == weekday
+            }
+        })
         .collect();
-    let sell = vec![Some(window.sell_cents as f64); peak.len()];
-    let mut s = price_series("S", sell);
-    s.kind = Some("line");
+    let (name, mark) = match direction {
+        Direction::Spike => ("Peak", "S"),
+        Direction::Dip => ("Trough", "B"),
+    };
+    let extremes: Vec<Option<f64>> = held.iter().map(|h| Some(h.extreme_cents as f64)).collect();
+    let marked = vec![Some(price_cents as f64); extremes.len()];
+    let mut line = price_series(mark, marked);
+    line.kind = Some("line");
     Chart {
-        labels: window
-            .occurrences
-            .iter()
-            .map(|(at, _)| format::eve_time(*at))
-            .collect(),
+        labels: held.iter().map(|h| format::eve_time(h.start)).collect(),
         times: Vec::new(),
-        series: vec![price_series("Peak", peak), s],
+        series: vec![price_series(name, extremes), line],
     }
 }
 

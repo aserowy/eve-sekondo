@@ -9,6 +9,7 @@ pub enum Term {
     Item,
     BrokerFee,
     SalesTax,
+    Buy,
     BestBuy,
     BestSell,
     Sell,
@@ -29,6 +30,8 @@ pub enum Term {
     IskPerDay,
     Near,
     Window,
+    Dir,
+    VWin,
     NextStart,
     PercentB,
     Rsi,
@@ -44,7 +47,8 @@ impl Term {
             Self::Item => "Item",
             Self::BrokerFee => "b",
             Self::SalesTax => "t",
-            Self::BestBuy => "B",
+            Self::Buy => "B",
+            Self::BestBuy => "Best buy",
             Self::BestSell => "Best sell",
             Self::Sell => "S",
             Self::Cost => "c",
@@ -64,6 +68,8 @@ impl Term {
             Self::IskPerDay => "ISK/d",
             Self::Near => "n b/s",
             Self::Window => "Window",
+            Self::Dir => "Dir",
+            Self::VWin => "V_win",
             Self::NextStart => "Next (UTC)",
             Self::PercentB => "%B",
             Self::Rsi => "RSI",
@@ -79,7 +85,11 @@ impl Term {
             Self::Item => "Item",
             Self::BrokerFee => "Broker fee",
             Self::SalesTax => "Sales tax",
-            Self::BestBuy => "Current best buy, not a suggested price",
+            Self::Buy => {
+                "Current best buy, not a suggested price, except in a dip row of the recurring \
+                 spread expansion table, where it is the predicted buy price"
+            }
+            Self::BestBuy => "Current best buy",
             Self::BestSell => "Current best sell",
             Self::Sell => "Sell price",
             Self::Cost => "Cost per unit",
@@ -99,6 +109,8 @@ impl Term {
             Self::IskPerDay => "ISK per day",
             Self::Near => "Orders within 1%, buy / sell",
             Self::Window => "Recurring window",
+            Self::Dir => "Direction of the window",
+            Self::VWin => "Window volume",
             Self::NextStart => "Next start in EVE time",
             Self::PercentB => "Percent B",
             Self::Rsi => "Relative strength index, 14 days",
@@ -119,9 +131,15 @@ impl Term {
                 "The fee character's broker fee at the station, paid on placing an order."
             }
             Self::SalesTax => "The fee character's sales tax, paid on every sale.",
-            Self::BestBuy => {
+            Self::Buy => {
                 "The highest buy order in the station book now. It is where buying starts, not a \
-                 price to place: to buy, outbid it by one tick."
+                 price to place: to buy, outbid it by one tick. In a dip row of the recurring \
+                 spread expansion table it is the predicted buy price instead, which you place \
+                 as it is."
+            }
+            Self::BestBuy => {
+                "The highest buy order in the station book now, shown when B is the predicted buy \
+                 price of a dip row instead."
             }
             Self::BestSell => "The lowest sell order in the station book now.",
             Self::Sell => {
@@ -169,8 +187,19 @@ impl Term {
                  daily capture."
             }
             Self::Window => {
-                "When the spread expands: daily at an hour, weekly at a weekday and hour, or weekly \
-                 on a weekday."
+                "When the spread recurs in an expanded hour, whose maximum spread is at least twice \
+                 the median of its UTC day: daily at an hour (on 60% of the last 28 days, at least \
+                 7) or weekly at a weekday and hour (in 60% of the last 52 weeks, at least 3, and \
+                 2 of the last 4)."
+            }
+            Self::Dir => {
+                "Dip: the best buy fell further below the day's median than the best sell rose \
+                 above its own, so you can buy far below the normal price. Spike: the best sell \
+                 rose, so you can sell far above it. Dips and spikes recur apart."
+            }
+            Self::VWin => {
+                "The units taken in the window's hour from the side that moved, averaged over its \
+                 occurrences: from buy orders for a dip, from sell orders for a spike."
             }
             Self::NextStart => "When the window next starts, in EVE time (UTC).",
             Self::PercentB => {
@@ -237,6 +266,7 @@ pub fn detail_terms() -> Vec<Term> {
     vec![
         Term::BrokerFee,
         Term::SalesTax,
+        Term::Buy,
         Term::BestBuy,
         Term::BestSell,
         Term::Sell,

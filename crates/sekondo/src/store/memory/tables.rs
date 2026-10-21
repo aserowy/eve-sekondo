@@ -7,6 +7,7 @@ use tower_sessions::session::Record;
 use uuid::Uuid;
 
 use super::numeric::Numeric;
+use crate::{opportunities::analysis::ExpandedHour, store::WindowRow};
 
 /// A row of `characters`.
 #[derive(Debug, Clone)]
@@ -225,10 +226,6 @@ pub(super) struct ItemStatsRow {
     pub percent_b: Option<f64>,
     pub rsi14: Option<f64>,
     pub expansion_at: Option<OffsetDateTime>,
-    pub expansion_kind: Option<String>,
-    pub expansion_weekday: Option<i16>,
-    pub expansion_hour: Option<i16>,
-    pub expansion_sell: Option<Numeric>,
 }
 
 /// A row of `opportunity_settings`.
@@ -320,6 +317,12 @@ pub(super) struct Tables {
     pub item_stats: BTreeMap<(i64, i64, i64), ItemStatsRow>,
     pub hourly: BTreeMap<(i64, i64, i64, OffsetDateTime), Bucket>,
     pub daily: BTreeMap<(i64, i64, i64, OffsetDateTime), Bucket>,
+    /// `station_flagged_days`: the hours with a rollup and the expanded hours of an item's day.
+    pub flagged_days: BTreeMap<(i64, i64, i64, Date), (i32, i32)>,
+    /// `station_expanded_hours`, keyed by item and hour.
+    pub expanded_hours: BTreeMap<(i64, i64, i64, OffsetDateTime), ExpandedHour>,
+    /// `station_item_windows`.
+    pub item_windows: Vec<(i64, i64, WindowRow)>,
 
     pub opportunity_settings: BTreeMap<Uuid, SettingsRow>,
 }

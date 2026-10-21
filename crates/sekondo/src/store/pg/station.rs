@@ -4,10 +4,11 @@ use time::{Date, Duration, OffsetDateTime};
 
 use crate::{
     esi::EsiHistoryDay,
+    opportunities::analysis::{Direction, ExpandedHour},
     store::{
-        BookFields, ExpansionColumns, HistoryRecord, HistoryRow, IndicatorColumns, ItemStatsRecord,
-        LatestSnapshot, SeedHistoryRow, SeedSnapshotRow, SnapshotRecord, StationOrder,
-        StationStore, StoreResult, SyncState,
+        BookFields, ExpandedHourRow, FlaggedDayRow, HistoryRecord, HistoryRow, IndicatorColumns,
+        ItemStatsRecord, LatestSnapshot, MedianRow, SeedHistoryRow, SeedSnapshotRow,
+        SnapshotRecord, StationOrder, StationStore, StoreResult, SyncState, WindowRow,
     },
 };
 
@@ -671,46 +672,282 @@ impl StationStore for PgStationStore {
         .await?)
     }
 
-    async fn daily_points(
-        &self,
-        region_id: i64,
-        from: Date,
-    ) -> StoreResult<Vec<(i64, Date, f64, i64)>> {
-        Ok(sqlx::query_as(
-            "SELECT type_id, day, spread::float8, round(high * 100)::bigint
-         FROM station_daily_figures
-         WHERE region_id = $1 AND day >= $2
-         ORDER BY type_id, day",
-        )
-        .bind(region_id)
-        .bind(from)
-        .fetch_all(&self.pool)
-        .await?)
-    }
-
-    async fn update_expansions(
+    async fn unflagged_days(
         &self,
         region_id: i64,
         station_id: i64,
         latest: OffsetDateTime,
-        columns: &ExpansionColumns,
-    ) -> StoreResult<()> {
-        sqlx::query(
-            "UPDATE station_item_stats t SET
-             expansion_at = $3, expansion_kind = e.kind, expansion_weekday = e.weekday,
-             expansion_hour = e.hour, expansion_sell = e.sell / 100.0
-         FROM unnest($4::bigint[], $5::text[], $6::smallint[], $7::smallint[], $8::bigint[])
-              AS e(type_id, kind, weekday, hour, sell)
-         WHERE t.region_id = $1 AND t.station_id = $2 AND t.type_id = e.type_id",
+    ) -> StoreResult<Vec<Date>> {
+        // Only the days after the newest flagged one are looked at, so a year of rollups is not
+        // read every hour.
+        Ok(sqlx::query_scalar(
+            "SELECT day FROM (
+                 SELECT DISTINCT (bucket AT TIME ZONE 'UTC')::date AS day FROM station_hourly
+                 WHERE region_id = $1 AND station_id = $2
+                   AND bucket >= coalesce(
+                       (SELECT (max(day) + 1)::timestamp AT TIME ZONE 'UTC'
+                        FROM station_flagged_days WHERE region_id = $1 AND station_id = $2),
+                       '-infinity')
+             ) d
+             WHERE ((day + 1)::timestamp AT TIME ZONE 'UTC') + interval '1 hour' <= $3
+             ORDER BY day",
         )
         .bind(region_id)
         .bind(station_id)
         .bind(latest)
-        .bind(&columns.type_id)
-        .bind(&columns.kind)
-        .bind(&columns.weekday)
-        .bind(&columns.hour)
-        .bind(&columns.sell)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    async fn flag_days(&self, region_id: i64, station_id: i64, days: &[Date]) -> StoreResult<()> {
+        // The same definitions as `analysis::flag_day`: medians by `percentile_cont(0.5)`, `>= 2 *`
+        // for the expansion, a strictly larger relative move for a dip, in cents.
+        for day in days {
+            sqlx::query(
+                "WITH h AS (
+                     SELECT type_id, bucket,
+                            spread_max::float8 AS spread_max,
+                            (best_buy_avg * 100)::float8 AS buy_avg,
+                            (best_sell_avg * 100)::float8 AS sell_avg,
+                            round(best_buy_min * 100)::bigint AS buy_min,
+                            round(best_sell_max * 100)::bigint AS sell_max,
+                            buy_taken, sell_taken
+                     FROM station_hourly
+                     WHERE region_id = $1 AND station_id = $2
+                       AND bucket >= $3::date::timestamp AT TIME ZONE 'UTC'
+                       AND bucket < ($3::date + 1)::timestamp AT TIME ZONE 'UTC'
+                 ), m AS (
+                     SELECT type_id, count(*)::int AS hours,
+                            percentile_cont(0.5) WITHIN GROUP (ORDER BY spread_max) AS spread_med,
+                            percentile_cont(0.5) WITHIN GROUP (ORDER BY buy_avg) AS buy_med,
+                            percentile_cont(0.5) WITHIN GROUP (ORDER BY sell_avg) AS sell_med
+                     FROM h GROUP BY type_id
+                 ), x AS (
+                     SELECT h.type_id, h.bucket, h.buy_min, h.sell_max, h.buy_taken, h.sell_taken,
+                            h.buy_min::float8 / m.buy_med AS trough,
+                            h.sell_max::float8 / m.sell_med AS peak
+                     FROM h JOIN m USING (type_id)
+                     WHERE m.hours >= 20 AND h.spread_max >= 2 * m.spread_med
+                 ), flagged AS (
+                     INSERT INTO station_flagged_days
+                         (region_id, station_id, type_id, day, hours, expanded_hours)
+                     SELECT $1, $2, m.type_id, $3::date, m.hours,
+                            (SELECT count(*) FROM x WHERE x.type_id = m.type_id)
+                     FROM m
+                     ON CONFLICT DO NOTHING
+                 )
+                 INSERT INTO station_expanded_hours
+                     (region_id, station_id, type_id, start, direction, ratio, extreme_cents, taken)
+                 SELECT $1, $2, type_id, bucket,
+                        CASE WHEN 1 - trough > peak - 1 THEN 'dip' ELSE 'spike' END,
+                        CASE WHEN 1 - trough > peak - 1 THEN trough ELSE peak END,
+                        CASE WHEN 1 - trough > peak - 1 THEN buy_min ELSE sell_max END,
+                        CASE WHEN 1 - trough > peak - 1 THEN buy_taken ELSE sell_taken END
+                 FROM x
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(region_id)
+            .bind(station_id)
+            .bind(day)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn flagged_days(
+        &self,
+        region_id: i64,
+        station_id: i64,
+        from: Date,
+    ) -> StoreResult<Vec<FlaggedDayRow>> {
+        let rows: Vec<(i64, Date, i16, i16)> = sqlx::query_as(
+            "SELECT type_id, day, hours, expanded_hours FROM station_flagged_days
+             WHERE region_id = $1 AND station_id = $2 AND day >= $3
+             ORDER BY type_id, day",
+        )
+        .bind(region_id)
+        .bind(station_id)
+        .bind(from)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(type_id, day, hours, expanded_hours)| FlaggedDayRow {
+                type_id,
+                day,
+                hours: i32::from(hours),
+                expanded_hours: i32::from(expanded_hours),
+            })
+            .collect())
+    }
+
+    async fn expanded_hours(
+        &self,
+        region_id: i64,
+        station_id: i64,
+        from: OffsetDateTime,
+    ) -> StoreResult<Vec<ExpandedHourRow>> {
+        let rows: Vec<(i64, OffsetDateTime, String, f64, i64, i64)> = sqlx::query_as(
+            "SELECT type_id, start, direction, ratio, extreme_cents, taken
+             FROM station_expanded_hours
+             WHERE region_id = $1 AND station_id = $2 AND start >= $3
+             ORDER BY type_id, start",
+        )
+        .bind(region_id)
+        .bind(station_id)
+        .bind(from)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(type_id, start, direction, ratio, extreme_cents, taken)| {
+                Some(ExpandedHourRow {
+                    type_id,
+                    hour: ExpandedHour {
+                        start,
+                        direction: Direction::parse(&direction)?,
+                        ratio,
+                        extreme_cents,
+                        taken,
+                    },
+                })
+            })
+            .collect())
+    }
+
+    async fn medians(
+        &self,
+        region_id: i64,
+        station_id: i64,
+        from: OffsetDateTime,
+    ) -> StoreResult<Vec<MedianRow>> {
+        let rows: Vec<(i64, f64, f64)> = sqlx::query_as(
+            "SELECT type_id,
+                    percentile_cont(0.5) WITHIN GROUP (ORDER BY (best_buy_avg * 100)::float8),
+                    percentile_cont(0.5) WITHIN GROUP (ORDER BY (best_sell_avg * 100)::float8)
+             FROM station_hourly
+             WHERE region_id = $1 AND station_id = $2 AND bucket >= $3
+             GROUP BY type_id ORDER BY type_id",
+        )
+        .bind(region_id)
+        .bind(station_id)
+        .bind(from)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(type_id, buy_cents, sell_cents)| MedianRow {
+                type_id,
+                buy_cents,
+                sell_cents,
+            })
+            .collect())
+    }
+
+    async fn replace_windows(
+        &self,
+        region_id: i64,
+        station_id: i64,
+        latest: OffsetDateTime,
+        windows: &[WindowRow],
+    ) -> StoreResult<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM station_item_windows WHERE region_id = $1 AND station_id = $2")
+            .bind(region_id)
+            .bind(station_id)
+            .execute(&mut *tx)
+            .await?;
+        let columns: Vec<_> = windows.iter().map(WindowRow::columns).collect();
+        sqlx::query(
+            "INSERT INTO station_item_windows
+                 (region_id, station_id, type_id, kind, weekday, hour, direction, price_cents,
+                  occurrences, covered, v_win)
+             SELECT $1, $2, * FROM unnest($3::bigint[], $4::text[], $5::smallint[], $6::smallint[],
+                                          $7::text[], $8::bigint[], $9::int[], $10::int[],
+                                          $11::float8[])",
+        )
+        .bind(region_id)
+        .bind(station_id)
+        .bind(windows.iter().map(|w| w.type_id).collect::<Vec<_>>())
+        .bind(columns.iter().map(|c| c.0).collect::<Vec<_>>())
+        .bind(columns.iter().map(|c| c.1).collect::<Vec<_>>())
+        .bind(columns.iter().map(|c| c.2).collect::<Vec<_>>())
+        .bind(
+            windows
+                .iter()
+                .map(|w| w.direction.as_str())
+                .collect::<Vec<_>>(),
+        )
+        .bind(windows.iter().map(|w| w.price_cents).collect::<Vec<_>>())
+        .bind(windows.iter().map(|w| w.occurrences).collect::<Vec<_>>())
+        .bind(windows.iter().map(|w| w.covered).collect::<Vec<_>>())
+        .bind(windows.iter().map(|w| w.v_win).collect::<Vec<_>>())
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE station_item_stats SET expansion_at = $3
+             WHERE region_id = $1 AND station_id = $2",
+        )
+        .bind(region_id)
+        .bind(station_id)
+        .bind(latest)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn windows(&self, region_id: i64, station_id: i64) -> StoreResult<Vec<WindowRow>> {
+        let rows: Vec<(i64, String, Option<i16>, i16, String, i64, i32, i32, f64)> =
+            sqlx::query_as(
+                "SELECT type_id, kind, weekday, hour, direction, price_cents, occurrences, covered,
+                        v_win
+                 FROM station_item_windows WHERE region_id = $1 AND station_id = $2
+                 ORDER BY type_id, kind, weekday, hour, direction",
+            )
+            .bind(region_id)
+            .bind(station_id)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(
+                |(type_id, kind, weekday, hour, direction, price, occurrences, covered, v)| {
+                    WindowRow::from_columns(
+                        type_id,
+                        &kind,
+                        weekday,
+                        hour,
+                        &direction,
+                        price,
+                        occurrences,
+                        covered,
+                        v,
+                    )
+                },
+            )
+            .collect())
+    }
+
+    async fn prune_flags(&self, region_id: i64, station_id: i64, before: Date) -> StoreResult<()> {
+        sqlx::query(
+            "DELETE FROM station_flagged_days
+             WHERE region_id = $1 AND station_id = $2 AND day < $3",
+        )
+        .bind(region_id)
+        .bind(station_id)
+        .bind(before)
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "DELETE FROM station_expanded_hours
+             WHERE region_id = $1 AND station_id = $2
+               AND start < $3::date::timestamp AT TIME ZONE 'UTC'",
+        )
+        .bind(region_id)
+        .bind(station_id)
+        .bind(before)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -936,17 +1173,12 @@ impl StationStore for PgStationStore {
             percent_b: Option<f64>,
             rsi14: Option<f64>,
             expansion_at: Option<OffsetDateTime>,
-            expansion_kind: Option<String>,
-            expansion_weekday: Option<i16>,
-            expansion_hour: Option<i16>,
-            expansion_sell: Option<String>,
         }
         let row: Option<Row> = sqlx::query_as(
             "SELECT book_at, best_buy::text AS best_buy, best_sell::text AS best_sell,
                     buy_near_orders, sell_near_orders, rho, indicators_at, volume_7d, volume_30d,
                     sigma, returns, sma5, sma20, cross_day, volume_rising, percent_b, rsi14,
-                    expansion_at, expansion_kind, expansion_weekday, expansion_hour,
-                    expansion_sell::text AS expansion_sell
+                    expansion_at
              FROM station_item_stats WHERE region_id = $1 AND station_id = $2 AND type_id = $3",
         )
         .bind(region_id)
@@ -973,10 +1205,6 @@ impl StationStore for PgStationStore {
             percent_b: r.percent_b,
             rsi14: r.rsi14,
             expansion_at: r.expansion_at,
-            expansion_kind: r.expansion_kind,
-            expansion_weekday: r.expansion_weekday,
-            expansion_hour: r.expansion_hour,
-            expansion_sell: r.expansion_sell,
         }))
     }
     async fn hourly_buckets(
@@ -1019,10 +1247,9 @@ impl StationStore for PgStationStore {
             "INSERT INTO station_item_stats
                  (region_id, station_id, type_id, book_at, best_buy, best_sell, buy_near_orders,
                   sell_near_orders, rho, indicators_at, volume_7d, volume_30d, sigma, returns, sma5,
-                  sma20, cross_day, volume_rising, percent_b, rsi14, expansion_at, expansion_kind,
-                  expansion_weekday, expansion_hour, expansion_sell)
+                  sma20, cross_day, volume_rising, percent_b, rsi14, expansion_at)
              VALUES ($1, $2, $3, $4, $5::numeric, $6::numeric, $7, $8, $9, $10, $11, $12, $13, $14,
-                     $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25::numeric)
+                     $15, $16, $17, $18, $19, $20, $21)
              ON CONFLICT (region_id, station_id, type_id) DO UPDATE SET
                  book_at = excluded.book_at, best_buy = excluded.best_buy,
                  best_sell = excluded.best_sell, buy_near_orders = excluded.buy_near_orders,
@@ -1032,10 +1259,7 @@ impl StationStore for PgStationStore {
                  returns = excluded.returns, sma5 = excluded.sma5, sma20 = excluded.sma20,
                  cross_day = excluded.cross_day, volume_rising = excluded.volume_rising,
                  percent_b = excluded.percent_b, rsi14 = excluded.rsi14,
-                 expansion_at = excluded.expansion_at, expansion_kind = excluded.expansion_kind,
-                 expansion_weekday = excluded.expansion_weekday,
-                 expansion_hour = excluded.expansion_hour,
-                 expansion_sell = excluded.expansion_sell",
+                 expansion_at = excluded.expansion_at",
         )
         .bind(region_id)
         .bind(station_id)
@@ -1058,10 +1282,6 @@ impl StationStore for PgStationStore {
         .bind(r.percent_b)
         .bind(r.rsi14)
         .bind(r.expansion_at)
-        .bind(&r.expansion_kind)
-        .bind(r.expansion_weekday)
-        .bind(r.expansion_hour)
-        .bind(&r.expansion_sell)
         .execute(&self.pool)
         .await?;
         Ok(())

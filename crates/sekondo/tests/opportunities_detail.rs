@@ -662,40 +662,32 @@ async fn the_classic_window_draws_prices_the_spread_and_the_depth_of_the_book() 
     assert_eq!(series_values(&depth, 0), [800.0, 200.0]);
 }
 
-#[tokio::test]
-async fn the_expansion_window_draws_the_spreads_the_past_peaks_and_the_next_occurrences() {
-    let (app, browser) = setup().await;
-    item(&app, 34, "Tritanium", "110.00", 100_000_000.0).await;
-    let mut stats = app
-        .stores
-        .station
-        .item_stats_row(10000002, 60003760, 34)
-        .await
-        .unwrap()
-        .unwrap();
-    stats.expansion_kind = Some("hour".to_owned());
-    stats.expansion_hour = Some(18);
-    stats.expansion_sell = Some("125.20".to_owned());
-    app.stores
-        .station
-        .seed_item_stats(10000002, 60003760, 34, &stats)
-        .await
-        .unwrap();
-    // Ten of the last fourteen days, the best sell peaked at 18:30 at 134 + the days back.
+/// Computes the expansion windows from the rollups, as the hourly refresh does.
+async fn expansions(app: &TestApp) {
+    sekondo::opportunities::stats::refresh_expansions_if_advanced(
+        &*app.stores.station,
+        OffsetDateTime::now_utc(),
+    )
+    .await
+    .unwrap();
+}
+
+/// Item 34 on the last 14 days, one snapshot at :30 of every hour: the best buy at 100.00 and the
+/// best sell at 105.00, except for the hours `jump` returns a `(best buy, best sell)` for.
+async fn hourly_days(app: &TestApp, jump: impl Fn(i64, i64) -> Option<(f64, f64)>) {
     let midnight = OffsetDateTime::now_utc().replace_time(time::Time::MIDNIGHT);
     let mut rows = Vec::new();
     for back in 1..=14i64 {
         for hour in 0..24i64 {
-            let sell: f64 = if hour == 18 && back <= 10 {
-                134.0 + back as f64
-            } else {
-                105.0
-            };
-            rows.push(snapshot(
-                midnight - Duration::days(back) + Duration::hours(hour) + Duration::minutes(30),
-                sell,
-                (1, 1, 1, 1, 1, 1),
-            ));
+            let (buy, sell) = jump(back, hour).unwrap_or((100.0, 105.0));
+            rows.push(SeedSnapshotRow {
+                best_buy: buy,
+                ..snapshot(
+                    midnight - Duration::days(back) + Duration::hours(hour) + Duration::minutes(30),
+                    sell,
+                    (1, 1, 1, 1, 1, 1),
+                )
+            });
         }
     }
     app.stores
@@ -703,7 +695,20 @@ async fn the_expansion_window_draws_the_spreads_the_past_peaks_and_the_next_occu
         .seed_snapshots(10000002, 60003760, &rows)
         .await
         .unwrap();
-    roll_up(&app).await;
+    roll_up(app).await;
+    expansions(app).await;
+}
+
+#[tokio::test]
+async fn the_expansion_page_draws_the_spread_by_hour_and_weekday_the_past_peaks_and_lists_the_windows()
+ {
+    let (app, browser) = setup().await;
+    item(&app, 34, "Tritanium", "110.00", 100_000_000.0).await;
+    // On ten of the last fourteen days the best sell peaked at 18:30 at 134 + the days back.
+    hourly_days(&app, |back, hour| {
+        (hour == 18 && back <= 10).then(|| (100.0, 134.0 + back as f64))
+    })
+    .await;
     history(&app, 34).await;
 
     let html = detail(&app, &browser, "/opportunities/detail/expansion/34")
@@ -727,21 +732,31 @@ async fn the_expansion_window_draws_the_spreads_the_past_peaks_and_the_next_occu
             .len(),
         7
     );
+    // Yesterday is not complete before 01:00 today, so nine peaks count: 136 to 144 ISK, whose
+    // 25th percentile is 138.00, and S is one tick below it.
     let peaks = chart(&html, "peaks");
     assert_eq!(
         series_values(&peaks, 0).len(),
-        10,
+        9,
         "one peak per expanded day"
     );
-    // The peaks are 135 to 144 ISK: their 25th percentile is 137.25, and S is one tick below it.
+    assert_eq!(peaks["series"][0]["name"], "Peak");
     assert!(
         series_values(&peaks, 1)
             .iter()
-            .all(|s| s == &serde_json::json!(13_720.0)),
+            .all(|s| s == &serde_json::json!(13_790.0)),
         "S marked: {peaks}"
     );
-    assert!(html.contains("Next occurrences"), "{html}");
-    assert!(html.contains(" 18:00"), "{html}");
+    let section = &html[html
+        .find(r#"<section id="windows">"#)
+        .expect("a windows section")..];
+    assert!(section.contains("daily 18:00"), "{section}");
+    assert!(section.contains("Spike"), "{section}");
+    assert!(
+        section.contains("9/13"),
+        "occurrences against covered days: {section}"
+    );
+    assert!(section.contains(r#"class="chosen""#), "{section}");
     assert_eq!(
         section_nav(&html),
         [
@@ -751,9 +766,62 @@ async fn the_expansion_window_draws_the_spreads_the_past_peaks_and_the_next_occu
             "Spread by hour of day (EVE time)",
             "Spread by weekday",
             "Past peaks of the window, with S",
-            "Next occurrences",
+            "Recurring windows",
         ]
     );
+}
+
+#[tokio::test]
+async fn the_expansion_page_lists_both_windows_of_an_item_marks_the_dip_and_draws_its_troughs() {
+    let (app, browser) = setup().await;
+    item(&app, 34, "Tritanium", "110.00", 100_000_000.0).await;
+    // Every day: a spike at 18:30 (best sell 160.00) and a dip at 11:30 (best buy 60.00).
+    hourly_days(&app, |_, hour| match hour {
+        18 => Some((100.0, 160.0)),
+        11 => Some((60.0, 105.0)),
+        _ => None,
+    })
+    .await;
+    history(&app, 34).await;
+
+    let html = detail(&app, &browser, "/opportunities/detail/expansion/34")
+        .await
+        .text()
+        .await
+        .unwrap();
+
+    let section = &html[html
+        .find(r#"<section id="windows">"#)
+        .expect("a windows section")..];
+    assert!(section.contains("daily 11:00") && section.contains("daily 18:00"));
+    assert!(section.contains("Dip") && section.contains("Spike"));
+    // Buying at 60.01 beats buying at 100.00, so the dip is the row's window and the only marked one.
+    assert_eq!(section.matches(r#"class="chosen""#).count(), 1, "{section}");
+    let chosen = &section[section.find(r#"class="chosen""#).unwrap()..];
+    assert!(chosen[..chosen.find("</tr>").unwrap()].contains("daily 11:00"));
+    // The troughs, with B marked over them.
+    let troughs = chart(&html, "peaks");
+    assert_eq!(troughs["series"][0]["name"], "Trough");
+    assert_eq!(troughs["series"][1]["name"], "B");
+    assert!(
+        series_values(&troughs, 0)
+            .iter()
+            .all(|t| t == &serde_json::json!(6_000.0)),
+        "{troughs}"
+    );
+    assert!(
+        series_values(&troughs, 1)
+            .iter()
+            .all(|b| b == &serde_json::json!(6_001.0)),
+        "{troughs}"
+    );
+    assert!(
+        html.contains("Past troughs of the window, with B"),
+        "{html}"
+    );
+    // B is the predicted buy price, so the current best buy has its own card.
+    assert_eq!(figure(&html, "buy"), "60.01");
+    assert_eq!(figure(&html, "best-buy"), "100.00");
 }
 
 /// The cells of the first legend table in `html`: the header row, then one row per entry with
@@ -811,9 +879,16 @@ async fn the_legend_is_a_table_of_label_name_meaning_and_formula() {
     assert_eq!(c[1], "Cost per unit");
     assert_eq!(c[2], "What one unit costs, broker fee included.");
     assert_eq!(c[3], "<code>B \u{00D7} (1 + b)</code>");
-    assert_eq!(row("T_max")[3], "<code>min(3, (m / 2\u{03C3})\u{00B2}) days</code>");
+    assert_eq!(
+        row("T_max")[3],
+        "<code>min(3, (m / 2\u{03C3})\u{00B2}) days</code>"
+    );
     let b = row("B");
-    assert_eq!(b[1], "Current best buy, not a suggested price");
+    assert_eq!(
+        b[1],
+        "Current best buy, not a suggested price, except in a dip row of the recurring spread \
+         expansion table, where it is the predicted buy price"
+    );
     assert_eq!(b[3], "", "no formula, an empty cell");
 }
 
@@ -860,6 +935,7 @@ async fn a_closed_legend_card_sits_between_the_figures_and_the_charts() {
             "b",
             "t",
             "B",
+            "Best buy",
             "Best sell",
             "S",
             "c",

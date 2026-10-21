@@ -336,7 +336,7 @@ export const test = base.extend<{ cspGuard: void; cleanSlate: void }>({
       for (let attempt = 1; ; attempt++) {
         try {
           await withDatabase(async (c) => {
-            await c.query('TRUNCATE accounts, sessions, market_orders, market_sync, item_prices, price_sync, station_owners, station_sync, station_orders, station_snapshots, market_history, history_sync, station_item_stats CASCADE');
+            await c.query('TRUNCATE accounts, sessions, market_orders, market_sync, item_prices, price_sync, station_owners, station_sync, station_orders, station_snapshots, market_history, history_sync, station_item_stats, station_flagged_days, station_expanded_hours, station_item_windows CASCADE');
             // The rollups are materialized apart from the snapshots, so they are emptied too.
             await c.query('TRUNCATE station_daily');
             await c.query('TRUNCATE station_hourly');

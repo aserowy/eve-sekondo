@@ -10,10 +10,12 @@ use super::{
 };
 use crate::{
     esi::EsiHistoryDay,
+    opportunities::analysis::{HourFigures, flag_day, median},
     store::{
-        BookFields, ExpansionColumns, HistoryRecord, HistoryRow as HistoryDay, IndicatorColumns,
-        ItemStatsRecord, LatestSnapshot, SeedHistoryRow, SeedSnapshotRow, SnapshotRecord,
-        StationOrder, StationStore, StoreError, StoreResult, SyncState,
+        BookFields, ExpandedHourRow, FlaggedDayRow, HistoryRecord, HistoryRow as HistoryDay,
+        IndicatorColumns, ItemStatsRecord, LatestSnapshot, MedianRow, SeedHistoryRow,
+        SeedSnapshotRow, SnapshotRecord, StationOrder, StationStore, StoreError, StoreResult,
+        SyncState, WindowRow,
     },
 };
 
@@ -182,7 +184,6 @@ fn refresh_daily(tables: &mut Tables, start: OffsetDateTime, end: OffsetDateTime
 
 /// A row of the `station_daily_figures` view: `(type, day, spread, high)`.
 pub(super) struct DailyFigure {
-    pub type_id: i64,
     pub day: Date,
     pub spread: Option<Numeric>,
     pub high: Numeric,
@@ -214,13 +215,11 @@ pub(super) fn daily_figures(
                 .filter(|bucket| bucket.hours_covered >= 20);
             match rollup {
                 Some(bucket) => DailyFigure {
-                    type_id: *type_id,
                     day: *day,
                     spread: Some(bucket.spread_max.clone()),
                     high: bucket.best_sell_max.clone(),
                 },
                 None => DailyFigure {
-                    type_id: *type_id,
                     day: *day,
                     spread: history.highest.sub(&history.lowest).div(&history.lowest),
                     high: history.highest.clone(),
@@ -857,47 +856,196 @@ impl StationStore for MemStationStore {
         Ok(points)
     }
 
-    async fn daily_points(
-        &self,
-        region_id: i64,
-        from: Date,
-    ) -> StoreResult<Vec<(i64, Date, f64, i64)>> {
-        let tables = self.shared.lock();
-        let mut points: Vec<(i64, Date, f64, i64)> = daily_figures(&tables, region_id, from, None)
-            .into_iter()
-            .filter_map(|f| {
-                Some((
-                    f.type_id,
-                    f.day,
-                    f.spread?.to_f64(),
-                    f.high.mul(&Numeric::int(100)).to_i64()?,
-                ))
-            })
-            .collect();
-        points.sort_by_key(|p| (p.0, p.1));
-        Ok(points)
-    }
-
-    async fn update_expansions(
+    async fn unflagged_days(
         &self,
         region_id: i64,
         station_id: i64,
         latest: OffsetDateTime,
-        columns: &ExpansionColumns,
-    ) -> StoreResult<()> {
+    ) -> StoreResult<Vec<Date>> {
+        let tables = self.shared.lock();
+        // Only the days after the newest flagged one, like the PostgreSQL store.
+        let newest = tables
+            .flagged_days
+            .keys()
+            .filter(|(region, station, _, _)| *region == region_id && *station == station_id)
+            .map(|(_, _, _, day)| *day)
+            .max();
+        let days: BTreeSet<Date> = tables
+            .hourly
+            .keys()
+            .filter(|(region, station, _, _)| *region == region_id && *station == station_id)
+            .map(|(_, _, _, bucket)| bucket.to_offset(time::UtcOffset::UTC).date())
+            .filter(|day| newest.is_none_or(|newest| *day > newest))
+            .filter(|day| {
+                day.midnight().assume_utc() + Duration::days(1) + Duration::hours(1) <= latest
+            })
+            .collect();
+        Ok(days.into_iter().collect())
+    }
+
+    async fn flag_days(&self, region_id: i64, station_id: i64, days: &[Date]) -> StoreResult<()> {
         let mut tables = self.shared.lock();
-        for (i, type_id) in columns.type_id.iter().enumerate() {
-            if let Some(stats) = tables
-                .item_stats
-                .get_mut(&(region_id, station_id, *type_id))
-            {
-                stats.expansion_at = Some(micros(latest));
-                stats.expansion_kind = columns.kind[i].clone();
-                stats.expansion_weekday = columns.weekday[i];
-                stats.expansion_hour = columns.hour[i];
-                stats.expansion_sell = columns.sell[i].map(Numeric::cents);
+        for day in days {
+            let start = day.midnight().assume_utc();
+            let end = start + Duration::days(1);
+            let mut by_item: BTreeMap<i64, Vec<HourFigures>> = BTreeMap::new();
+            for ((region, station, type_id, bucket), b) in &tables.hourly {
+                if *region == region_id
+                    && *station == station_id
+                    && *bucket >= start
+                    && *bucket < end
+                {
+                    let cents = |n: &Numeric| n.mul(&Numeric::int(100));
+                    by_item.entry(*type_id).or_default().push(HourFigures {
+                        start: *bucket,
+                        spread_max: b.spread_max.to_f64(),
+                        best_buy_avg: cents(&b.best_buy_avg).to_f64(),
+                        best_sell_avg: cents(&b.best_sell_avg).to_f64(),
+                        best_buy_min_cents: cents(&b.best_buy_min).to_i64().unwrap_or_default(),
+                        best_sell_max_cents: cents(&b.best_sell_max).to_i64().unwrap_or_default(),
+                        buy_taken: b.buy_taken,
+                        sell_taken: b.sell_taken,
+                    });
+                }
+            }
+            for (type_id, hours) in by_item {
+                let key = (region_id, station_id, type_id, *day);
+                if tables.flagged_days.contains_key(&key) {
+                    continue;
+                }
+                let flags = flag_day(&hours);
+                tables
+                    .flagged_days
+                    .insert(key, (flags.hours as i32, flags.expanded.len() as i32));
+                for hour in flags.expanded {
+                    tables
+                        .expanded_hours
+                        .entry((region_id, station_id, type_id, hour.start))
+                        .or_insert(hour);
+                }
             }
         }
+        Ok(())
+    }
+
+    async fn flagged_days(
+        &self,
+        region_id: i64,
+        station_id: i64,
+        from: Date,
+    ) -> StoreResult<Vec<FlaggedDayRow>> {
+        let tables = self.shared.lock();
+        Ok(tables
+            .flagged_days
+            .iter()
+            .filter(|((region, station, _, day), _)| {
+                *region == region_id && *station == station_id && *day >= from
+            })
+            .map(|((_, _, type_id, day), (hours, expanded))| FlaggedDayRow {
+                type_id: *type_id,
+                day: *day,
+                hours: *hours,
+                expanded_hours: *expanded,
+            })
+            .collect())
+    }
+
+    async fn expanded_hours(
+        &self,
+        region_id: i64,
+        station_id: i64,
+        from: OffsetDateTime,
+    ) -> StoreResult<Vec<ExpandedHourRow>> {
+        let tables = self.shared.lock();
+        Ok(tables
+            .expanded_hours
+            .iter()
+            .filter(|((region, station, _, start), _)| {
+                *region == region_id && *station == station_id && *start >= from
+            })
+            .map(|((_, _, type_id, _), hour)| ExpandedHourRow {
+                type_id: *type_id,
+                hour: *hour,
+            })
+            .collect())
+    }
+
+    async fn medians(
+        &self,
+        region_id: i64,
+        station_id: i64,
+        from: OffsetDateTime,
+    ) -> StoreResult<Vec<MedianRow>> {
+        let tables = self.shared.lock();
+        let mut by_item: BTreeMap<i64, (Vec<f64>, Vec<f64>)> = BTreeMap::new();
+        for ((region, station, type_id, bucket), b) in &tables.hourly {
+            if *region == region_id && *station == station_id && *bucket >= from {
+                let entry = by_item.entry(*type_id).or_default();
+                entry
+                    .0
+                    .push(b.best_buy_avg.mul(&Numeric::int(100)).to_f64());
+                entry
+                    .1
+                    .push(b.best_sell_avg.mul(&Numeric::int(100)).to_f64());
+            }
+        }
+        Ok(by_item
+            .into_iter()
+            .filter_map(|(type_id, (buy, sell))| {
+                Some(MedianRow {
+                    type_id,
+                    buy_cents: median(buy)?,
+                    sell_cents: median(sell)?,
+                })
+            })
+            .collect())
+    }
+
+    async fn replace_windows(
+        &self,
+        region_id: i64,
+        station_id: i64,
+        latest: OffsetDateTime,
+        windows: &[WindowRow],
+    ) -> StoreResult<()> {
+        let mut tables = self.shared.lock();
+        tables
+            .item_windows
+            .retain(|(region, station, _)| !(*region == region_id && *station == station_id));
+        tables
+            .item_windows
+            .extend(windows.iter().map(|w| (region_id, station_id, w.clone())));
+        for ((region, station, _), stats) in tables.item_stats.iter_mut() {
+            if *region == region_id && *station == station_id {
+                stats.expansion_at = Some(micros(latest));
+            }
+        }
+        Ok(())
+    }
+
+    async fn windows(&self, region_id: i64, station_id: i64) -> StoreResult<Vec<WindowRow>> {
+        let tables = self.shared.lock();
+        let mut windows: Vec<WindowRow> = tables
+            .item_windows
+            .iter()
+            .filter(|(region, station, _)| *region == region_id && *station == station_id)
+            .map(|(_, _, w)| w.clone())
+            .collect();
+        windows.sort_by_key(|w| (w.type_id, w.columns(), w.direction));
+        Ok(windows)
+    }
+
+    async fn prune_flags(&self, region_id: i64, station_id: i64, before: Date) -> StoreResult<()> {
+        let mut tables = self.shared.lock();
+        let cut = before.midnight().assume_utc();
+        tables.flagged_days.retain(|(region, station, _, day), _| {
+            !(*region == region_id && *station == station_id && *day < before)
+        });
+        tables
+            .expanded_hours
+            .retain(|(region, station, _, start), _| {
+                !(*region == region_id && *station == station_id && *start < cut)
+            });
         Ok(())
     }
 
@@ -1093,10 +1241,6 @@ impl StationStore for MemStationStore {
                 percent_b: s.percent_b,
                 rsi14: s.rsi14,
                 expansion_at: s.expansion_at,
-                expansion_kind: s.expansion_kind.clone(),
-                expansion_weekday: s.expansion_weekday,
-                expansion_hour: s.expansion_hour,
-                expansion_sell: s.expansion_sell.as_ref().map(ToString::to_string),
             }))
     }
     async fn hourly_buckets(
@@ -1157,10 +1301,6 @@ impl StationStore for MemStationStore {
             percent_b: r.percent_b,
             rsi14: r.rsi14,
             expansion_at: r.expansion_at.map(micros),
-            expansion_kind: r.expansion_kind.clone(),
-            expansion_weekday: r.expansion_weekday,
-            expansion_hour: r.expansion_hour,
-            expansion_sell: numeric(&r.expansion_sell)?.map(|n| n.round(2)),
         };
         self.shared
             .lock()

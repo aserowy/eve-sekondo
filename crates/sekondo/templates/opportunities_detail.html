@@ -30,11 +30,25 @@
   <div class="chart"><canvas data-chart="{{ c.kind }}" data-series="{{ c.json }}" role="img" aria-label="{{ c.title }}"></canvas></div>
 </article>
 {% endfor %}
-{% if !view.next_occurrences.is_empty() %}
-<section id="next">
-  <h2>Next occurrences (EVE time)</h2>
-  <ul class="next-occurrences">
-    {% for at in view.next_occurrences %}<li>{{ at }}</li>{% endfor %}
-  </ul>
+{% if !view.windows.is_empty() %}
+<section id="windows">
+  <h2>Recurring windows</h2>
+  <table class="windows">
+    <thead>
+      <tr><th>Window</th><th>Dir</th><th>Price</th><th>Occurrences</th><th>V_win</th><th>Next starts (UTC)</th></tr>
+    </thead>
+    <tbody>
+      {% for w in view.windows %}
+      <tr{% if w.chosen %} class="chosen" aria-current="true"{% endif %}>
+        <th scope="row">{{ w.label }}{% if w.chosen %} <small>(this row)</small>{% endif %}</th>
+        <td>{{ w.direction }}</td>
+        <td>{{ w.price_label }} {{ w.price }}</td>
+        <td>{{ w.occurrences }}</td>
+        <td>{{ w.v_win }}</td>
+        <td>{% for at in w.next %}{% if !loop.first %}, {% endif %}{{ at }}{% endfor %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
 </section>
 {% endif %}

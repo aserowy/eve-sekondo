@@ -1067,16 +1067,21 @@ async fn item_stats_are_one_row_per_item_and_hold_no_account_data(pool: PgPool) 
         "percent_b",
         "rsi14",
         "indicators_at",
-        "expansion_kind",
-        "expansion_weekday",
-        "expansion_hour",
-        "expansion_sell",
         "expansion_at",
     ] {
         assert!(
             columns.iter().any(|c| c == column),
             "{column} in {columns:?}"
         );
+    }
+    // The windows live in their own table.
+    for column in [
+        "expansion_kind",
+        "expansion_weekday",
+        "expansion_hour",
+        "expansion_sell",
+    ] {
+        assert!(!columns.iter().any(|c| c == column), "{column} is gone");
     }
     assert!(
         !columns
@@ -1361,7 +1366,11 @@ async fn the_rollups_only_read_completed_periods_and_have_policies(pool: PgPool)
         .unwrap();
         assert!(materialized_only, "{view}");
 
-        for proc in ["policy_refresh_continuous_aggregate", "policy_retention"] {
+        for proc in [
+            "policy_refresh_continuous_aggregate",
+            "policy_retention",
+            "policy_compression",
+        ] {
             let jobs: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM timescaledb_information.jobs \
                  WHERE hypertable_name = (SELECT materialization_hypertable_name \
@@ -1376,4 +1385,105 @@ async fn the_rollups_only_read_completed_periods_and_have_policies(pool: PgPool)
             assert_eq!(jobs, 1, "{view} {proc}");
         }
     }
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn the_rollups_are_kept_a_year_and_compressed_after_a_week(pool: PgPool) {
+    for view in ["station_hourly", "station_daily"] {
+        let after = |proc: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, f64>(
+                    "SELECT extract(epoch FROM coalesce( \
+                         (config->>'compress_after')::interval, (config->>'drop_after')::interval))::float8 \
+                     FROM timescaledb_information.jobs \
+                     WHERE hypertable_name = (SELECT materialization_hypertable_name \
+                         FROM timescaledb_information.continuous_aggregates WHERE view_name = $1) \
+                     AND proc_name = $2",
+                )
+                .bind(view)
+                .bind(proc)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        assert_eq!(after("policy_retention").await, 365.0 * 86_400.0, "{view}");
+        assert_eq!(after("policy_compression").await, 7.0 * 86_400.0, "{view}");
+    }
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn the_flag_tables_and_the_windows_have_their_keys(pool: PgPool) {
+    assert_eq!(
+        columns_of(&pool, "station_flagged_days").await,
+        [
+            "day",
+            "expanded_hours",
+            "hours",
+            "region_id",
+            "station_id",
+            "type_id"
+        ]
+    );
+    assert_eq!(
+        columns_of(&pool, "station_expanded_hours").await,
+        [
+            "direction",
+            "extreme_cents",
+            "ratio",
+            "region_id",
+            "start",
+            "station_id",
+            "taken",
+            "type_id"
+        ]
+    );
+    assert_eq!(
+        columns_of(&pool, "station_item_windows").await,
+        [
+            "covered",
+            "direction",
+            "hour",
+            "kind",
+            "occurrences",
+            "price_cents",
+            "region_id",
+            "station_id",
+            "type_id",
+            "v_win",
+            "weekday"
+        ]
+    );
+    let day = "INSERT INTO station_flagged_days VALUES (1, 2, 34, '2026-10-01', 24, 1)";
+    sqlx::query(day).execute(&pool).await.unwrap();
+    assert!(
+        sqlx::query(day).execute(&pool).await.is_err(),
+        "one row per item and day"
+    );
+
+    let hour = "INSERT INTO station_expanded_hours VALUES (1, 2, 34, '2026-10-01 18:00+00', 'dip', 0.8, 8000, 5)";
+    sqlx::query(hour).execute(&pool).await.unwrap();
+    assert!(
+        sqlx::query(hour).execute(&pool).await.is_err(),
+        "one row per item and hour"
+    );
+    assert!(
+        sqlx::query("INSERT INTO station_expanded_hours VALUES (1, 2, 34, '2026-10-02 18:00+00', 'sideways', 0.8, 8000, 5)")
+            .execute(&pool)
+            .await
+            .is_err(),
+        "a direction is dip or spike"
+    );
+
+    let window = "INSERT INTO station_item_windows VALUES (1, 2, 34, 'hour', NULL, 18, 'spike', 12520, 14, 20, 100)";
+    sqlx::query(window).execute(&pool).await.unwrap();
+    assert!(
+        sqlx::query(window).execute(&pool).await.is_err(),
+        "one window per item, kind, weekday, hour and direction, also without a weekday"
+    );
+    sqlx::query("INSERT INTO station_item_windows VALUES (1, 2, 34, 'hour', NULL, 18, 'dip', 8001, 14, 20, 100)")
+        .execute(&pool)
+        .await
+        .unwrap();
 }
